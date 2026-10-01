@@ -34,6 +34,7 @@ __all__ = [
     "DiscOpenError",
     "TitleRipError",
     "DriveEntry",
+    "EncodeCancelled",
     "parse_line",
     "find_drives",
     "scan_disc",
@@ -74,6 +75,16 @@ class DiscOpenError(MakeMkvError):
 
 class TitleRipError(MakeMkvError):
     """One or more titles failed to rip (MSG 5003 / zero saved)."""
+
+
+class EncodeCancelled(RuntimeError):
+    """Run cancelled by the user (rip or encode path).
+
+    run_pipeline attaches the partial PipelineResult to .result before
+    re-raising, so jobs completed before the cancel keep completed=True.
+    """
+
+    result = None
 
 
 def _fields(payload: str) -> list[str]:
@@ -138,8 +149,24 @@ class DriveEntry:
         return self.status == 2 and self.disc_type is not None
 
 
-def make_runner(timeout: float | None = None) -> Runner:
-    """Build the default subprocess runner that streams makemkvcon stdout."""
+class _CancelState:
+    """Shared handle between a runner and its caller: cancel kills the child."""
+
+    def __init__(self):
+        self.requested = False
+        self.proc: subprocess.Popen | None = None
+
+    def cancel(self) -> bool:
+        self.requested = True
+        return True
+
+
+def make_runner(timeout: float | None = None, cancel_state: _CancelState | None = None) -> Runner:
+    """Build the default subprocess runner that streams makemkvcon stdout.
+
+    cancel_state, when given, is linked to the spawned Popen so a cancel
+    request can terminate makemkvcon mid-rip (GeneratorExit propagates).
+    """
 
     def run(binary: str, args: list[str]) -> Iterator[str]:
         binary = resolve_makemkvcon(binary)
@@ -157,15 +184,34 @@ def make_runner(timeout: float | None = None) -> Runner:
                 "makemkvcon not found on PATH. Install MakeMKV from "
                 "https://www.makemkv.com/download/ and restart the app."
             ) from exc
+        if cancel_state is not None:
+            cancel_state.proc = proc
         assert proc.stdout is not None
         try:
             for raw in proc.stdout:
+                if cancel_state is not None and cancel_state.requested:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    raise EncodeCancelled("rip cancelled by user")
                 yield raw.rstrip("\r\n")
         finally:
             proc.stdout.close()
-            rc = proc.wait(timeout=timeout)
-            if rc != 0:
-                raise MakeMkvError(f"makemkvcon exited with code {rc}")
+            # GeneratorExit lands here when the caller stops consuming
+            # lines mid-rip (cancel path): terminate instead of waiting
+            # out a multi-hour rip.
+            if cancel_state is not None and cancel_state.requested:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            else:
+                rc = proc.wait(timeout=timeout)
+                if rc != 0:
+                    raise MakeMkvError(f"makemkvcon exited with code {rc}")
 
     return run
 
@@ -252,11 +298,14 @@ def rip_titles(
     runner: Runner | None = None,
     on_progress: Callable[[float, tuple], None] | None = None,
     timeout: float | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> list[str]:
     """Rip the given title ids to MKV files in outdir; return created paths.
 
     `on_progress(fraction, prgv)` fires on every PRGV line (fraction is
-    current/max from MakeMKV's constant 65536 scale).
+    current/max from MakeMKV's constant 65536 scale). cancel() -> True
+    terminates makemkvcon (default runner) or stops consuming output
+    mid-rip and raises EncodeCancelled.
     """
     run = runner or make_runner(timeout)
     args = [
@@ -270,6 +319,8 @@ def rip_titles(
     saved: list[str] = []
     failures: list[str] = []
     for line in run(binary, args):
+        if cancel is not None and cancel():
+            raise EncodeCancelled("rip cancelled by user")
         kind, payload = parse_line(line)
         if kind == "MSG":
             code, _flags, _count, text, params = payload

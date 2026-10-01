@@ -50,6 +50,11 @@ from ..tmdb import lookup_movie, season_episode_titles
 from .workers import FetchWorker, RunWorker, ScanWorker
 from .widgets import card_frame, muted, section, EtaProgressBar
 
+# closeEvent wait budgets (ms) for background workers; the run worker
+# gets the longer window because ffmpeg honors its terminate signal.
+_CLOSE_WAIT_SCAN_MS = 3000
+_CLOSE_WAIT_RUN_MS = 30000
+
 
 class MainWindow(QMainWindow):
     def __init__(self, settings):
@@ -653,9 +658,23 @@ class MainWindow(QMainWindow):
             self.settings.save()
 
     def _update_previews(self) -> None:
-        """Rebuild the preview filename table + per-episode output names."""
+        """Rebuild the preview filename table from the shared naming pass."""
         if self.disc is None or self.guess is None:
             return
+        outputs = self._plan_output_names()
+        self.outputs_table.setRowCount(len(outputs))
+        for row, (tid, fname) in enumerate(outputs):
+            title = self.disc.title(tid)
+            self.outputs_table.setItem(row, 0, QTableWidgetItem(
+                (title.title_name if title else f"Title {tid}") or f"Title {tid}"))
+            self.outputs_table.setItem(row, 1, QTableWidgetItem(fname))
+        self.outputs_table.resizeColumnsToContents()
+
+    def _plan_output_names(self) -> list[tuple[int, str]]:
+        """(tid, output filename) pairs - the one naming pass shared by
+        _update_previews and _start_run so previews and the run plan agree."""
+        if self.disc is None or self.guess is None:
+            return []
         season = self.spin_season.value()
         start = self.spin_start_ep.value()
         name = (
@@ -668,10 +687,10 @@ class MainWindow(QMainWindow):
         if self.guess.is_series:
             tids = self.guess.episode_tids
             base_names = {
-                self.disc.title(t).tid: self.disc.title(t).filename
+                t: self.disc.title(t).filename
                 for t in tids if self.disc.title(t)
             }
-            outputs = episode_output_names(
+            return episode_output_names(
                 name, season,
                 start_episode=start,
                 episode_tids=tids,
@@ -679,22 +698,10 @@ class MainWindow(QMainWindow):
                 base_names=base_names,
                 title_overrides=self._title_overrides,
             )
-            self.outputs_table.setRowCount(len(outputs))
-            for row, (tid, fname) in enumerate(outputs):
-                self.outputs_table.setItem(row, 0, QTableWidgetItem(
-                    self.disc.title(tid).title_name or f"Title {tid}"))
-                self.outputs_table.setItem(row, 1, QTableWidgetItem(fname))
-            self.outputs_table.resizeColumnsToContents()
-        else:
-            main = main_feature(self.disc)
-            if not main:
-                return
-            fname = movie_output_name(name, year=year)
-            self.outputs_table.setRowCount(1)
-            self.outputs_table.setItem(0, 0, QTableWidgetItem(
-                main.title_name or f"Title {main.tid}"))
-            self.outputs_table.setItem(0, 1, QTableWidgetItem(fname))
-            self.outputs_table.resizeColumnsToContents()
+        main = main_feature(self.disc)
+        if not main:
+            return []
+        return [(main.tid, movie_output_name(name, year=year))]
 
     def _toggle_monitor(self, checked: bool) -> None:
         self.settings.monitor_enabled = checked
@@ -831,6 +838,23 @@ class MainWindow(QMainWindow):
             "tid_names": {},
         }
 
+        # Populate the run plan with the same naming pass the user saw in
+        # the preview: the monitor's jobs_total and the overall progress
+        # bar are computed from this list.
+        outputs = self._plan_output_names()
+        plan["jobs"] = [
+            {
+                "tid": tid,
+                "output_name": fname,
+                "duration_seconds": (
+                    self.disc.title(tid).duration_seconds
+                    if self.disc.title(tid) else 0
+                ),
+            }
+            for tid, fname in outputs
+        ]
+        plan["tid_names"] = {tid: fname for tid, fname in outputs}
+
         self._nav_to(3)
         self.progress_stage.setText("Starting ...")
         self.stage_bar.reset()
@@ -855,9 +879,8 @@ class MainWindow(QMainWindow):
         self.progress_stage.setText(msg)
         self.log_text.setText(msg)
 
-    def _run_progress(self, job_name: str, frac: float, eta: float | None) -> None:
+    def _run_progress(self, job_name: str, tid: int, frac: float, eta: float | None) -> None:
         self.progress_current.setText(job_name)
-        self._progress_frac = frac
         self.stage_bar.set_value(frac, eta)
         if eta is not None:
             self.statusBar().showMessage(
@@ -865,12 +888,12 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"{job_name}: {int(frac*100)}%")
 
-        # Overall = done jobs + current fraction
-        total = len(self.run_worker.plan.get("jobs", []))
-        done_frac = 0
-        if self.run_worker.plan.get("jobs"):
-            done_frac = sum(1.0 for j in self.run_worker.plan["jobs"]) / total
-        self.overall_bar.set_value(done_frac + frac / max(total, 1))
+        # Overall = jobs already completed (index of the current tid in
+        # the plan; jobs run in order) + current fraction, over the total.
+        jobs = self.run_worker.plan.get("jobs", [])
+        total = max(len(jobs), 1)
+        done = next((i for i, j in enumerate(jobs) if j.get("tid") == tid), 0)
+        self.overall_bar.set_value((done + frac) / total)
 
     def _run_done(self, result) -> None:
         self.btn_cancel.setEnabled(False)
@@ -904,10 +927,28 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+            # Signal a graceful stop first so ffmpeg gets its terminate
+            # window (partial MP4 may be discarded, temp files kept).
+            self.run_worker.cancel()
         stop_server()
-        for worker in (self.scan_worker, self.run_worker, self.fetch_worker):
+        for worker in (self.scan_worker, self.fetch_worker):
             if worker and worker.isRunning():
-                worker.wait(3000)
+                worker.wait(_CLOSE_WAIT_SCAN_MS)
+        if self.run_worker and self.run_worker.isRunning():
+            if not self.run_worker.wait(_CLOSE_WAIT_RUN_MS):
+                # Last resort: the thread ignored cancel for 30 s (ffmpeg
+                # normally exits within its 10 s terminate window). kill()
+                # the OS thread rather than leak a live encode into a
+                # destroyed window - documented behavior for stuck runs.
+                self.run_worker.terminate()
+                self.run_worker.wait(3000)
+        # Never accept() while a QThread is still running: a live thread
+        # emitting into a destroyed QWidget crashes the app.
+        if ((self.scan_worker and self.scan_worker.isRunning())
+                or (self.fetch_worker and self.fetch_worker.isRunning())
+                or (self.run_worker and self.run_worker.isRunning())):
+            event.ignore()
+            return
         event.accept()
 
     # ------------------------------------------------------------------

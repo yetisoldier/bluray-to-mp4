@@ -10,6 +10,7 @@ runner records where the SRT will go.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -17,7 +18,15 @@ from dataclasses import dataclass, field
 from .binaries import resolve_ffmpeg
 from .encode import EncodePlan, build_encode_args
 from .ffprobe import ProbedStream, is_interlaced, nth_of_type, probe_streams
-from .makemkv import Runner, find_drives, make_runner, rip_titles, scan_disc
+from .makemkv import (
+    EncodeCancelled,
+    Runner,
+    _CancelState,
+    find_drives,
+    make_runner,
+    rip_titles,
+    scan_disc,
+)
 from .naming import movie_output_name
 from .recommend import Selection, recommend_title
 from .series import detect_series, episode_output_names, main_feature
@@ -30,6 +39,8 @@ if False:  # pragma: no cover - typing only
 __all__ = [
     "TitleJob",
     "PipelineResult",
+    "EncodeCancelled",
+    "EncodeError",
     "detect_encoder",
     "run_pipeline",
 ]
@@ -37,11 +48,6 @@ __all__ = [
 
 class EncodeError(RuntimeError):
     """ffmpeg encode failed."""
-
-
-class EncodeCancelled(RuntimeError):
-    """Run cancelled by the user. Checked between titles and during
-    encodes; the rip step completes its current title first."""
 
 
 @dataclass
@@ -143,7 +149,6 @@ def execute_encode(
     )
     total_us = max(duration_seconds, 1) * 1_000_000
     started = time.time()
-    eta_sampled: bool = False
     assert proc.stdout is not None
     try:
         for line in proc.stdout:
@@ -164,7 +169,6 @@ def execute_encode(
                 if frac > 0.002:  # enough samples for a stable rate
                     elapsed = time.time() - started
                     eta = max(elapsed / frac - elapsed, 0.0)
-                    eta_sampled = True
                 on_progress(frac, eta)
     finally:
         proc.stdout.close()
@@ -201,12 +205,35 @@ def run_pipeline(
     dry_run=True builds and returns the full plan (rip/encode arguments
     included) without touching makemkvcon or ffmpeg beyond scanning the
     disc, which makes the whole chain testable offline.
+
+    cancel: callable returning True -> stop the run. Raise EncodeCancelled
+    at the next check (between titles, mid-rip, mid-encode, before OCR);
+    the exception carries the partial PipelineResult on .result.
+
+    on_progress update tuples, one per progress line from each stage:
+      ("rip", tid, frac)                 - MakeMKV PRGV progress, no ETA
+      ("encode", tid, frac, eta-or-None) - ffmpeg progress; ETA-seconds is
+                                          None until frac passes 0.2%, a
+                                          float estimate afterwards
     """
     def stage(msg: str):
         if on_stage is not None:
             on_stage(msg)
 
-    runner = mkv_runner or make_runner()
+    runner = mkv_runner
+    cancel_state: _CancelState | None = None
+    if runner is None:
+        cancel_state = _CancelState()
+        if cancel is not None:
+            orig_cancel = cancel
+
+            def cancel_and_flag():  # noqa: F811
+                if orig_cancel():
+                    cancel_state.requested = True
+                return cancel_state.requested
+
+            cancel = cancel_and_flag
+        runner = make_runner(cancel_state=cancel_state)
     stage(f"Scanning disc {index} ...")
     disc = scan_disc(index, runner=runner)
     guess = detect_series(disc)
@@ -319,66 +346,90 @@ def run_pipeline(
         return result
 
     # Real run: rip, probe, resolve, encode - one title at a time.
-    for job in result.jobs:
-        title = disc.title(job.tid)
-        stage(f"Ripping title {job.tid} ({job.output_name}) ...")
-        saved = rip_titles(
-            index, [job.tid], rip_dir, runner=runner,
-            on_progress=lambda frac, prgv: on_progress(("rip", job.tid, frac))
-            if on_progress else None,
-        )
-        job.input_path = saved[0] if saved else job.input_path
-
-        stage(f"Probing {os.path.basename(job.input_path)} ...")
-        streams = probe_streams(job.input_path)
-        audio_ord = _audio_ordinal(title, job.selection.audio_sid)
-        audio = nth_of_type(streams, "audio", audio_ord or 0)
-        if audio is None:
-            raise RuntimeError(
-                f"expected an audio stream in {job.input_path}; rip may be corrupt"
+    try:
+        for job in result.jobs:
+            if cancel is not None and cancel():
+                raise EncodeCancelled("cancelled between titles")
+            title = disc.title(job.tid)
+            stage(f"Ripping title {job.tid} ({job.output_name}) ...")
+            saved = rip_titles(
+                index, [job.tid], rip_dir, runner=runner,
+                on_progress=lambda frac, prgv: on_progress(("rip", job.tid, frac))
+                if on_progress else None,
+                cancel=cancel,
             )
-        deinterlace = is_interlaced(streams) if force_deinterlace is None else force_deinterlace
+            job.input_path = saved[0] if saved else job.input_path
 
-        sub_ord = _subtitle_ordinal(title, job.selection.subtitle_sid)
-        sub = nth_of_type(streams, "subtitle", sub_ord) if sub_ord is not None else None
-        job.subtitle_stream_index = sub.index if sub else None
+            stage(f"Probing {os.path.basename(job.input_path)} ...")
+            streams = probe_streams(job.input_path)
+            audio_ord = _audio_ordinal(title, job.selection.audio_sid)
+            audio = nth_of_type(streams, "audio", audio_ord or 0)
+            if audio is None:
+                raise RuntimeError(
+                    f"expected an audio stream in {job.input_path}; rip may be corrupt"
+                )
+            deinterlace = is_interlaced(streams) if force_deinterlace is None else force_deinterlace
 
-        stage(f"Encoding {job.output_name} ({result.encoder}) ...")
-        job.encode_args = build_encode_args(
-            EncodePlan(
-                input_path=job.input_path,
-                output_path=os.path.join(outdir, job.output_name),
+            sub_ord = _subtitle_ordinal(title, job.selection.subtitle_sid)
+            sub = nth_of_type(streams, "subtitle", sub_ord) if sub_ord is not None else None
+            job.subtitle_stream_index = sub.index if sub else None
+
+            stage(f"Encoding {job.output_name} ({result.encoder}) ...")
+            job.encode_args = build_encode_args(
+                EncodePlan(
+                    input_path=job.input_path,
+                    output_path=os.path.join(outdir, job.output_name),
+                    duration_seconds=title.duration_seconds,
+                    media_type=disc.media_type or "bluray",
+                    encoder=result.encoder,
+                    audio_sid=nth_ordinal(streams, audio),
+                    deinterlace=deinterlace,
+                )
+            )
+            execute_encode(
+                job.encode_args,
                 duration_seconds=title.duration_seconds,
-                media_type=disc.media_type or "bluray",
-                encoder=result.encoder,
-                audio_sid=nth_ordinal(streams, audio),
-                deinterlace=deinterlace,
+                on_progress=lambda frac, eta: on_progress(
+                    ("encode", job.tid, frac, eta)
+                )
+                if on_progress else None,
+                cancel=cancel,
             )
-        )
-        execute_encode(
-            job.encode_args,
-            duration_seconds=title.duration_seconds,
-            on_progress=lambda frac: on_progress(("encode", job.tid, frac))
-            if on_progress else None,
-        )
-        job.completed = True
+            job.completed = True
 
-        if sub is not None:
-            stage(f"OCR subtitles for {job.output_name} ...")
-            video_out = os.path.join(outdir, job.output_name)
-            try:
-                ocr = run_subtitle_ocr(
-                    job.input_path, sub.index, video_out, workdir=rip_dir,
-                )
-                job.srt_path = ocr.srt_path
-                result.warnings.extend(f"{job.output_name}: {n}" for n in ocr.notes)
-            except SubtitleOcrError as exc:
-                result.warnings.append(
-                    f"{job.output_name}: subtitle OCR failed ({exc}); "
-                    "MP4 was produced without subtitles."
-                )
+            if sub is not None:
+                if cancel is not None and cancel():
+                    raise EncodeCancelled("cancelled before subtitle OCR")
+                stage(f"OCR subtitles for {job.output_name} ...")
+                video_out = os.path.join(outdir, job.output_name)
+                try:
+                    ocr = run_subtitle_ocr(
+                        job.input_path, sub.index, video_out, workdir=rip_dir,
+                    )
+                    job.srt_path = ocr.srt_path
+                    result.warnings.extend(f"{job.output_name}: {n}" for n in ocr.notes)
+                except SubtitleOcrError as exc:
+                    result.warnings.append(
+                        f"{job.output_name}: subtitle OCR failed ({exc}); "
+                        "MP4 was produced without subtitles."
+                    )
 
-        stage(f"Done: {job.output_name}")
+            stage(f"Done: {job.output_name}")
+
+        # Full success + default workdir: the .rip intermediates are
+        # reproducible junk, so reclaim the disk. A caller-supplied
+        # workdir is never touched (it may be shared/persistent).
+        if rip_dir == os.path.join(outdir, ".rip") and all(
+            job.completed for job in result.jobs
+        ):
+            shutil.rmtree(rip_dir, ignore_errors=True)
+    except Exception as exc:
+        # Failure or cancel: keep the intermediates for debugging and
+        # surface the partial result (with this note) on the exception.
+        result.warnings.append(f"Kept intermediates in {rip_dir} for debugging")
+        if getattr(exc, "result", None) is None:
+            exc.result = result
+        raise
 
     return result
 

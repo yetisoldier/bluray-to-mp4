@@ -68,8 +68,8 @@ class RunWorker(QThread):
     """Execute the whole pipeline for the confirmed plan."""
 
     stage = Signal(str)
-    # (stage_name, fraction 0..1, eta_seconds-or-None) for the current job
-    progress = Signal(str, float, object)
+    # (stage_name, tid, fraction 0..1, eta_seconds-or-None) for the current job
+    progress = Signal(str, int, float, object)
     done = Signal(object)          # PipelineResult
     failed = Signal(str)
 
@@ -100,12 +100,13 @@ class RunWorker(QThread):
                 monitor_state.update(stage=msg)
 
             def on_progress(update) -> None:
-                kind, tid, frac = update
+                kind, tid, frac = update[:3]
                 job_name = self.plan.get("tid_names", {}).get(tid, f"title {tid}")
                 eta = None
                 if len(update) > 3:  # encode progress carries an ETA
                     eta = update[3]
-                self.progress.emit(f"{kind.capitalize()}: {job_name}", frac, eta)
+                self.progress.emit(
+                    f"{kind.capitalize()}: {job_name}", tid, frac, eta)
                 monitor_state.update(progress=frac, current_job=job_name,
                                      eta_seconds=eta)
 
