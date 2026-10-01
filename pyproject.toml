@@ -13,5 +13,13 @@ bluray-to-mp4-gui = "bluray_to_mp4.ui.app:main"
 ui = ["PySide6>=6.6"]
 dev = ["pytest>=8", "pyinstaller>=6.5"]
 
+[tool.setuptools.packages.find]
+include = ["bluray_to_mp4", "bluray_to_mp4.*"]
+exclude = ["tests", "packaging"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
