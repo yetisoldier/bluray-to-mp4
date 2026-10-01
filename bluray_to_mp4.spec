@@ -9,7 +9,17 @@ Subtitle Edit remain external installs (see README); the in-app
 dependency checker walks users through them.
 """
 
+import os
+import glob
+
 block_cipher = None
+
+# Optional bundled ffmpeg (downloaded in CI, or placed at
+# packaging/tools/ locally before building). Empty when absent.
+_tools_dir = os.path.join("packaging", "tools")
+_datas = []
+if os.path.isdir(_tools_dir):
+    _datas.append((_tools_dir, "tools"))
 
 hiddenimports = [
     "bluray_to_mp4",
@@ -37,7 +47,7 @@ a = Analysis(
     ["run_app.py"],
     pathex=["."],
     binaries=[],
-    datas=[],
+    datas=_datas,
     hiddenimports=hiddenimports + ["run_app"],
     hookspath=[],
     runtime_hooks=[],
@@ -66,3 +76,5 @@ coll = COLLECT(
     upx=False,
     name="bluray-to-mp4",
 )
+# Keep packaging/tools out of version control; CI downloads ffmpeg there.
+# .gitignore will ignore it.

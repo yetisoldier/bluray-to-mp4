@@ -76,20 +76,28 @@ def episode_output_names(
     episode_tids: list[int],
     episode_titles: dict[int, str] | None = None,
     base_names: dict[int, str] | None = None,
+    title_overrides: dict[int, str] | None = None,
 ) -> list[tuple[int, str]]:
     """Build (tid, output filename) pairs in episode order.
 
     Format: "Series - S01E05 - Episode Title.mp4" (Plex/Jellyfin standard).
-    Falls back to the MakeMKV base name when no episode title is given.
+    Priority per episode: explicit user edit (title_overrides) > fetched
+    title (episode_titles) > disc-derived base name > numbered fallback.
     """
     from .naming import sanitize_filename
 
     episode_titles = episode_titles or {}
+    title_overrides = title_overrides or {}
     base_names = base_names or {}
     out: list[tuple[int, str]] = []
     n = start_episode
     for tid in episode_tids:
-        label = episode_titles.get(tid) or base_names.get(tid) or f"Episode {n}"
+        label = (
+            title_overrides.get(tid)
+            or episode_titles.get(tid)
+            or base_names.get(tid)
+            or f"Episode {n}"
+        )
         fname = f"{sanitize_filename(series_name)} - S{season:02d}E{n:02d} - {sanitize_filename(label)}.mp4"
         out.append((tid, fname))
         n += 1

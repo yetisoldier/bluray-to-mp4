@@ -78,8 +78,8 @@ class EncodePlan:
 
 
 def build_encode_args(plan: EncodePlan) -> list[str]:
-    """Full ffmpeg argument list for one encode."""
-    args = ["ffmpeg", "-y", "-hide_banner", "-nostdin", "-i", plan.input_path]
+    """Full ffmpeg argument list for one encode (without the binary name)."""
+    args = ["-y", "-hide_banner", "-nostdin", "-i", plan.input_path]
 
     # Audio: encode to AAC at the plan's bitrate.
     # TODO(next milestone): resolve audio_sid against the ripped MKV's real

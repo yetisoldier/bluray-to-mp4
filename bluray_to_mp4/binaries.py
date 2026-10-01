@@ -13,11 +13,31 @@ import shutil
 __all__ = ["find_program", "resolve_makemkvcon", "resolve_ffmpeg",
            "resolve_ffprobe", "resolve_subtitle_edit"]
 
-ProgramFiles = os.environ.get("ProgramFiles", r"C:\Program Files")
-ProgramFilesX86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-LocalAppData = os.environ.get("LOCALAPPDATA", "")
-
 def _program_files() -> str:
+    return os.environ.get("ProgramFiles", r"C:\Program Files")
+
+
+def _program_files_x86() -> str:
+    return os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+
+
+def _local_appdata() -> str:
+    return os.environ.get("LOCALAPPDATA", "")
+
+
+def _app_internal_dirs() -> list[str]:
+    """Directories inside the packaged app where bundled tools may live."""
+    import sys
+    internal = []
+    if getattr(sys, "frozen", False):  # PyInstaller
+        internal.append(os.path.join(sys._MEIPASS, "tools"))
+        internal.append(os.path.join(sys.executable, "..", "tools"))
+    return internal
+
+
+def _search_dirs(extra: list[str]) -> list[str]:
+    """PATH first, then bundled-app folders, then system install dirs."""
+    return extra + _app_internal_dirs()
     return os.environ.get("ProgramFiles", r"C:\Program Files")
 
 
@@ -65,8 +85,9 @@ def find_program(
 ) -> str | None:
     """Resolve a program to a full path, or None if not found.
 
-    Order: environment override (path or name), PATH, then each search
-    directory trying each candidate filename.
+    Order: environment override (path or name), PATH, bundled tools inside
+    the packaged app, then each search directory trying each candidate
+    filename.
     """
     if env_var:
         override = os.environ.get(env_var, "").strip()
@@ -79,7 +100,7 @@ def find_program(
     on_path = shutil.which(name)
     if on_path:
         return on_path
-    for directory in search_dirs or []:
+    for directory in _search_dirs(search_dirs or []):
         for candidate in exe_names or [name]:
             full = os.path.join(directory, candidate)
             if os.path.isfile(full):

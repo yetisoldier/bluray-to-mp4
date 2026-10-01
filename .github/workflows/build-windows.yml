@@ -16,6 +16,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Download ffmpeg (win64, static build)
+        shell: pwsh
+        run: |
+          $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-release-essentials.zip"
+          $zipPath = "$env:TEMP\ffmpeg.zip"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -TimeoutSec 300
+          Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\ffmpeg-extract" -Force
+          $binDir = Get-ChildItem "$env:TEMP\ffmpeg-extract" -Recurse -Directory | Where-Object { $_.Name -eq "bin" } | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path "packaging\tools" | Out-Null
+          Copy-Item "$($binDir.FullName)\ffmpeg.exe" "packaging\tools\ffmpeg.exe"
+          Copy-Item "$($binDir.FullName)\ffprobe.exe" "packaging\tools\ffprobe.exe"
+          Write-Host "Bundled ffmpeg/ffprobe into packaging\tools"
+
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip

@@ -68,7 +68,8 @@ class RunWorker(QThread):
     """Execute the whole pipeline for the confirmed plan."""
 
     stage = Signal(str)
-    progress = Signal(float, str)  # fraction, current job name
+    # (stage_name, fraction 0..1, eta_seconds-or-None) for the current job
+    progress = Signal(str, float, object)
     done = Signal(object)          # PipelineResult
     failed = Signal(str)
 
@@ -77,6 +78,11 @@ class RunWorker(QThread):
         self.disc_index = disc_index
         self.plan = plan
         self.settings = settings
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request a graceful stop (current step finishes or ffmpeg halts)."""
+        self._cancelled = True
 
     def run(self) -> None:  # QThread override
         try:
@@ -96,8 +102,12 @@ class RunWorker(QThread):
             def on_progress(update) -> None:
                 kind, tid, frac = update
                 job_name = self.plan.get("tid_names", {}).get(tid, f"title {tid}")
-                self.progress.emit(frac, job_name)
-                monitor_state.update(progress=frac, current_job=job_name)
+                eta = None
+                if len(update) > 3:  # encode progress carries an ETA
+                    eta = update[3]
+                self.progress.emit(f"{kind.capitalize()}: {job_name}", frac, eta)
+                monitor_state.update(progress=frac, current_job=job_name,
+                                     eta_seconds=eta)
 
             result = run_pipeline(
                 self.disc_index,
@@ -108,7 +118,9 @@ class RunWorker(QThread):
                 start_episode=self.plan.get("start_episode", 1),
                 episode_titles=self.plan.get("episode_titles"),
                 year=self.plan.get("year"),
+                title_overrides=self.plan.get("title_overrides"),
                 tmdb_key=(self.settings.tmdb_key or "").strip(),
+                cancel=lambda: self._cancelled,
                 on_stage=on_stage,
                 on_progress=on_progress,
             )

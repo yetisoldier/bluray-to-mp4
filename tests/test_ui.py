@@ -52,7 +52,8 @@ def test_main_window_constructs(qapp, monkeypatch):
     w.show()
     app.processEvents() if False else None
     _pump(qapp, w.scan_worker)
-    assert w.stack.count() == 4
+    assert w.stack.count() == 5
+    assert w.nav_list.count() == 5
     w.close()
 
 
@@ -77,7 +78,7 @@ def test_plan_flow_movie(qapp, monkeypatch):
     _pump(qapp, w2.scan_worker)
     w2.disc = disc
     w2.guess = detect_series(disc)
-    w2._fill_plan_page()
+    w2._fill_review_page()
     assert w2.stack.currentWidget() is not None
 
     # Movie mode: movie group visible, series group hidden.
@@ -102,10 +103,48 @@ def test_plan_flow_series(qapp, monkeypatch):
     _pump(qapp, w.scan_worker)
     w.disc = disc
     w.guess = detect_series(disc)
-    w._fill_plan_page()
+    w._fill_review_page()
     assert w.guess.is_series
     assert w.tracks_table.rowCount() == 4
     assert w.edit_series_name.text() == "Breaking Bad: Season 1: Disc 1"
     first_title = w.tracks_table.item(0, 0).text()
     assert "Breaking Bad" in first_title
+    w.close()
+
+
+def test_output_preview_updates_filenames(qapp, monkeypatch):
+    """Changing season/start-episode updates the output preview table."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    disc = scan_disc(0, runner=fake_runner(SERIES_DISC_OUTPUT.splitlines()))
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+
+    # Default season 1, start-episode 1
+    first = w.outputs_table.item(0, 1).text()
+    assert "S01E01" in first
+
+    # Change to season 2, starting at episode 5
+    w.spin_season.setValue(2)
+    w.spin_start_ep.setValue(5)
+    w._update_previews()
+    first = w.outputs_table.item(0, 1).text()
+    assert "S02E05" in first
+    w.close()
+
+
+def test_progress_page_has_bars(qapp, monkeypatch):
+    """Encode page exposes overall + stage bars with cancel."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.stage_bar.set_value(0.5, 120.0)
+    assert "ETA" in w.stage_bar.eta_label.text()
+    assert callable(getattr(w, "_cancel_run", None))  # cancel method exists
     w.close()

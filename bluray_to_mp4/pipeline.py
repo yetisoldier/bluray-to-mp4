@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 
 from .binaries import resolve_ffmpeg
@@ -22,6 +23,9 @@ from .recommend import Selection, recommend_title
 from .series import detect_series, episode_output_names, main_feature
 from .subtitles import SubtitleOcrError, run_subtitle_ocr
 from .tmdb import TmdbError, lookup_movie, season_episode_titles
+
+if False:  # pragma: no cover - typing only
+    from typing import Callable  # noqa: F401
 
 __all__ = [
     "TitleJob",
@@ -35,12 +39,18 @@ class EncodeError(RuntimeError):
     """ffmpeg encode failed."""
 
 
+class EncodeCancelled(RuntimeError):
+    """Run cancelled by the user. Checked between titles and during
+    encodes; the rip step completes its current title first."""
+
+
 @dataclass
 class TitleJob:
     """One title's full processing result (planned or completed)."""
 
     tid: int
     output_name: str
+    duration_seconds: int = 0
     input_path: str = ""
     encode_args: list[str] = field(default_factory=list)
     selection: Selection | None = None
@@ -114,8 +124,14 @@ def execute_encode(
     duration_seconds: int,
     binary: str = "ffmpeg",
     on_progress=None,
+    cancel=None,
 ) -> None:
-    """Run one ffmpeg encode, reporting progress as a 0..1 fraction."""
+    """Run one ffmpeg encode, reporting progress and optional ETA.
+
+    cancel: callable returning True -> terminate ffmpeg and raise
+    CancelledError. Progress callback receives a 0..1 fraction plus an
+    ETA-seconds estimate once enough samples exist.
+    """
     binary = resolve_ffmpeg(binary)
     proc = subprocess.Popen(
         [binary, *args, "-progress", "pipe:1", "-nostats"],
@@ -126,20 +142,37 @@ def execute_encode(
         errors="replace",
     )
     total_us = max(duration_seconds, 1) * 1_000_000
+    started = time.time()
+    eta_sampled: bool = False
     assert proc.stdout is not None
     try:
         for line in proc.stdout:
+            if cancel is not None and cancel():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                raise EncodeCancelled("cancelled by user")
             if line.startswith("out_time_us=") and on_progress is not None:
                 try:
                     cur = int(line.split("=", 1)[1].strip())
                 except ValueError:
                     continue
-                on_progress(min(cur / total_us, 1.0))
+                frac = min(cur / total_us, 1.0)
+                eta = None
+                if frac > 0.002:  # enough samples for a stable rate
+                    elapsed = time.time() - started
+                    eta = max(elapsed / frac - elapsed, 0.0)
+                    eta_sampled = True
+                on_progress(frac, eta)
     finally:
         proc.stdout.close()
         rc = proc.wait()
-    if rc != 0:
+    if rc != 0 and not (cancel is not None and cancel()):
         raise EncodeError(f"ffmpeg exited with code {rc}")
+    elif cancel is not None and cancel() and rc != 0:
+        raise EncodeCancelled("cancelled by user")
 
 
 def run_pipeline(
@@ -155,6 +188,8 @@ def run_pipeline(
     start_episode: int = 1,
     episode_titles: dict[int, str] | None = None,
     year: int | None = None,
+    title_overrides: dict[int, str] | None = None,
+    cancel: "Callable[[], bool] | None" = None,
     tmdb_key: str = "",
     tmdb_fetcher=None,
     force_deinterlace: bool | None = None,
@@ -213,6 +248,7 @@ def run_pipeline(
             episode_tids=guess.episode_tids,
             episode_titles=episode_titles,
             base_names=base_names,
+            title_overrides=title_overrides,
         )
         selected = {tid: recommend_title(disc.title(tid)) for tid, _ in names}
     else:

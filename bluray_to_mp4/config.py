@@ -34,6 +34,7 @@ class Settings:
     monitor_cfg_version: int = MONITOR_CFG_VERSION
     tmdb_key: str = ""                    # free key: themoviedb.org/settings/api
     last_series_name: str = ""
+    theme: str = "dark"                   # 'dark' | 'light'
     extras: dict = field(default_factory=dict)
 
     @classmethod
