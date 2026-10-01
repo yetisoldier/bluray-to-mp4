@@ -141,14 +141,20 @@ def make_runner(timeout: float | None = None) -> Runner:
     """Build the default subprocess runner that streams makemkvcon stdout."""
 
     def run(binary: str, args: list[str]) -> Iterator[str]:
-        proc = subprocess.Popen(
-            [binary, *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            proc = subprocess.Popen(
+                [binary, *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except FileNotFoundError as exc:
+            raise MakeMkvError(
+                "makemkvcon not found on PATH. Install MakeMKV from "
+                "https://www.makemkv.com/download/ and restart the app."
+            ) from exc
         assert proc.stdout is not None
         try:
             for raw in proc.stdout:
