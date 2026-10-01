@@ -80,7 +80,7 @@ found the hard way on the first real Windows machine.
 
 **Monitor API is read-only by design.** It shares state with the UI via
 in-process callbacks, never accepts requests that mutate anything, and
-defaults to localhost. LAN mode requires an explicit config edit.
+ships LAN-enabled by default (0.0.0.0:8765, baked token) since v0.1.3, with an in-app toggle.
 
 ## Dev log
 

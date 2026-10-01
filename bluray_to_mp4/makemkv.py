@@ -179,7 +179,7 @@ def make_runner(timeout: float | None = None, cancel_state: _CancelState | None 
                 encoding="utf-8",
                 errors="replace",
             )
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, PermissionError, OSError) as exc:
             raise MakeMkvError(
                 "makemkvcon not found on PATH. Install MakeMKV from "
                 "https://www.makemkv.com/download/ and restart the app."

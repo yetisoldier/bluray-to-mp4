@@ -73,10 +73,12 @@ def cmd_run(args) -> int:
         print(msg, flush=True)
 
     def progress(update):
-        kind, tid, frac = update
+        kind, tid, frac = update[:3]  # encode progress may append ETA (4th)
+        eta = update[3] if len(update) > 3 else None
         bar = "#" * int(frac * 40)
+        tail = f" eta {int(eta)//60}:{int(eta)%60:02d}" if eta is not None else ""
         print(
-            f"\r  title {tid} {kind}: [{bar:<40}] {frac * 100:5.1f}%",
+            f"\r  title {tid} {kind}: [{bar:<40}] {frac * 100:5.1f}%{tail}",
             end="",
             flush=True,
         )

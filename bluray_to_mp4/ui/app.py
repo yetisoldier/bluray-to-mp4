@@ -24,6 +24,14 @@ def main() -> int:
                 port=settings.monitor_port,
                 token=settings.monitor_token,
             )
+            # DR7: console shows the monitor URL on startup (BUILD.md promise).
+            from ..monitor import lan_ip
+            host = lan_ip() if settings.monitor_host == "0.0.0.0" else settings.monitor_host
+            print(
+                f"[monitor] http://{host}:{settings.monitor_port}/status "
+                f"(Bearer: {settings.monitor_token})",
+                flush=True,
+            )
         except OSError as exc:
             print(f"[monitor] not started ({exc})", flush=True)
 

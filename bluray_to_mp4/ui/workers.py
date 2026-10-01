@@ -132,10 +132,10 @@ class RunWorker(QThread):
                     monitor_state.job_done(JobRecord(
                         name=job.output_name,
                         kind="series" if result.is_series else "movie",
-                        duration_seconds=0,
+                        duration_seconds=job.duration_seconds,
                         encoder=result.encoder,
                         srt=bool(job.srt_path),
-                        warnings=[],
+                        warnings=([] if job.srt_path else ["subtitle missing"]),
                     ))
             # C6: per-job failures surface as a partial result - the
             # completed outputs keep their records, and the monitor

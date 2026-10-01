@@ -10,7 +10,7 @@ plain-English reasons, while keeping every choice overridable.
 > Personal backups of discs you own only. Keep the tool and its output
 > private; circumvention law varies by jurisdiction.
 
-**Latest release: [v0.1.1](../../releases/tag/v0.1.1)** (Windows x64, exe included)
+**Latest release: [v0.2.1](../../releases/tag/v0.2.1)** (Windows x64, exe included)
 
 ## What it does
 
@@ -183,7 +183,7 @@ pytest
 
 The full pipeline is testable offline: `run_pipeline(..., dry_run=True)`
 plans everything against fixture MakeMKV output without touching discs,
-makemkvcon, or ffmpeg. 53 tests cover the parser, recommendations, series
+makemkvcon, or ffmpeg. 91 tests cover the parser, recommendations, series
 detection, encode args, SRT handling, binary discovery, UI flows (offscreen
 Qt), and the monitoring API.
 

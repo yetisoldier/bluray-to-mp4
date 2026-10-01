@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import webbrowser
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -430,12 +430,17 @@ class MainWindow(QMainWindow):
         series_layout.addWidget(self.edit_series_name, 0, 1)
         series_layout.addWidget(QLabel("Season:"), 0, 2)
         self.spin_season = QSpinBox()
-        self.spin_season.setRange(0, 99)
+        self.spin_season.setRange(1, 99)
+        self.spin_season.setValue(1)
         series_layout.addWidget(self.spin_season, 0, 3)
         series_layout.addWidget(QLabel("First episode #:"), 1, 0)
         self.spin_start_ep = QSpinBox()
         self.spin_start_ep.setRange(1, 9999)
         series_layout.addWidget(self.spin_start_ep, 1, 1)
+        # D3: naming edits refresh the output preview live
+        self.spin_season.valueChanged.connect(lambda *_: self._update_previews())
+        self.spin_start_ep.valueChanged.connect(lambda *_: self._update_previews())
+        self.edit_series_name.textChanged.connect(lambda *_: self._update_previews())
         self.btn_fetch_episodes = QPushButton("Fetch episode titles from TMDB")
         self.btn_fetch_episodes.clicked.connect(self._fetch_episode_titles)
         series_layout.addWidget(self.btn_fetch_episodes, 2, 0, 1, 4)
@@ -446,15 +451,18 @@ class MainWindow(QMainWindow):
         movie_layout.setColumnStretch(1, 1)
         movie_layout.addWidget(QLabel("Title:"), 0, 0)
         self.edit_movie_title = QLineEdit()
+        self.edit_movie_title.textChanged.connect(lambda *_: self._update_previews())
         movie_layout.addWidget(self.edit_movie_title, 0, 1)
         movie_layout.addWidget(QLabel("Year:"), 0, 2)
         self.spin_year = QSpinBox()
         self.spin_year.setRange(0, 9999)
         self.spin_year.setSpecialValueText("none")
+        self.spin_year.valueChanged.connect(lambda *_: self._update_previews())
         movie_layout.addWidget(self.spin_year, 0, 3)
         self.btn_fetch_year = QPushButton("Look up year from TMDB")
         self.btn_fetch_year.clicked.connect(self._fetch_movie_year)
         movie_layout.addWidget(self.btn_fetch_year, 1, 0, 1, 4)
+        self.edit_movie_title.textChanged.connect(lambda *_: self._update_previews())
         top_grid.addWidget(self.group_movie, 0, 0, 1, 2)
 
         layout.addLayout(top_grid)
@@ -486,9 +494,14 @@ class MainWindow(QMainWindow):
             "Filenames below are the exact output names.\n"
             "Edit per-episode titles if you want overrides; changes preview live."))
         self.outputs_table = QTableWidget(0, 2)
-        self.outputs_table.setHorizontalHeaderLabels(["Disc title", "Output filename"])
+        self.outputs_table.setHorizontalHeaderLabels(["Disc title", "Output filename (double-click to edit)"])
         self.outputs_table.horizontalHeader().setStretchLastSection(True)
-        self.outputs_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # Episode titles are user-editable (G13): column 1 edits become
+        # _title_overrides entries and the canonical name is regenerated.
+        self.outputs_table.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.EditKeyPressed)
+        self.outputs_table.itemChanged.connect(self._output_name_edited)
         ol.addWidget(self.outputs_table)
 
         row = QGridLayout()
@@ -655,11 +668,42 @@ class MainWindow(QMainWindow):
             self.settings.outdir = directory
             self.settings.save()
 
+    def _output_name_edited(self, item) -> None:
+        """G13: an edited output filename becomes a per-title override."""
+        if getattr(self, "_in_preview_update", False):
+            return
+        if item.column() != 1 or not self.guess or not self.guess.is_series:
+            return
+        tids = getattr(self, "_preview_tids", [])
+        if item.row() >= len(tids):
+            return
+        tid = tids[item.row()]
+        import re
+        m = re.match(r"^.*? - S\d+E\d+ - (.*)\.mp4$", item.text().strip())
+        label = m.group(1) if m else re.sub(r"\.mp4$", "", item.text().strip())
+        if label:
+            self._title_overrides[tid] = label
+        else:
+            self._title_overrides.pop(tid, None)
+        self._update_previews()
+
     def _update_previews(self) -> None:
+        """Rebuild the preview filename table from the shared naming pass;
+        guard against re-entry from itemChanged signals fired mid-rebuild."""
+        if getattr(self, "_in_preview_update", False):
+            return
+        self._in_preview_update = True
+        try:
+            self._update_previews_impl()
+        finally:
+            self._in_preview_update = False
+
+    def _update_previews_impl(self) -> None:
         """Rebuild the preview filename table from the shared naming pass."""
         if self.disc is None or self.guess is None:
             return
         outputs = self._plan_output_names()
+        self._preview_tids = [tid for tid, _ in outputs]
         self.outputs_table.setRowCount(len(outputs))
         for row, (tid, fname) in enumerate(outputs):
             title = self.disc.title(tid)
@@ -897,9 +941,19 @@ class MainWindow(QMainWindow):
     def _run_done(self, result) -> None:
         self.btn_cancel.setEnabled(False)
         self.stage_bar.set_value(1.0)
-        self.overall_bar.set_value(1.0)
-        self.progress_stage.setText("All done")
-        self.statusBar().showMessage("All outputs finished")
+        errors = getattr(result, "errors", [])
+        if errors:
+            # D5: partial failure must read as partial, never "All done".
+            done = sum(1 for j in result.jobs if j.completed)
+            self.progress_stage.setText(
+                f"Finished with {len(errors)} failure(s): "
+                + "; ".join(errors))
+            self.statusBar().showMessage(
+                f"{done} of {len(result.jobs)} outputs finished");
+        else:
+            self.overall_bar.set_value(1.0)
+            self.progress_stage.setText("All done")
+            self.statusBar().showMessage("All outputs finished")
         self._refresh_history()
         # Navigate back to Review to make it obvious something changed
         self._nav_to(2)

@@ -97,6 +97,9 @@ def _score_sub(stream: StreamInfo) -> tuple[int, list[str]]:
     if is_commentary(stream):
         score -= 1000
         return score, ["Commentary subtitles (skipped)"]
+    if is_descriptive(stream):  # G1: descriptive narration subs are not standard
+        score -= 500
+        return score, ["Descriptive-narration subtitles (skipped)"]
     kind = _classify_sub(stream)
     if kind == "normal":
         score += 30
@@ -145,6 +148,13 @@ def recommend_title(title: Title, *, want_subtitles: bool = True) -> Selection:
     if best_audio is not None:
         sel.audio_sid = best_audio.sid
         sel.audio_reasons = best_reasons
+        # G2: a commentary-only disc must warn, not silently recommend
+        # commentary as if it were the feature audio.
+        if is_commentary(best_audio) or is_descriptive(best_audio):
+            sel.warnings.append(
+                "Only commentary/descriptive audio exists on this title; "
+                "the movie's own audio may be missing - check manually."
+            )
     elif audios:
         sel.warnings.append("No clean audio track found; review manually.")
 

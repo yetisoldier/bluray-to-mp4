@@ -198,8 +198,8 @@ def run_pipeline(
     cancel: "Callable[[], bool] | None" = None,
     tmdb_key: str = "",
     tmdb_fetcher=None,
-    force_deinterlace: bool | None = None,
     want_subtitles: bool = True,
+    force_deinterlace: bool | None = None,
     on_stage=None,
     on_progress=None,
 ) -> PipelineResult:
@@ -244,6 +244,10 @@ def run_pipeline(
     stage(f"Scanning disc {index} ...")
     disc = scan_disc(index, runner=runner)
     guess = detect_series(disc)
+    # G4: B2M_TMDB_KEY env var honored (CLI help promises it); an explicit
+    # tmdb_key argument always wins.
+    if not (tmdb_key or "").strip():
+        tmdb_key = (os.environ.get("B2M_TMDB_KEY", "") or "").strip()
 
     result = PipelineResult(
         disc_name=disc.name,
@@ -388,6 +392,12 @@ def run_pipeline(
                 )
                 sub = nth_of_type(streams, "subtitle", sub_ord) if sub_ord is not None else None
                 job.subtitle_stream_index = sub.index if sub else None
+                # G3: don't silently drop - the recommendation promised a track
+                if sub_ord is not None and sub is None:
+                    result.warnings.append(
+                        f"{job.output_name}: selected subtitle stream missing from "
+                        "ripped MKV; the MP4 ships without subtitles."
+                    )
 
                 stage(f"Encoding {job.output_name} ({result.encoder}) ...")
                 job.encode_args = build_encode_args(

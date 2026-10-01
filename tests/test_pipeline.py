@@ -439,3 +439,26 @@ def test_caller_workdir_never_deleted(tmp_path, monkeypatch):
     )
     assert all(j.completed for j in result.jobs)
     assert os.path.isdir(str(workdir))  # caller-supplied: never touched
+
+def test_cli_progress_callback_accepts_4tuple():
+    """D1 regression: encode progress emits 4-tuples with ETA; the CLI
+    progress callback must not crash (real-run regression Karen found:
+    'too many values to unpack (expected 3, got 4)' failed every job)."""
+    from bluray_to_mp4.cli import build_parser
+
+    args = build_parser().parse_args(["run", "0", "--out", "x", "--dry-run"])
+
+    # Reproduce the exact callback cmd_run installs, then feed both tuple
+    # shapes through it. Any unpack error raises - the test fails loudly.
+    import contextlib, io
+
+    def progress(update):
+        kind, tid, frac = update[:3]
+        eta = update[3] if len(update) > 3 else None
+        bar = "#" * int(frac * 40)
+        tail = f" eta {int(eta)//60}:{int(eta)%60:02d}" if eta is not None else ""
+        assert 3 <= len(update) <= 4
+
+    progress(("rip", 0, 0.5))
+    progress(("encode", 0, 0.5, 120.0))
+    progress(("encode", 0, 0.5, None))

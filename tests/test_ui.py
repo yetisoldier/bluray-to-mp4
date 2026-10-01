@@ -50,7 +50,6 @@ def test_main_window_constructs(qapp, monkeypatch):
 
     w = MainWindow(Settings())
     w.show()
-    app.processEvents() if False else None
     _pump(qapp, w.scan_worker)
     assert w.stack.count() == 5
     assert w.nav_list.count() == 5
@@ -82,7 +81,9 @@ def test_plan_flow_movie(qapp, monkeypatch):
     assert w2.stack.currentWidget() is not None
 
     # Movie mode: movie group visible, series group hidden.
-    assert w2.group_movie.isVisibleTo(w2) or True  # visibility needs show()
+    # Movie naming group content check replaces a vacuous visibility check:
+    # group_movie is not visible-only-on-show() in a stack; the title field
+    # carries the disc label is the meaningful assertion.
     assert w2.edit_movie_title.text() == "Blade Runner 2049"
     assert w2.tracks_table.rowCount() == 1
     # Recommended audio cell names the DTS-HD track, not the commentary.
@@ -267,8 +268,8 @@ def test_start_run_populates_plan(qapp, monkeypatch, tmp_path):
 
     w = _series_window(qapp, monkeypatch)
     w.edit_outdir.setText(str(tmp_path))
-    w.spin_season.setValue(1)  # explicit: spin default is season 0
-    w._update_previews()      # season spin has no auto-refresh signal
+    # D2: season spin starts at 1 (fixed); no manual workaround anymore.
+    # D3: naming edits auto-refresh previews; explicit call not needed.
     w._start_run()
 
     plan = w.run_worker.plan
@@ -328,11 +329,12 @@ def test_run_worker_partial_failure_names_outputs(qapp, monkeypatch, tmp_path):
     from bluray_to_mp4.ui.workers import RunWorker
 
     class _Job:
-        def __init__(self, name, completed, error=None):
+        def __init__(self, name, completed, error=None, duration_seconds=100):
             self.output_name = name
             self.completed = completed
             self.srt_path = None
             self.error = error
+            self.duration_seconds = duration_seconds
 
     class _Result:
         is_series = True
@@ -427,3 +429,82 @@ def test_scan_selected_uses_drive_index_not_row(qapp, monkeypatch):
     w._scan_selected()
 
     assert launched == [2], "scan must use the DriveEntry index, not the row"
+
+def test_series_defaults_start_at_season_1(qapp, monkeypatch):
+    """D2: a fresh series disc must preview S01E01 (spin defaults to 1).
+    Karen's probe proved the old default rendered AND ripped S00E01."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    disc = scan_disc(0, runner=fake_runner(SERIES_DISC_OUTPUT.splitlines()))
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+    assert w.spin_season.value() == 1
+    assert w.spin_start_ep.value() == 1
+    first = w.outputs_table.item(0, 1).text()
+    assert "S01E01" in first and "S00E00" not in first
+    w.close()
+
+
+def test_naming_edits_refresh_previews(qapp, monkeypatch):
+    """D3: season/episode/name/year edits re-render the outputs table
+    without any manual refresh call (Karen: no signals were wired)."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    disc = scan_disc(0, runner=fake_runner(SERIES_DISC_OUTPUT.splitlines()))
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+    qapp.processEvents()
+
+    first = w.outputs_table.item(0, 1).text()
+    assert "S01E01" in first
+    w.spin_season.setValue(2)   # signal-driven refresh
+    qapp.processEvents()
+    first = w.outputs_table.item(0, 1).text()
+    assert "S02E01" in first
+    w.edit_series_name.setText("Better Name")
+    qapp.processEvents()
+    first = w.outputs_table.item(0, 1).text()
+    assert first.startswith("Better Name - S02E01")
+    w.close()
+
+
+def test_episode_title_edit_overrides_name(qapp, monkeypatch):
+    """G13: editing an output-name cell updates _title_overrides; the
+    regenerated name keeps the SxxEyy prefix but swaps the title."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    disc = scan_disc(0, runner=fake_runner(SERIES_DISC_OUTPUT.splitlines()))
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+    qapp.processEvents()
+
+    # Simulate a user editing episode 2's title
+    row1 = w.outputs_table.item(1, 1)
+    row1.setText("Breaking Bad - S01E02 - Cat in the Bag!.mp4")
+    qapp.processEvents()
+    # The override is stored against the real tid
+    assert 0 not in w._title_overrides  # row 0 untouched
+    tids = getattr(w, "_preview_tids", [])
+    assert w._title_overrides.get(tids[1]) == "Cat in the Bag!"
+    # And the canonical output name regenerated accordingly
+    # The series name field auto-filled from the disc label (colons dropped
+    # by sanitize); the edited title cell keeps the SxxEyy prefix and swaps
+    # only the title portion.
+    assert w.outputs_table.item(1, 1).text() == \
+        "Breaking Bad Season 1 Disc 1 - S01E02 - Cat in the Bag!.mp4"
+    first = w.outputs_table.item(0, 1).text()
+    assert "S01E01" in first  # untouched row unchanged
+    w.close()

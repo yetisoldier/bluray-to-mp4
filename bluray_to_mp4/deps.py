@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .binaries import find_program, resolve_makemkvcon
+from .binaries import find_program
 from . import binaries
 
 __all__ = ["DependencyCheck", "check_all", "MAKEMKV_URL", "FFMPEG_URL",
@@ -74,7 +74,11 @@ def check_makemkv() -> DependencyCheck:
         )
     m = re.search(r"MakeMKV\s+v([\d.]+)", proc.stdout)
     version = m.group(1) if m else "unknown"
-    expired = "5055" in proc.stdout or "5021" in proc.stdout
+    # G8: structured MSG-code match, not substring (a benign file size
+    # containing "5055" must not trip this).
+    expired = bool(re.search(r"^\s*MSG:(5021|5055),", proc.stdout, re.M)) or (
+        "evaluation period has expired" in proc.stdout.lower())
+    
     if expired:
         return DependencyCheck(
             "MakeMKV", False,
@@ -92,10 +96,7 @@ def check_ffmpeg() -> DependencyCheck:
         found = find_program(
             binary,
             env_var="B2M_FFMPEG",
-            search_dirs=[
-                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links"),
-                r"C:\ffmpeg\bin",
-            ],
+            search_dirs=binaries._ffmpeg_dirs(),
             exe_names=["ffmpeg.exe", "ffmpeg"],
         )
         if found:
