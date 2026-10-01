@@ -139,20 +139,14 @@ Force an encoder with `--encoder nvenc` or `--encoder x265` (default: auto).
 
 ## Remote monitoring
 
-The app runs a read-only status server (default `127.0.0.1:8765`). To watch
-rips from another machine on your LAN, edit
-`%USERPROFILE%\.bluray-to-mp4\config.json`:
+The app runs a read-only status server. **Since this is a private
+repository, LAN monitoring ships enabled by default** (`0.0.0.0:8765` with
+a baked token) — no configuration needed.
 
-```json
-{
-  "monitor_enabled": true,
-  "monitor_host": "0.0.0.0",
-  "monitor_port": 8765,
-  "monitor_token": "<a long random string>"
-}
-```
-
-Then from the other machine:
+- **Turn it on/off**: the "LAN monitoring" checkbox on the main screen
+  starts/stops the server live and remembers your choice. The status
+  line shows the LAN URL when it's on.
+- **Check progress** from another machine:
 
 ```
 curl -H "Authorization: Bearer <token>" http://<windows-pc>:8765/status
@@ -160,8 +154,14 @@ curl -H "Authorization: Bearer <token>" http://<windows-pc>:8765/history
 curl http://<windows-pc>:8765/health        # token-free liveness ping
 ```
 
-The server is strictly read-only: it reports progress and can never trigger
-rips, encodes, or setting changes.
+The baked token is `b2m-mon-7c4f9a2e-8d31-4b6c-9e2f-1a5d3c8e7f42`
+(`bluray_to_mp4/config.py`); change it in
+`%USERPROFILE%\.bluray-to-mp4\config.json` if you ever want a fresh
+one. Windows Firewall will prompt on first launch — allow it on private
+networks so the status page is reachable from the LAN.
+
+The server is strictly read-only: it reports progress and can never
+trigger rips, encodes, or setting changes.
 
 ## Troubleshooting
 
@@ -172,7 +172,7 @@ rips, encodes, or setting changes.
 | "Failed to open disc" | Check the drive letter, clean the disc, confirm it's a video disc. |
 | Encode is slow | No NVENC detected (the Setup screen says). Update the NVIDIA driver, or accept x265 mode. |
 | No subtitles next to the MP4 | Subtitle Edit (optional) isn't installed, or OCR found no usable cues; the run log says which. |
-| Monitor unreachable from LAN | Set `monitor_host` to `0.0.0.0` in config.json and allow the port through Windows Firewall. |
+| Monitor unreachable from LAN | Check the "LAN monitoring" checkbox is on (main screen). Windows Firewall prompts on first launch — allow it on private networks. |
 
 ## Development
 

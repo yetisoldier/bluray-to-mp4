@@ -58,3 +58,20 @@ taskbar) and double-click.
 |-----|------|------|
 | v0.1.0 | 2026-10-01 | First packaged exe (CI build) |
 | v0.1.1 | 2026-10-01 | Discovery layer: finds MakeMKV/ffmpeg/Subtitle Edit outside PATH |
+| v0.1.2 | 2026-10-01 | TMDB episode-title + movie-year autofill (issue #6 closed) |
+| v0.1.3 | 2026-10-01 | LAN monitoring on by default + in-app on/off toggle |
+
+## Remote monitoring (for Jarvis)
+
+Ships enabled (v0.1.3+): the read-only status server binds
+`0.0.0.0:8765` with a baked token (`bluray_to_mp4/config.py`). Eric can
+toggle it with the "LAN monitoring" checkbox in the app; the choice
+persists in `%USERPROFILE%\.bluray-to-mp4\config.json`. Windows
+Firewall prompts on first launch - allow on private networks.
+
+Query from the agent box:
+
+```
+curl -H "Authorization: Bearer <baked token from config.py>" http://<windows-pc>:8765/status
+curl http://<windows-pc>:8765/health   # token-free liveness ping
+```

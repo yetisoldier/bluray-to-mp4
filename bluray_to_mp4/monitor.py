@@ -218,6 +218,27 @@ class MonitorServer(ThreadingHTTPServer):
         self.token = token
 
 
+def lan_ip() -> str:
+    """Best-effort LAN IPv4 address (no packet is actually sent)."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))  # external route hint; nothing sent
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    return "127.0.0.1"
+
+
+active_server: MonitorServer | None = None
+"""The running monitor instance, if any (owned by start/stop_server)."""
+
+
 def start_server(
     *,
     host: str = "127.0.0.1",
@@ -229,12 +250,31 @@ def start_server(
 
     The server is read-only: it can never trigger rips, encodes, or
     configuration changes. Bind host 0.0.0.0 and set a token for LAN
-    monitoring from another machine.
+    monitoring from another machine. Idempotent: if a server is already
+    running (started through this helper), it is returned as-is so UI
+    toggles can't stack duplicate listeners.
     """
+    global active_server
+    if active_server is not None:
+        host, port = active_server.server_address
+        base = f"http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}"
+        return active_server, base
     monitor_state = monitor_state or state
     server = MonitorServer((host, port), monitor_state, token)
     thread = threading.Thread(target=server.serve_forever, daemon=True,
-                             name="b2m-monitor")
+                              name="b2m-monitor")
     thread.start()
     base = f"http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}"
+    active_server = server
     return server, base
+
+
+def stop_server() -> bool:
+    """Stop the running monitor (the UI toggle's 'off' path)."""
+    global active_server
+    if active_server is None:
+        return False
+    server, active_server = active_server, None
+    server.shutdown()
+    server.server_close()
+    return True

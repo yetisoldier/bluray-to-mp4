@@ -22,8 +22,14 @@ def server():
     state = MonitorState()
     srv, base = start_server(host="127.0.0.1", port=0, token="s3cret",
                              monitor_state=state)
+    # start_server is idempotent (v0.1.3): a fresh monitor_state must never
+    # be handed a reused global server, so reset the global after each
+    # test to keep every case isolated on its own ephemeral port.
     yield srv, f"http://127.0.0.1:{srv.server_address[1]}", state
     srv.shutdown()
+    srv.server_close()
+    import bluray_to_mp4.monitor as mon
+    mon.active_server = None
 
 
 def test_health_open_status_token_gated(server):

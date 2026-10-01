@@ -2,6 +2,30 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.1.3] - 2026-10-01
+
+### Added
+
+- **LAN monitoring on by default with an in-app on/off toggle.** Since
+  this is a private repository, the read-only status server now ships
+  enabled (`0.0.0.0:8765`, baked token) so rip progress can be checked
+  from another machine with zero manual configuration. A checkbox on
+  the main screen ("LAN monitoring") starts and stops the server live
+  and persists the choice; the status line shows the LAN URL when on.
+  The server remains strictly read-only: it reports progress and can
+  never trigger rips, encodes, or settings changes.
+- `monitor.stop_server()` + idempotent `start_server` (UI toggles can't
+  stack duplicate listeners); `lan_ip()` helper for the status line.
+- Settings migration: pre-v0.1.3 configs adopt the LAN defaults;
+  configs at the current version are honored exactly as written.
+
+### Notes
+
+- Windows Firewall will prompt on first launch when LAN monitoring is
+  enabled; allow it (private networks) so the status page is reachable.
+- To disable everywhere, uncheck "LAN monitoring" once - the choice
+  persists.
+
 ## [0.1.2] - 2026-10-01
 
 ### Added

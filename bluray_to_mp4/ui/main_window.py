@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from ..deps import check_all, missing_required
 from ..makemkv import BetaKeyExpiredError, DiscOpenError, MakeMkvError
 from ..models import Disc
+from ..monitor import lan_ip, start_server, stop_server
 from ..recommend import recommend_title
 from ..series import detect_series, main_feature
 from ..tmdb import TmdbError, lookup_movie, season_episode_titles
@@ -302,6 +303,11 @@ class MainWindow(QMainWindow):
             "and year autofill")
         self.edit_tmdb_key.setEchoMode(QLineEdit.EchoMode.Password)
         grid_row.addWidget(self.edit_tmdb_key, 3, 1)
+        self.check_monitor = QCheckBox(
+            "LAN monitoring (let Jarvis check rip progress from the home server)")
+        self.check_monitor.setChecked(self.settings.monitor_enabled)
+        self.check_monitor.toggled.connect(self._toggle_monitor)
+        grid_row.addWidget(self.check_monitor, 4, 0, 1, 2)
         row.addLayout(grid_row)
         row.addStretch()
         layout.addLayout(row)
@@ -380,6 +386,34 @@ class MainWindow(QMainWindow):
         # Episode numbering is applied in the pipeline from season/start-episode;
         # this preview keeps the table's title column honest for movie mode.
         pass
+
+    # ------------------------------------------------------------------
+    # Monitor toggle
+
+    def _toggle_monitor(self, checked: bool) -> None:
+        """Start/stop the LAN status server live; persist the choice."""
+        self.settings.monitor_enabled = checked
+        try:
+            if checked:
+                _, base = start_server(
+                    host=self.settings.monitor_host,
+                    port=self.settings.monitor_port,
+                    token=self.settings.monitor_token,
+                )
+                where = lan_ip()
+                port = self.settings.monitor_port
+                self.tmdb_status.setText(
+                    f"Monitoring on: http://{where}:{port} "
+                    f"(read-only, token-protected)")
+            else:
+                stop_server()
+                self.tmdb_status.setText("Monitoring off.")
+            self.settings.save()
+        except OSError as exc:
+            self.settings.monitor_enabled = False
+            self.check_monitor.setChecked(False)
+            self.tmdb_status.setText(
+                f"Monitor failed to start (port busy?): {exc}")
 
     # ------------------------------------------------------------------
     # TMDB autofill (issue #6)

@@ -1,4 +1,4 @@
-"""UI entry point: start the monitor, then the desktop window."""
+"""UI entry point: start the monitor per settings, then the desktop window."""
 
 from __future__ import annotations
 
@@ -19,12 +19,11 @@ def main() -> int:
     settings = load_settings()
     if settings.monitor_enabled:
         try:
-            _, base_url = start_server(
+            start_server(
                 host=settings.monitor_host,
                 port=settings.monitor_port,
                 token=settings.monitor_token,
             )
-            print(f"[monitor] {base_url}/status", flush=True)
         except OSError as exc:
             print(f"[monitor] not started ({exc})", flush=True)
 
