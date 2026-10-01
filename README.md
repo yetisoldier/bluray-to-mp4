@@ -25,6 +25,9 @@ plain-English reasons, while keeping every choice overridable.
   no DVD upscaling (native SD looks the same at half the size)
 - **Subtitles**: Blu-ray PGS/DVD VOBsub tracks are OCR'd to sidecar `.srt`
   files named to match the video, so every player picks them up
+- **TMDB autofill (optional)**: with a free TMDB key, episode titles land in
+  the filenames automatically (`Show - S01E05 - Actual Title.mp4`) and movies
+  get their year appended (`Movie Title (2019).mp4`)
 - **Monitoring**: built-in read-only HTTP API so progress can be checked
   from another machine on the LAN
 
@@ -47,6 +50,7 @@ ships as a single folder exe and needs the tools below installed once.
 | **Subtitle Edit** | OCR of image-based subtitles (PGS/VOBsub) to SRT text. | [github.com/SubtitleEdit/subtitleedit/releases](https://github.com/SubtitleEdit/subtitleedit/releases) - run the installer | Without it, MP4s are produced normally; subtitle OCR is skipped with a note. |
 | **Tesseract OCR** | The OCR engine Subtitle Edit calls. | [UB Mannheim build](https://github.com/UB-Mannheim/tesseract/wiki) (includes English data) - run the installer, defaults are fine | Install the English language data when prompted. OCR is ~95-99% accurate; the app notes when output looks sparse. |
 | **NVIDIA GPU + current driver** | NVENC hardware encoding (fast mode, roughly 10x quicker than x265). | [nvidia.com/drivers](https://www.nvidia.com/drivers) | Auto-detected at runtime. Without it, the app falls back to x265 software encoding, which is slower but slightly higher quality per bit. |
+| **TMDB API key** | Autofills episode titles for series discs and the release year for movies (naming only; nothing else talks to the internet). | Free key: [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) (Developer key), then paste it into the app's TMDB field | Optional: without a key, episode titles and years are entered manually. Lookups are optional and fail soft (offline/bad key = warning, never a failed run). |
 
 ### How the app finds these tools
 
@@ -188,10 +192,13 @@ Docs: [BUILD.md](BUILD.md) (exe packaging + CI), [DEVELOPMENT.md](DEVELOPMENT.md
 
 ## Roadmap
 
-Done: pipeline + CLI (#1), subtitle OCR (#2), desktop UI (#3), packaging +
-dependency checker (#4), NVENC detection (#5).
-Open: #6, optional TMDB episode-title and movie-year autofill (works fully
-offline without it; naming is manual).
+All roadmap issues are closed. Done: pipeline + CLI (#1), subtitle OCR (#2),
+desktop UI (#3), packaging + dependency checker (#4), NVENC detection (#5),
+TMDB episode-title and movie-year autofill (#6). Naming works fully
+offline without a TMDB key; the key only adds autofill.
+
+Next milestone: real-disc validation (see DEVELOPMENT.md's pending
+validation checklist).
 
 ## License
 

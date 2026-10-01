@@ -20,6 +20,7 @@ class Settings:
     monitor_port: int = 8765
     monitor_token: str = ""                # empty = local-only convenience
     monitor_enabled: bool = True
+    tmdb_key: str = ""                  # free key: themoviedb.org/settings/api
     last_series_name: str = ""
     extras: dict = field(default_factory=dict)
 

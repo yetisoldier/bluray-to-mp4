@@ -47,6 +47,23 @@ class ScanWorker(QThread):
             traceback.print_exc()
 
 
+class FetchWorker(QThread):
+    """Run a single callable off the UI thread; emit its result."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self) -> None:  # QThread override
+        try:
+            self.done.emit(self._fn())
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class RunWorker(QThread):
     """Execute the whole pipeline for the confirmed plan."""
 
@@ -91,6 +108,7 @@ class RunWorker(QThread):
                 start_episode=self.plan.get("start_episode", 1),
                 episode_titles=self.plan.get("episode_titles"),
                 year=self.plan.get("year"),
+                tmdb_key=(self.settings.tmdb_key or "").strip(),
                 on_stage=on_stage,
                 on_progress=on_progress,
             )

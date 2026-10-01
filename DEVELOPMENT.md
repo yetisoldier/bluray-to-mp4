@@ -115,6 +115,12 @@ defaults to localhost. LAN mode requires an explicit config edit.
   53 tests green. exe rebuilt and shipped.
 - **2026-10-01 (docs sweep)** - README rewritten dependency-first;
   CHANGELOG, this file, and BUILD.md refreshed.
+- **2026-10-01 (issue #6, v0.1.2)** - TMDB autofill: stdlib-only client
+  (`tmdb.py`) with injectable fetchers for offline tests; pipeline uses
+  it for episode titles (series) and year (movies) with fail-soft
+  degradation; UI got a persisted key field and two fetch buttons on a
+  background thread; CLI got `--tmdb-key` (plus `B2M_TMDB_KEY`).
+  64 tests green. All roadmap issues now closed.
 
 ## Pending validation
 

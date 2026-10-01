@@ -21,6 +21,7 @@ from .naming import movie_output_name
 from .recommend import Selection, recommend_title
 from .series import detect_series, episode_output_names, main_feature
 from .subtitles import SubtitleOcrError, run_subtitle_ocr
+from .tmdb import TmdbError, lookup_movie, season_episode_titles
 
 __all__ = [
     "TitleJob",
@@ -154,6 +155,8 @@ def run_pipeline(
     start_episode: int = 1,
     episode_titles: dict[int, str] | None = None,
     year: int | None = None,
+    tmdb_key: str = "",
+    tmdb_fetcher=None,
     force_deinterlace: bool | None = None,
     on_stage=None,
     on_progress=None,
@@ -184,6 +187,25 @@ def run_pipeline(
     if guess.is_series:
         stage(f"Series disc: {guess.episode_count} episodes detected")
         base_names = {t.tid: _fallback_label(t.filename) for t in disc.titles}
+        if episode_titles is None and tmdb_key:
+            try:
+                titles = season_episode_titles(
+                    series_name or disc.name, season,
+                    start_episode=start_episode,
+                    count=len(guess.episode_tids),
+                    key=tmdb_key, fetcher=tmdb_fetcher,
+                )
+                episode_titles = {
+                    tid: title for tid, title in zip(guess.episode_tids, titles)
+                    if title
+                }
+                result.reasons.append(
+                    f"Episode titles from TMDB ({len(episode_titles)} found)"
+                )
+            except TmdbError as exc:
+                result.warnings.append(
+                    f"TMDB lookup failed, using manual naming: {exc}"
+                )
         names = episode_output_names(
             series_name or disc.name,
             season,
@@ -198,6 +220,16 @@ def run_pipeline(
         if main is None:
             raise RuntimeError("No titles long enough to process on this disc.")
         stage(f"Movie disc: main feature {main.duration_seconds // 60} min")
+        if year is None and tmdb_key:
+            try:
+                hit = lookup_movie(disc.name, key=tmdb_key, fetcher=tmdb_fetcher)
+                if hit and hit.get("year"):
+                    year = hit["year"]
+                    result.reasons.append(
+                        f"Year {year} from TMDB ({hit.get('title')})"
+                    )
+            except TmdbError as exc:
+                result.warnings.append(f"TMDB year lookup failed: {exc}")
         name = movie_output_name(disc.name, year=year)
         names = [(main.tid, name)]
         selected = {main.tid: recommend_title(main)}

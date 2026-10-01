@@ -2,6 +2,22 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.1.2] - 2026-10-01
+
+### Added
+
+- **TMDB episode-title and movie-year autofill** (issue #6, optional).
+  A free TMDB API key (themoviedb.org/settings/api) now enables:
+  - Series discs: episode titles fetched for the detected season and
+    used directly in `Show Name - S01E05 - Title.mp4` filenames.
+  - Movie discs: year lookup, so output lands as `Movie Title (2019).mp4`.
+  - UI: TMDB key field (persisted) plus "Fetch episode titles from TMDB"
+    and "Look up year from TMDB" buttons; lookups run off the UI thread.
+  - CLI: `--tmdb-key` flag; `B2M_TMDB_KEY` environment variable also works.
+  - No key configured: the feature is dormant and naming stays manual.
+    Lookup failures (offline, no match, bad key) degrade to warnings and
+    never fail a run.
+
 ## [0.1.1] - 2026-10-01
 
 ### Fixed

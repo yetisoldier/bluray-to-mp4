@@ -30,7 +30,8 @@ from ..makemkv import BetaKeyExpiredError, DiscOpenError, MakeMkvError
 from ..models import Disc
 from ..recommend import recommend_title
 from ..series import detect_series, main_feature
-from .workers import RunWorker, ScanWorker
+from ..tmdb import TmdbError, lookup_movie, season_episode_titles
+from .workers import FetchWorker, RunWorker, ScanWorker
 
 
 class MainWindow(QMainWindow):
@@ -40,6 +41,8 @@ class MainWindow(QMainWindow):
         self.disc: Disc | None = None
         self.scan_worker: ScanWorker | None = None
         self.run_worker: RunWorker | None = None
+        self.fetch_worker: FetchWorker | None = None
+        self._episode_titles: dict[int, str] = {}
         self.setWindowTitle("bluray-to-mp4")
         self.resize(900, 640)
 
@@ -241,6 +244,9 @@ class MainWindow(QMainWindow):
         self.btn_apply_names = QPushButton("Apply to all episodes")
         self.btn_apply_names.clicked.connect(self._recompute_names)
         grid.addWidget(self.btn_apply_names, 1, 3)
+        self.btn_fetch_episodes = QPushButton("Fetch episode titles from TMDB")
+        self.btn_fetch_episodes.clicked.connect(self._fetch_episode_titles)
+        grid.addWidget(self.btn_fetch_episodes, 2, 0, 1, 4)
         layout.addWidget(self.group_series)
 
         self.group_movie = QGroupBox("Movie naming")
@@ -253,7 +259,14 @@ class MainWindow(QMainWindow):
         self.spin_year.setRange(0, 9999)
         self.spin_year.setSpecialValueText("none")
         mgrid.addWidget(self.spin_year, 0, 3)
+        self.btn_fetch_year = QPushButton("Look up year from TMDB")
+        self.btn_fetch_year.clicked.connect(self._fetch_movie_year)
+        mgrid.addWidget(self.btn_fetch_year, 1, 0, 1, 4)
         layout.addWidget(self.group_movie)
+        self.tmdb_status = QLabel("")
+        self.tmdb_status.setWordWrap(True)
+        self.tmdb_status.setStyleSheet("color: #666;")
+        layout.addWidget(self.tmdb_status)
 
         self.group_tracks = QGroupBox("Tracks to keep (Recommended)")
         tlayout = QVBoxLayout(self.group_tracks)
@@ -282,6 +295,13 @@ class MainWindow(QMainWindow):
         self.check_subs = QCheckBox("Include subtitles (OCR to SRT)")
         self.check_subs.setChecked(True)
         grid_row.addWidget(self.check_subs, 2, 0, 1, 2)
+        grid_row.addWidget(QLabel("TMDB key (optional):"), 3, 0)
+        self.edit_tmdb_key = QLineEdit()
+        self.edit_tmdb_key.setPlaceholderText(
+            "free key: themoviedb.org/settings/api - enables episode-title "
+            "and year autofill")
+        self.edit_tmdb_key.setEchoMode(QLineEdit.EchoMode.Password)
+        grid_row.addWidget(self.edit_tmdb_key, 3, 1)
         row.addLayout(grid_row)
         row.addStretch()
         layout.addLayout(row)
@@ -314,6 +334,9 @@ class MainWindow(QMainWindow):
         if self.settings.outdir:
             self.edit_outdir.setText(self.settings.outdir)
         self.combo_encoder.setCurrentText(self.settings.encoder)
+        self.edit_tmdb_key.setText(self.settings.tmdb_key or "")
+        self.tmdb_status.setText("")
+        self._episode_titles = {}
         self._fill_tracks_table()
         self._recompute_names()
 
@@ -359,6 +382,84 @@ class MainWindow(QMainWindow):
         pass
 
     # ------------------------------------------------------------------
+    # TMDB autofill (issue #6)
+
+    def _tmdb_key(self) -> str:
+        """Key from the field, falling back to the persisted setting."""
+        return (self.edit_tmdb_key.text().strip()
+                or (self.settings.tmdb_key or "").strip())
+
+    def _fetch_episode_titles(self) -> None:
+        assert self.disc is not None
+        key = self._tmdb_key()
+        if not key:
+            self.tmdb_status.setText(
+                "Enter a TMDB key first (free: themoviedb.org/settings/api).")
+            return
+        show = self.edit_series_name.text().strip() or self.disc.name
+        season = self.spin_season.value()
+        start = self.spin_start_ep.value()
+        count = self.guess.episode_count
+        self.btn_fetch_episodes.setEnabled(False)
+        self.tmdb_status.setText(
+            f"Looking up {show!r} season {season} on TMDB ...")
+
+        def do_fetch():
+            return season_episode_titles(
+                show, season, start_episode=start, count=count, key=key)
+
+        self.fetch_worker = FetchWorker(do_fetch)
+        self.fetch_worker.done.connect(self._episode_titles_ready)
+        self.fetch_worker.failed.connect(self._tmdb_failed)
+        self.fetch_worker.start()
+
+    def _episode_titles_ready(self, titles) -> None:
+        self.btn_fetch_episodes.setEnabled(True)
+        self.btn_fetch_year.setEnabled(True)
+        assert self.disc is not None
+        pairs = [(tid, title)
+                 for tid, title in zip(self.guess.episode_tids, titles)
+                 if title]
+        self._episode_titles.update(dict(pairs))
+        self.tmdb_status.setText(
+            f"TMDB: {len(pairs)} of {self.guess.episode_count} episode "
+            f"titles found. They will be used in the output filenames.")
+
+    def _fetch_movie_year(self) -> None:
+        assert self.disc is not None
+        key = self._tmdb_key()
+        if not key:
+            self.tmdb_status.setText(
+                "Enter a TMDB key first (free: themoviedb.org/settings/api).")
+            return
+        title = self.edit_movie_title.text().strip() or self.disc.name
+        self.btn_fetch_year.setEnabled(False)
+        self.tmdb_status.setText(f"Looking up {title!r} on TMDB ...")
+
+        def do_fetch():
+            return lookup_movie(title, key=key)
+
+        self.fetch_worker = FetchWorker(do_fetch)
+        self.fetch_worker.done.connect(self._movie_year_ready)
+        self.fetch_worker.failed.connect(self._tmdb_failed)
+        self.fetch_worker.start()
+
+    def _movie_year_ready(self, hit) -> None:
+        self.btn_fetch_episodes.setEnabled(True)
+        self.btn_fetch_year.setEnabled(True)
+        if not hit or not hit.get("year"):
+            self.tmdb_status.setText("TMDB: no movie match found.")
+            return
+        self.spin_year.setValue(hit["year"])
+        self.tmdb_status.setText(
+            f"TMDB match: {hit.get('title')} ({hit['year']})")
+
+    def _tmdb_failed(self, message: str) -> None:
+        self.btn_fetch_episodes.setEnabled(True)
+        self.btn_fetch_year.setEnabled(True)
+        self.tmdb_status.setText(f"TMDB lookup failed: {message}")
+
+    # ------------------------------------------------------------------
     # Progress page
 
     def _build_progress_page(self) -> QWidget:
@@ -393,6 +494,7 @@ class MainWindow(QMainWindow):
         self.settings.outdir = outdir
         self.settings.encoder = self.combo_encoder.currentText()
         self.settings.last_series_name = self.edit_series_name.text().strip()
+        self.settings.tmdb_key = self.edit_tmdb_key.text().strip()
         self.settings.save()
 
         year = self.spin_year.value() or None
@@ -406,7 +508,7 @@ class MainWindow(QMainWindow):
             if self.guess.is_series else None,
             "season": self.spin_season.value(),
             "start_episode": self.spin_start_ep.value(),
-            "episode_titles": None,
+            "episode_titles": self._episode_titles or None,
             "year": year,
             "jobs": [],
             "tid_names": {},
@@ -452,7 +554,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-        for worker in (self.scan_worker, self.run_worker):
+        for worker in (self.scan_worker, self.run_worker, self.fetch_worker):
             if worker and worker.isRunning():
                 worker.wait(3000)
         event.accept()

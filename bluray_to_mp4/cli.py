@@ -93,6 +93,7 @@ def cmd_run(args) -> int:
         start_episode=args.start_episode,
         episode_titles=None,
         year=args.year,
+        tmdb_key=args.tmdb_key,
         on_stage=stage,
         on_progress=progress if not args.dry_run else None,
     )
@@ -133,6 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--season", type=int, default=1)
     p_run.add_argument("--start-episode", type=int, default=1)
     p_run.add_argument("--year", type=int, help="movie year for naming")
+    p_run.add_argument("--tmdb-key", default="",
+                        help="TMDB v3 API key for episode-title/year autofill "
+                             "(or set B2M_TMDB_KEY)")
     p_run.set_defaults(func=cmd_run)
     return parser
 
