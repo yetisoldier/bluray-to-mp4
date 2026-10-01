@@ -19,6 +19,7 @@ from .makemkv import Runner, find_drives, make_runner, rip_titles, scan_disc
 from .naming import movie_output_name
 from .recommend import Selection, recommend_title
 from .series import detect_series, episode_output_names, main_feature
+from .subtitles import SubtitleOcrError, run_subtitle_ocr
 
 __all__ = [
     "TitleJob",
@@ -270,13 +271,6 @@ def run_pipeline(
         sub_ord = _subtitle_ordinal(title, job.selection.subtitle_sid)
         sub = nth_of_type(streams, "subtitle", sub_ord) if sub_ord is not None else None
         job.subtitle_stream_index = sub.index if sub else None
-        if sub is not None:
-            job.srt_path = os.path.splitext(
-                os.path.join(outdir, job.output_name)
-            )[0] + ".srt"
-            result.warnings.append(
-                "Subtitle OCR lands with roadmap #2; this run produced no SRT yet."
-            )
 
         stage(f"Encoding {job.output_name} ({result.encoder}) ...")
         job.encode_args = build_encode_args(
@@ -297,6 +291,22 @@ def run_pipeline(
             if on_progress else None,
         )
         job.completed = True
+
+        if sub is not None:
+            stage(f"OCR subtitles for {job.output_name} ...")
+            video_out = os.path.join(outdir, job.output_name)
+            try:
+                ocr = run_subtitle_ocr(
+                    job.input_path, sub.index, video_out, workdir=rip_dir,
+                )
+                job.srt_path = ocr.srt_path
+                result.warnings.extend(f"{job.output_name}: {n}" for n in ocr.notes)
+            except SubtitleOcrError as exc:
+                result.warnings.append(
+                    f"{job.output_name}: subtitle OCR failed ({exc}); "
+                    "MP4 was produced without subtitles."
+                )
+
         stage(f"Done: {job.output_name}")
 
     return result
