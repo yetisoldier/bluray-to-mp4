@@ -46,16 +46,22 @@ def extract_subtitles(
     binary: str = "ffmpeg",
 ) -> str:
     """Extract one subtitle stream (PGS/VOBsub) losslessly to its own file."""
-    result = subprocess.run(
-        [
-            binary, "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
-            "-i", mkv_path, "-map", f"0:{stream_index}", "-c", "copy", out_path,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        result = subprocess.run(
+            [
+                binary, "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+                "-i", mkv_path, "-map", f"0:{stream_index}", "-c", "copy", out_path,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError as exc:
+        raise SubtitleOcrError(
+            f"ffmpeg not found for extraction: {exc}. Install ffmpeg from "
+            "https://ffmpeg.org/download.html and retry."
+        ) from exc
     if result.returncode != 0 or not os.path.exists(out_path):
         raise SubtitleOcrError(
             f"subtitle extraction failed: {result.stderr.strip()[:300]}"

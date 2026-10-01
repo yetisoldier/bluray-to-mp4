@@ -1,0 +1,51 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . PySide6 pyinstaller pytest
+
+      - name: Tests (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Build exe
+        run: pyinstaller bluray_to_mp4.spec --noconfirm
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path dist\bluray-to-mp4 -DestinationPath bluray-to-mp4-windows-x64.zip
+
+      - name: Smoke-test the exe
+        shell: pwsh
+        run: |
+          $exe = "dist\bluray-to-mp4\bluray-to-mp4.exe"
+          if (-not (Test-Path $exe)) { throw "exe missing" }
+          $proc = Start-Process -FilePath $exe -ArgumentList "--status" -NoNewWindow -PassThru -RedirectStandardOutput "smoke-out.txt" -RedirectStandardError "smoke-err.txt"
+          # --status prints a monitor snapshot and exits immediately.
+          if (-not $proc.WaitForExit(30000)) { $proc.Kill(); throw "exe did not exit" }
+          if ($proc.ExitCode -ne 0) { throw "exe exited with $($proc.ExitCode)" }
+          Get-Content smoke-out.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: bluray-to-mp4-windows-x64.zip
+          retention-days: 30

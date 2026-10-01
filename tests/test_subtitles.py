@@ -120,8 +120,9 @@ def test_se_command_flags():
 
 
 def test_extract_subtitles_failure_raises(tmp_path):
-    # Point ffmpeg at a nonexistent input to force failure.
-    with pytest.raises(SubtitleOcrError, match="extraction failed"):
+    # Point ffmpeg at a nonexistent input to force failure (or missing ffmpeg
+    # entirely on machines without it - both raise SubtitleOcrError).
+    with pytest.raises(SubtitleOcrError, match="extraction"):
         extract_subtitles(
             str(tmp_path / "nope.mkv"), 2, str(tmp_path / "out.sup"),
         )
