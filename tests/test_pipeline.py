@@ -56,6 +56,25 @@ def test_movie_dry_run_reserves_srt_path(tmp_path):
     assert any("roadmap #2" in w for w in result.warnings)
 
 
+def test_movie_dry_run_no_subtitles_skips_srt(tmp_path):
+    """want_subtitles=False: no srt_path, no OCR reservation warning."""
+    result = _movie_run(tmp_path / "out", want_subtitles=False)
+    assert result.jobs, "movie dry run must still plan the encode"
+    for job in result.jobs:
+        assert job.srt_path is None
+        assert job.subtitle_stream_index is None
+    assert not any("roadmap #2" in w for w in result.warnings)
+    assert not any("SRT path reserved" in w for w in result.warnings)
+
+
+def test_series_dry_run_no_subtitles_skips_srt(tmp_path):
+    """Same contract for every episode of a series disc."""
+    result = _series_run(tmp_path / "out", want_subtitles=False)
+    assert result.is_series and len(result.jobs) == 4
+    assert all(job.srt_path is None for job in result.jobs)
+    assert not any("roadmap #2" in w for w in result.warnings)
+
+
 def test_series_dry_run_names_all_episodes(tmp_path):
     result = _series_run(
         tmp_path / "out",
@@ -306,6 +325,8 @@ def test_success_removes_default_rip_dir(tmp_path, monkeypatch):
 
 
 def test_failure_preserves_rip_dir_with_warning(tmp_path, monkeypatch):
+    """C6: a single-job failure now RETURNS a partial result (no raise);
+    intermediates are kept and the failure lands in result.errors."""
     from bluray_to_mp4.pipeline import EncodeError
 
     _stub_probe(monkeypatch)
@@ -322,17 +343,79 @@ def test_failure_preserves_rip_dir_with_warning(tmp_path, monkeypatch):
         'MSG:5004,0,2,"1 titles saved, 0 failed",'
         '"%1 titles saved, %2 failed","1","0"',
     ]
-    with pytest.raises(EncodeError) as exc:
-        run_pipeline(
-            0, str(outdir), encoder="x265", dry_run=False,
-            mkv_runner=fake_runner(script),
-        )
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(script),
+    )
     rip_dir = os.path.join(str(outdir), ".rip")
     assert os.path.isdir(rip_dir)  # intermediates kept
-    result = exc.value.result
-    assert result is not None
-    assert any("Kept intermediates" in w for w in result.warnings)
     assert not result.jobs[0].completed
+    assert result.jobs[0].error is not None
+    assert len(result.errors) == 1
+    assert "ffmpeg exited with code 1" in result.errors[0]
+    assert any("Kept intermediates" in w for w in result.warnings)
+
+
+def test_job_failure_isolated_queue_continues(tmp_path, monkeypatch):
+    """C6: title 2 of 3 fails -> jobs 1,3 complete, one errors entry,
+    and the stage log names the failure."""
+    _stub_probe(monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode",
+        lambda args, *, duration_seconds, binary="ffmpeg",
+        on_progress=None, cancel=None: None,
+    )
+    from bluray_to_mp4.makemkv import TitleRipError
+
+    def selective_runner(binary: str, args: list[str]):
+        if "info" in args:
+            yield from SERIES_DISC_OUTPUT.splitlines()
+            return
+        tid = args[3]  # "-r mkv disc:0 <tid> <dir> --minlength=..."
+        if tid == "1":  # second episode: rip blows up
+            yield 'MSG:5003,0,1,"Error in title 1",' \
+                  '"Error in title %1","1"'
+            yield 'MSG:5004,0,2,"0 titles saved, 1 failed",' \
+                  '"%1 titles saved, %2 failed","0","1"'
+            return
+        yield from _RIP_LINES
+
+    stages = []
+    result = run_pipeline(
+        0, str(tmp_path / "out"), encoder="x265", dry_run=False,
+        mkv_runner=selective_runner, on_stage=stages.append,
+    )
+    assert [j.completed for j in result.jobs] == [True, False, True, True]
+    assert result.jobs[1].error is not None
+    assert result.jobs[1].error != ""
+    assert len(result.errors) == 1
+    assert "Error in title 1" in result.errors[0]
+    # The stage summary mentions the failed output and queue survival.
+    assert any("Failed:" in s for s in stages)
+    assert any("continuing queue" in s for s in stages)
+    # Cancel must still propagate through the isolation wrapper.
+    assert not any(getattr(j, "error", None) for j in result.jobs if j.completed)
+
+
+def test_cancel_still_raises_despite_isolation(tmp_path, monkeypatch):
+    """C6 guard: the per-job except must not swallow EncodeCancelled."""
+    _stub_probe(monkeypatch)
+    state = {"flag": False}
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        state["flag"] = True
+        raise EncodeCancelled("cancelled by user")
+
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    with pytest.raises(EncodeCancelled) as exc:
+        run_pipeline(
+            0, str(tmp_path / "out"), encoder="x265", dry_run=False,
+            mkv_runner=fake_runner(SERIES_DISC_OUTPUT.splitlines() + _RIP_LINES),
+            cancel=lambda: state["flag"],
+        )
+    assert exc.value.result is not None
+    assert exc.value.result.errors == []  # cancel is not a job failure
 
 
 def test_caller_workdir_never_deleted(tmp_path, monkeypatch):

@@ -320,6 +320,51 @@ def test_run_worker_emits_jobs_total(qapp, monkeypatch, tmp_path):
     assert not state.busy  # finished
 
 
+def test_run_worker_partial_failure_names_outputs(qapp, monkeypatch, tmp_path):
+    """C6: partial result -> job_done for completed jobs, monitor fail
+    message naming the failed output, done signal still fires."""
+    from bluray_to_mp4.monitor import MonitorState
+    from bluray_to_mp4.ui import workers as workers_mod
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    class _Job:
+        def __init__(self, name, completed, error=None):
+            self.output_name = name
+            self.completed = completed
+            self.srt_path = None
+            self.error = error
+
+    class _Result:
+        is_series = True
+        encoder = "x265"
+        jobs = [_Job("e1.mp4", True),
+                _Job("e2.mp4", False, "rip failed"),
+                _Job("e3.mp4", True)]
+        errors = ["e2.mp4: rip failed"]
+
+    monkeypatch.setattr(workers_mod, "monitor_state", MonitorState())
+    monkeypatch.setattr(workers_mod, "run_pipeline", lambda *a, **k: _Result())
+
+    plan = {
+        "disc_name": "Disc", "media_type": "bluray", "is_series": True,
+        "encoder": "x265", "outdir": str(tmp_path),
+        "jobs": [{"tid": i, "output_name": f"e{i}.mp4",
+                   "duration_seconds": 100} for i in range(3)],
+        "tid_names": {},
+    }
+    done_results = []
+    worker = RunWorker(0, plan, Settings())
+    worker.done.connect(lambda r: done_results.append(r))
+    worker.start()
+    _pump(qapp, worker)
+
+    state = workers_mod.monitor_state
+    assert state.jobs_done == 2            # records for e1, e3 only
+    assert not state.busy                  # fail() ended the run
+    assert state.last_error and "e2.mp4" in state.last_error
+    assert done_results, "done must still fire with the partial result"
+
+
 def test_run_progress_overall_math(qapp, monkeypatch):
     """Overall bar = (completed jobs + current frac) / total."""
     w = _series_window(qapp, monkeypatch)
@@ -338,3 +383,47 @@ def test_run_progress_overall_math(qapp, monkeypatch):
     w._run_progress("Rip: e3", 3, 1.0, None)
     assert w.overall_bar.bar.value() == 1000
     w.close()
+
+
+# ----------------------------------------------------------------------
+# Scan addressing (C7): table row != MakeMKV disc index once
+# status-256 drives are filtered out of the list.
+
+def test_scan_selected_uses_drive_index_not_row(qapp, monkeypatch):
+    """A filtered drive list [0, 2]: scanning row 1 must address disc 2."""
+    from bluray_to_mp4.makemkv import DriveEntry
+    from bluray_to_mp4.ui import workers as workers_mod
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    # find_drives output with a gap: status-256 slot at index 1 was
+    # filtered out, so row 1 is DriveEntry(index=2).
+    monkeypatch.setattr(workers_mod, "find_drives", lambda **kw: [
+        DriveEntry(0, 2, "bluray", "BD-RE Pioneer", "MOVIE", "D:"),
+        DriveEntry(2, 2, "bluray", "BD-RE ASUS", "BLADE2049", "E:"),
+    ])
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    assert w.drives_table.rowCount() == 2
+    assert [d.index for d in w._drives] == [0, 2]
+
+    launched = []
+
+    class _RecordingScanWorker:
+        def __init__(self, mode="drives", index=0, minlength=120):
+            self.mode = mode
+            self.index = index
+            self.scanned = type("S", (), {"connect": lambda s, x: None})()
+            self.failed = type("S", (), {"connect": lambda s, x: None})()
+
+        def start(self):
+            launched.append(self.index)
+
+    import bluray_to_mp4.ui.main_window as mw_mod
+    monkeypatch.setattr(mw_mod, "ScanWorker", _RecordingScanWorker)
+
+    w.drives_table.selectRow(1)  # second row = DriveEntry(index=2)
+    w._scan_selected()
+
+    assert launched == [2], "scan must use the DriveEntry index, not the row"

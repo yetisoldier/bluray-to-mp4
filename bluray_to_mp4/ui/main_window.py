@@ -64,6 +64,9 @@ class MainWindow(QMainWindow):
         self.guess = None
         self._episode_titles: dict[int, str] = {}
         self._title_overrides: dict[int, str] = {}
+        # DriveEntry list backing the drives table rows; row != MakeMKV
+        # disc index once status-256 drives are filtered out (C7).
+        self._drives: list = []
 
         self.scan_worker: ScanWorker | None = None
         self.run_worker: RunWorker | None = None
@@ -339,12 +342,14 @@ class MainWindow(QMainWindow):
         self.scan_status.setText("Looking for drives ...")
         self.scan_indicator.setText("Scanning . . .")
         self.drives_table.setRowCount(0)
+        self._drives = []  # keep the table and its backing list in sync
         self.scan_worker = ScanWorker(mode="drives")  # type: ignore[name-defined]
         self.scan_worker.drives_listed.connect(self._drives_ready)
         self.scan_worker.failed.connect(self._scan_failed)
         self.scan_worker.start()
 
     def _drives_ready(self, drives) -> None:  # noqa: C901
+        self._drives = list(drives)
         self.btn_refresh.setEnabled(True)
         self.scan_indicator.setText("")
         self.drives_table.setRowCount(len(drives))
@@ -377,22 +382,15 @@ class MainWindow(QMainWindow):
             "color: palette(bright-text, err);")
 
     def _scan_selected(self) -> None:
-        item = self.drives_table.item(self.drives_table.currentRow(), 0)
-        if not item:
-            return
-        idx = self.drives_table.item(self.drives_table.currentRow(), 0).text()
-        # The index is in the drive name column's data; simplest is to
-        # re-derive from the path column or keep a lookup; keep it simple: use the
-        # selection row.
         row = self.drives_table.currentRow()
-        drive_path = self.drives_table.item(row, 3).text() if row >= 0 else ""
-        # We need the actual Drive index; find it from the row (path is unique)
-        # Simplification: drive rows are listed in the same order as `find_drives()`,
-        # so row == scan index in practice (index values are sequential from 0).
+        # Row is a position in the filtered drive list, not the MakeMKV
+        # disc index: address the scan through the stored DriveEntry.
+        if not 0 <= row < len(self._drives):
+            return
         self.btn_scan.setEnabled(False)
         self.scan_indicator.setText("Scanning disc ...")
         self.scan_status.setText("Reading titles, tracks, and durations ...")
-        self.scan_worker = ScanWorker(mode="scan", index=row)
+        self.scan_worker = ScanWorker(mode="scan", index=self._drives[row].index)
         self.scan_worker.scanned.connect(self._disc_scanned)
         self.scan_worker.failed.connect(self._scan_failed)
         self.scan_worker.start()
@@ -834,6 +832,7 @@ class MainWindow(QMainWindow):
             "episode_titles": self._episode_titles or None,
             "title_overrides": self._title_overrides,
             "year": self.spin_year.value() or None,
+            "want_subtitles": self.check_subs.isChecked(),
             "jobs": [],
             "tid_names": {},
         }

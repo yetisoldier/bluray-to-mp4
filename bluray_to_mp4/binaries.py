@@ -38,15 +38,6 @@ def _app_internal_dirs() -> list[str]:
 def _search_dirs(extra: list[str]) -> list[str]:
     """PATH first, then bundled-app folders, then system install dirs."""
     return extra + _app_internal_dirs()
-    return os.environ.get("ProgramFiles", r"C:\Program Files")
-
-
-def _program_files_x86() -> str:
-    return os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-
-
-def _local_appdata() -> str:
-    return os.environ.get("LOCALAPPDATA", "")
 
 
 def _makemkv_dirs() -> list[str]:
@@ -71,9 +62,6 @@ def _subtitle_edit_dirs() -> list[str]:
         os.path.join(_program_files(), "Subtitle Edit"),
         os.path.join(_local_appdata(), "Programs", "Subtitle Edit"),
     ]
-
-
-_MAKEMKV_DIRS = _makemkv_dirs()  # kept for backward compat in tests
 
 
 def find_program(

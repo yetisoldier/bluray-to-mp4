@@ -121,6 +121,7 @@ class RunWorker(QThread):
                 year=self.plan.get("year"),
                 title_overrides=self.plan.get("title_overrides"),
                 tmdb_key=(self.settings.tmdb_key or "").strip(),
+                want_subtitles=bool(self.plan.get("want_subtitles", True)),
                 cancel=lambda: self._cancelled,
                 on_stage=on_stage,
                 on_progress=on_progress,
@@ -136,7 +137,21 @@ class RunWorker(QThread):
                         srt=bool(job.srt_path),
                         warnings=[],
                     ))
-            monitor_state.finish()
+            # C6: per-job failures surface as a partial result - the
+            # completed outputs keep their records, and the monitor
+            # records which outputs failed (never a generic success).
+            errors = getattr(result, "errors", [])
+            if errors:
+                failed_names = [
+                    job.output_name for job in result.jobs
+                    if getattr(job, "error", None)
+                ]
+                monitor_state.fail(
+                    "Failed: "
+                    + (", ".join(failed_names) if failed_names else str(errors[0]))
+                )
+            else:
+                monitor_state.finish()
             self.done.emit(result)
         except Exception as exc:
             monitor_state.fail(str(exc))
