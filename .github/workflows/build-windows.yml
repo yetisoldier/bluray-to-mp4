@@ -19,7 +19,7 @@ jobs:
       - name: Download ffmpeg (win64, static build)
         shell: pwsh
         run: |
-          $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-release-essentials.zip"
+          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
           $zipPath = "$env:TEMP\ffmpeg.zip"
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -TimeoutSec 300
           Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\ffmpeg-extract" -Force
