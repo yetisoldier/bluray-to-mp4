@@ -34,11 +34,11 @@ hiddenimports = [
 ]
 
 a = Analysis(
-    ["bluray_to_mp4/__main__.py"],
+    ["run_app.py"],
     pathex=["."],
     binaries=[],
     datas=[],
-    hiddenimports=hiddenimports,
+    hiddenimports=hiddenimports + ["run_app"],
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "matplotlib", "numpy", "PIL"],
