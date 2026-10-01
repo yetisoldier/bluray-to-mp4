@@ -14,6 +14,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .binaries import resolve_ffmpeg, resolve_subtitle_edit
 from .srt import Cue, SrtError, normalize_cues, parse_srt, write_srt_file
 
 __all__ = [
@@ -46,6 +47,7 @@ def extract_subtitles(
     binary: str = "ffmpeg",
 ) -> str:
     """Extract one subtitle stream (PGS/VOBsub) losslessly to its own file."""
+    binary = resolve_ffmpeg(binary)
     try:
         result = subprocess.run(
             [
@@ -95,6 +97,8 @@ class SubtitleEditOcr:
     def run(self, in_path: str, out_dir: str, *, runner: Runner | None = None) -> str:
         """Run the conversion and return the produced .srt path."""
         cmd = self.command(in_path, out_dir)
+        self.binary = resolve_subtitle_edit(self.binary)
+        cmd[0] = self.binary
         if runner is None:
             try:
                 proc = subprocess.run(

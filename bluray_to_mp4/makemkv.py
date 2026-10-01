@@ -25,6 +25,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
+from .binaries import resolve_makemkvcon
 from .models import Attribute, Disc, StreamInfo, Title
 
 __all__ = [
@@ -141,6 +142,7 @@ def make_runner(timeout: float | None = None) -> Runner:
     """Build the default subprocess runner that streams makemkvcon stdout."""
 
     def run(binary: str, args: list[str]) -> Iterator[str]:
+        binary = resolve_makemkvcon(binary)
         try:
             proc = subprocess.Popen(
                 [binary, *args],

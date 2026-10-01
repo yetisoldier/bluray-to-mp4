@@ -13,6 +13,8 @@ import json
 import subprocess
 from dataclasses import dataclass
 
+from .binaries import resolve_ffprobe
+
 __all__ = [
     "ProbedStream",
     "parse_probe",
@@ -61,6 +63,7 @@ def parse_probe(text: str) -> list[ProbedStream]:
 
 def probe_streams(path: str, *, binary: str = "ffprobe") -> list[ProbedStream]:
     """Run ffprobe on a media file and return its streams."""
+    binary = resolve_ffprobe(binary)
     result = subprocess.run(
         [binary, "-v", "error", "-show_streams", "-of", "json", path],
         capture_output=True,

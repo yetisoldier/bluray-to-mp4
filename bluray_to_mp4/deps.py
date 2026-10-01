@@ -13,6 +13,9 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from .binaries import find_program, resolve_makemkvcon
+from . import binaries
+
 __all__ = ["DependencyCheck", "check_all", "MAKEMKV_URL", "FFMPEG_URL",
            "SUBTITLE_EDIT_URL", "PYTHON_URL"]
 
@@ -42,8 +45,14 @@ def _on_path(binary: str) -> str | None:
 
 
 def check_makemkv() -> DependencyCheck:
-    """makemkvcon on PATH (MakeMKV installs it alongside the GUI)."""
-    found = _on_path("makemkvcon")
+    """makemkvcon: PATH, env override, or standard install dirs."""
+    from . import binaries
+    found = find_program(
+        "makemkvcon",
+        env_var="B2M_MAKEMKVCON",
+        search_dirs=binaries._makemkv_dirs(),
+        exe_names=["makemkvcon.exe", "makemkvcon64.exe", "makemkvcon"],
+    )
     if not found:
         return DependencyCheck(
             "MakeMKV", False,
@@ -80,7 +89,15 @@ def check_makemkv() -> DependencyCheck:
 
 def check_ffmpeg() -> DependencyCheck:
     for binary in ("ffmpeg", "ffmpeg.exe"):
-        found = _on_path(binary)
+        found = find_program(
+            binary,
+            env_var="B2M_FFMPEG",
+            search_dirs=[
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links"),
+                r"C:\ffmpeg\bin",
+            ],
+            exe_names=["ffmpeg.exe", "ffmpeg"],
+        )
         if found:
             try:
                 proc = subprocess.run(
@@ -96,7 +113,12 @@ def check_ffmpeg() -> DependencyCheck:
 
 def check_nvenc() -> DependencyCheck:
     """NVENC capability via a hardware encode probe."""
-    ffmpeg = _on_path("ffmpeg")
+    ffmpeg = find_program(
+        "ffmpeg",
+        env_var="B2M_FFMPEG",
+        search_dirs=binaries._ffmpeg_dirs(),
+        exe_names=["ffmpeg.exe", "ffmpeg"],
+    )
     if not ffmpeg:
         return DependencyCheck(
             "NVIDIA NVENC", False,
@@ -126,7 +148,12 @@ def check_nvenc() -> DependencyCheck:
 
 def check_subtitle_edit() -> DependencyCheck:
     """Subtitle Edit CLI (SubtitleEdit.exe) for PGS->SRT OCR."""
-    found = _on_path("SubtitleEdit") or _on_path("SubtitleEdit.exe")
+    found = find_program(
+        "SubtitleEdit",
+        env_var="B2M_SUBTITLE_EDIT",
+        search_dirs=binaries._subtitle_edit_dirs(),
+        exe_names=["SubtitleEdit.exe", "SubtitleEdit"],
+    )
     if found:
         return DependencyCheck(
             "Subtitle Edit", True, f"found at {found}", SUBTITLE_EDIT_URL,
@@ -150,7 +177,12 @@ def check_subtitle_edit() -> DependencyCheck:
 
 
 def check_ffprobe() -> DependencyCheck:
-    found = _on_path("ffprobe")
+    found = find_program(
+        "ffprobe",
+        env_var="B2M_FFPROBE",
+        search_dirs=binaries._ffmpeg_dirs(),
+        exe_names=["ffprobe.exe", "ffprobe"],
+    )
     if found:
         return DependencyCheck("ffprobe", True, f"found at {found}", FFMPEG_URL)
     return DependencyCheck(

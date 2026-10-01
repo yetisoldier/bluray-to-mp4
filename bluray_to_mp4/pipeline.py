@@ -13,6 +13,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
+from .binaries import resolve_ffmpeg
 from .encode import EncodePlan, build_encode_args
 from .ffprobe import ProbedStream, is_interlaced, nth_of_type, probe_streams
 from .makemkv import Runner, find_drives, make_runner, rip_titles, scan_disc
@@ -60,6 +61,7 @@ class PipelineResult:
 
 def detect_encoder(*, binary: str = "ffmpeg", timeout: float = 30.0) -> str:
     """'nvenc' when a hardware HEVC encode succeeds, else 'x265'."""
+    binary = resolve_ffmpeg(binary)
     try:
         result = subprocess.run(
             [
@@ -113,6 +115,7 @@ def execute_encode(
     on_progress=None,
 ) -> None:
     """Run one ffmpeg encode, reporting progress as a 0..1 fraction."""
+    binary = resolve_ffmpeg(binary)
     proc = subprocess.Popen(
         [binary, *args, "-progress", "pipe:1", "-nostats"],
         stdout=subprocess.PIPE,
