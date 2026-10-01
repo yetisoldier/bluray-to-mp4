@@ -5,6 +5,9 @@ description = "Local Blu-ray/DVD to MP4 ripper with smart recommendations, NVENC
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+bluray-to-mp4 = "bluray_to_mp4.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
