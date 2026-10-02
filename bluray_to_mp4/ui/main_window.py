@@ -1020,12 +1020,15 @@ class MainWindow(QMainWindow):
     def _run_progress(self, job_name: str, tid: int, frac: float, eta: float | None) -> None:
         self.progress_current.setText(job_name)
         self.stage_bar.set_value(frac, eta)
-        if eta is not None and eta > 1:
-            m, s = divmod(int(eta), 60)
-            self.time_remaining.setText(f"Remaining ~{m}:{s:02d}")
-        elif frac > 0.0:
-            self.time_remaining.setText("Remaining: estimating ...")
         if eta is not None:
+            # The pipeline carries the last real estimate forward across
+            # duplicate PRGV lines, so the countdown holds steady instead
+            # of flickering back to "estimating ..." (validation run 5).
+            if eta > 1:
+                m, s = divmod(int(eta), 60)
+                self.time_remaining.setText(f"Remaining ~{m}:{s:02d}")
+            else:
+                self.time_remaining.setText("Finishing ...")
             self.statusBar().showMessage(
                 f"{job_name}: {int(frac*100)}% - {int(eta//60)}:{int(eta%60):02d} remaining")
         else:

@@ -104,11 +104,16 @@ class EtaProgressBar(QWidget):
         if self._busy and (eta_seconds is not None or fraction > 0.0):
             self.set_busy(False)  # real data arrived: leave pulse mode
         self.bar.setValue(int(max(0.0, min(fraction, 1.0)) * 1000))
-        text = ""
-        if eta_seconds is not None and eta_seconds > 1:
+        if eta_seconds is None:
+            # Duplicate progress line: keep the last shown estimate - a
+            # None between real ticks must never blank the ETA (found in
+            # validation run 5, 2026-10-02).
+            return
+        if eta_seconds > 1:
             m, s = divmod(int(eta_seconds), 60)
-            text = f"ETA {m}:{s:02d}"
-        self.eta_label.setText(text)
+            self.eta_label.setText(f"ETA {m}:{s:02d}")
+        else:
+            self.eta_label.setText("")
 
     def reset(self):
         self.set_busy(False)

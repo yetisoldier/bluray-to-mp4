@@ -384,19 +384,26 @@ def run_pipeline(
                 stage(f"Ripping title {job.tid} ({job.output_name}) ...")
                 _rip_t0 = time.time()
                 _rip_last_frac = 0.0
+                _rip_last_eta: float | None = None
 
-                def _rip_progress(frac, prgv, *, _job=job, _t0=None):
+                def _rip_progress(frac, prgv, *, _job=job):
                     # Rip ETA from elapsed/fraction once data actually moves;
                     # before the BD+ open finishes PRGV stays 0 and no honest
-                    # estimate exists yet (returns None).
-                    nonlocal _rip_t0, _rip_last_frac
+                    # estimate exists yet (eta stays None). Once an estimate
+                    # exists it is CARRIED FORWARD on every update, including
+                    # duplicate-frac PRGV lines - consumers must never see
+                    # the estimate vanish between real ticks (validation run
+                    # 5: the UI's Remaining label flickered back to
+                    # "estimating ..." on duplicates and looked stuck).
+                    nonlocal _rip_t0, _rip_last_frac, _rip_last_eta
                     if frac <= 0.002:
                         on_progress(("rip", _job.tid, frac))
                         return
                     elapsed = time.time() - _rip_t0
-                    eta = elapsed / frac - elapsed if frac > _rip_last_frac else None
+                    if frac > _rip_last_frac:
+                        _rip_last_eta = max(0.0, elapsed / frac - elapsed)
                     _rip_last_frac = frac
-                    on_progress(("rip", _job.tid, frac, eta))
+                    on_progress(("rip", _job.tid, frac, _rip_last_eta))
 
                 def _rip_info(text):
                     # Live MakeMKV status (BD+ open etc.) so the rip phase

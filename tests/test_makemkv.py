@@ -115,3 +115,17 @@ def test_rip_titles_zero_saved_raises():
     with pytest.raises(Exception) as exc:
         rip_titles(0, [0], "/tmp/out", runner=fake_runner(script))
     assert "0 titles" in str(exc.value) or "without producing" in str(exc.value)
+
+def test_rip_titles_ignores_disc_internal_file_added_lines():
+    """MakeMKV 2.0.0 also emits 3307 lines for disc-internal files (the
+    00803.mpls playlist) with a bare filename; only real .mkv outputs
+    are saved files (validation run 5: rip hit 100%, then ffprobe died
+    on 'No such file or directory' because saved[0] was the playlist)."""
+    script = [
+        'MSG:1005,0,1,"MakeMKV started","%1 started","MakeMKV v2.0.0"',
+        'MSG:3307,0,2,"File 00803.mpls was added","File %1 was added","00803.mpls","1"',
+        'MSG:3307,0,2,"File was added as title #0","File %1 was added as title #%2","/tmp/out/movie_t00.mkv","0"',
+        'MSG:5004,0,2,"1 titles saved, 0 failed","%1 titles saved, %2 failed","1","0"',
+    ]
+    saved = rip_titles(0, [0], "/tmp/out", runner=fake_runner(script))
+    assert saved == ["/tmp/out/movie_t00.mkv"]

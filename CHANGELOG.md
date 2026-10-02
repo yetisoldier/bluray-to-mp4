@@ -2,7 +2,27 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.10] - 2026-10-02
+
+### Fixed
+
+- **Run 5 post-mortem: rip finished 100%, then the run died on the
+  probe step.** MakeMKV 2.0.0 emits "file added" lines for
+  disc-internal files too (the 00803.mpls playlist); the parser
+  treated any 3307 line as a saved output, so the playlist poisoned
+  the output list and ffprobe failed with "No such file or
+  directory". Only real .mkv outputs are now accepted (regression
+  tested).
+- **"Remaining: estimating ..." never became a countdown** (Eric
+  report, validation run 5). MakeMKV emits PRGV duplicates ~2x/second;
+  only fraction-advancing lines computed an ETA, so every duplicate
+  sent eta=None and the UI erased the estimate it just had. The
+  pipeline now carries the last real estimate forward across
+  duplicates, the progress bar keeps its ETA on None ticks, and the
+  Remaining label holds its countdown instead of flickering.
+
 ## [0.2.9] - 2026-10-02
+
 
 ### Added
 

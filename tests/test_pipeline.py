@@ -500,3 +500,38 @@ def test_cli_progress_callback_accepts_4tuple():
     progress(("rip", 0, 0.5))
     progress(("encode", 0, 0.5, 120.0))
     progress(("encode", 0, 0.5, None))
+
+
+def test_rip_progress_duplicate_lines_carry_eta(tmp_path, monkeypatch):
+    """Validation run 5 (Eric report): the UI's Remaining label kept
+    flickering back to 'estimating ...'. Cause: MakeMKV emits PRGV
+    duplicates ~2x/second; only frac-advancing lines computed an ETA, so
+    every duplicate sent eta=None and the label erased itself. The
+    pipeline must CARRY the last estimate forward on duplicates."""
+    _stub_probe(monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode",
+        lambda args, *, duration_seconds, binary="ffmpeg",
+        on_progress=None, cancel=None: None,
+    )
+    outdir = tmp_path / "out"
+    script = MOVIE_DISC_OUTPUT.splitlines() + [
+        "PRGV:16384,65536,65536",   # 25%: first real frac -> ETA computed
+        "PRGV:16384,65536,65536",   # duplicate: ETA must carry, not None
+        "PRGV:32768,65536,65536",   # 50%: advances, fresh ETA
+        'MSG:3307,0,2,"File added","File %1 added","'
+        + str(outdir / ".rip" / "movie_t00.mkv") + '","0"',
+        'MSG:5004,0,2,"1 titles saved, 0 failed",'
+        '"%1 titles saved, %2 failed","1","0"',
+    ]
+    payloads = []
+    run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(script), on_progress=payloads.append,
+    )
+    rips = [p for p in payloads if p[0] == "rip" and p[2] > 0.002]
+    assert len(rips) >= 3
+    assert all(len(p) == 4 and isinstance(p[3], float) for p in rips)
+    # The duplicate line (same frac as its predecessor) still carries ETA.
+    assert rips[0][2] == rips[1][2]
+    assert rips[1][3] is not None

@@ -361,7 +361,13 @@ def rip_titles(
             if code == TITLE_RIP_ERROR:
                 failures.append(text)
             elif code == FILE_ADDED and params:
-                saved.append(params[0])
+                # MakeMKV 2.0.0 also emits 3307 for disc-internal files
+                # (e.g. the 00803.mpls playlist) with a bare filename;
+                # only real .mkv outputs are saved titles (validation run
+                # 5: the playlist poisoned saved[0] and ffprobe died on
+                # "No such file or directory" after a 100% rip).
+                if params[0].lower().endswith(".mkv"):
+                    saved.append(params[0])
             elif code in RIP_COMPLETED_CODES and params:
                 if params[0].isdigit() and int(params[0]) == 0 and not failures:
                     raise MakeMkvError("MakeMKV finished but saved 0 titles.")
