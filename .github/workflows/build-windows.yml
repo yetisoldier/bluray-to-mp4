@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download ffmpeg (n8.1: NVENC SDK 13.0 matches driver 590+; n9.0 needs 610)
+      - name: Download ffmpeg (n8.1, NVENC SDK 13.0 matches driver 590+)
         shell: pwsh
         run: |
           $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
