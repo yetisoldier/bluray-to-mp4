@@ -2,7 +2,28 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.13] - 2026-10-02
+
+### Added
+
+- **Subtitles are now included by default even when the rip's stream
+  list disagrees with the disc scan.** Validation run 7 shipped the
+  first finished MP4 with no subtitles because the recommended
+  subtitle id was missing from the ripped MKV's stream list; the run
+  warned but shipped nothing. The pipeline now falls back to the
+  first subtitle stream in the rip (MakeMKV preserves scan order), so
+  English subs land as SRT sidecars by default - players can turn
+  them off (Eric's preference: VLC handles it).
+
+### Fixed
+
+- History records carried duration 0 (TitleJob.duration_seconds was
+  never populated from the scan) and the bare "subtitle missing"
+  warning hid the real reason; the monitor history now shows the
+  actual duration and the pipeline's specific warning text.
+
 ## [0.2.12] - 2026-10-02
+
 
 ### Added
 

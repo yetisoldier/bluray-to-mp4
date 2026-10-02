@@ -142,7 +142,12 @@ class RunWorker(QThread):
                         duration_seconds=job.duration_seconds,
                         encoder=result.encoder,
                         srt=bool(job.srt_path),
-                        warnings=([] if job.srt_path else ["subtitle missing"]),
+                        warnings=(
+                            [] if job.srt_path
+                            else ([w for w in getattr(result, "warnings", [])
+                                   if w.startswith(job.output_name)]
+                                  or ["subtitle missing (unknown reason)"])
+                        ),
                     ))
             # C6: per-job failures surface as a partial result - the
             # completed outputs keep their records, and the monitor

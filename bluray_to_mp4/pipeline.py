@@ -331,6 +331,7 @@ def run_pipeline(
             tid=tid,
             output_name=out_name,
             selection=sel,
+            duration_seconds=title.duration_seconds,
             input_path=os.path.join(rip_dir, title.filename),
         )
         job.encode_args = build_encode_args(
@@ -481,6 +482,20 @@ def run_pipeline(
                     if want_subtitles else None
                 )
                 sub = nth_of_type(streams, "subtitle", sub_ord) if sub_ord is not None else None
+                if sub is None and want_subtitles:
+                    # Fallback (validation run 7): the disc-scan sid and the
+                    # ripped MKV's stream list can disagree; rather than
+                    # shipping no subtitles, use the FIRST subtitle stream
+                    # (MakeMKV preserves scan order in the rip) so English
+                    # subs are included by default - players can turn them
+                    # off per Eric's preference.
+                    subs_in_rip = [s for s in streams if s.codec_type == "subtitle"]
+                    if subs_in_rip:
+                        sub = subs_in_rip[0]
+                        result.warnings.append(
+                            f"{job.output_name}: selected subtitle stream missing from "
+                            f"ripped MKV; fell back to subtitle stream {sub.index}."
+                        )
                 job.subtitle_stream_index = sub.index if sub else None
                 # G3: don't silently drop - the recommendation promised a track
                 if sub_ord is not None and sub is None:
