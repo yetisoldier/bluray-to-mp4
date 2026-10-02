@@ -87,9 +87,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "signtool sign failed" }
           # Trust the signer on this runner so full-chain validation passes
           # (self-signed root: the runner must trust its own signer to verify).
+          # LocalMachine stores: admin-only, NO interactive confirmation prompt
+          # (CurrentUser\Root pops a GUI dialog and hangs headless CI).
           $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("$env:TEMP\cs.pfx", $env:YW_CODESIGN_PW)
           foreach ($storeName in @("TrustedPeople", "Root")) {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, "CurrentUser")
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, "LocalMachine")
             $store.Open("ReadWrite"); $store.Add($cert); $store.Close()
           }
           $si = Get-AuthenticodeSignature $exe
