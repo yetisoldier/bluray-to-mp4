@@ -118,8 +118,12 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(label)
             item.setSizeHint(QSize(0, 40))
             self.nav_list.addItem(item)
-        self.nav_list.setCurrentRow(1)  # Source is the default page
+        # Connect the row->stack sync BEFORE setting the initial row so the
+        # stack and sidebar can never disagree (the 2026-10-02 Continue bug:
+        # row was set to 1 pre-connect, stack stayed on Setup, and Continue's
+        # 1->1 was a no-op that left the page frozen on Setup).
         self.nav_list.currentRowChanged.connect(self._nav_changed)
+        self.nav_list.setCurrentRow(1)  # Source is the default page
         nav_layout.addWidget(self.nav_list)
         nav_layout.addStretch()
         layout.addWidget(navbar, stretch=0)
@@ -242,7 +246,18 @@ class MainWindow(QMainWindow):
         self.btn_setup_recheck.clicked.connect(self._show_deps_if_needed)
         self.btn_setup_continue = QPushButton("Continue")
         self.btn_setup_continue.setObjectName("ghostBtn")
-        self.btn_setup_continue.clicked.connect(lambda: self._nav_to(1))
+
+        def _continue():
+            # Never a no-op: force the row change even if the sidebar
+            # already says Source, so the stack always follows (the
+            # 2026-10-02 bug: setCurrentRow(1) when row==1 fired no
+            # signal and Continue looked dead).
+            self.nav_list.blockSignals(True)
+            self.nav_list.setCurrentRow(0)
+            self.nav_list.blockSignals(False)
+            self._nav_to(1)
+
+        self.btn_setup_continue.clicked.connect(_continue)
         self.btn_setup_continue.setToolTip(
             "All required tools check out; optional gaps are listed above.")
         row.addWidget(self.btn_setup_recheck)
@@ -401,6 +416,14 @@ class MainWindow(QMainWindow):
         self.scan_status.setText(message)
         self.scan_status.setStyleSheet(
             "color: palette(bright-text, err);")
+        # A hung drive listing must never leave the user stuck on an
+        # endless "Looking for drives" (orphan makemkvcon holding the
+        # drive, 2026-10-02): name the fix instead of a bare timeout.
+        if "timed out" in message.lower():
+            self.scan_status.setText(
+                "Drive check timed out - another MakeMKV process is "
+                "probably holding the drive. End any leftover makemkvcon "
+                "in Task Manager, then click Refresh.")
 
     def _scan_progress(self, text: str) -> None:
         """Live scan heartbeat: MakeMKV reading titles/streams, not frozen."""

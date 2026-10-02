@@ -66,7 +66,14 @@ def check_makemkv() -> DependencyCheck:
             encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return DependencyCheck("MakeMKV", False, f"makemkvcon failed: {exc}", MAKEMKV_URL)
+        detail = (
+            f"makemkvcon did not answer within {exc.timeout}s - another "
+            "MakeMKV process is probably still holding the drive. Close "
+            "other MakeMKV windows (or end makemkvcon in Task Manager), "
+            "then re-check."
+            if isinstance(exc, subprocess.TimeoutExpired) else f"makemkvcon failed: {exc}"
+        )
+        return DependencyCheck("MakeMKV", False, detail, MAKEMKV_URL)
     if proc.returncode != 0 and not proc.stdout:
         return DependencyCheck(
             "MakeMKV", False,

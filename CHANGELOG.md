@@ -2,7 +2,26 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.7] - 2026-10-02
+
+### Fixed
+
+- **Continue button was a silent no-op.** The sidebar row was set to
+  Source before the nav signal was connected at startup, so the stack
+  stayed on Setup while the sidebar said Source; clicking Continue set
+  the row to a value it already had, no signal fired, and the page
+  never moved. The signal now connects before the initial row, and
+  Continue force-syncs the stack to Source regardless of sidebar state
+  (regression test included).
+- **Orphaned makemkvcon hangs are now self-explanatory.** A leftover
+  MakeMKV process holding the drive made the Setup check time out with
+  a cryptic message and the drive list spin forever. The Setup check
+  now names the cause and the fix (end leftover makemkvcon in Task
+  Manager), and a timed-out drive listing shows the same guidance
+  instead of an endless "Looking for drives".
+
 ## [0.2.6] - 2026-10-02
+
 
 ### Fixed
 

@@ -56,6 +56,34 @@ def test_main_window_constructs(qapp, monkeypatch):
     w.close()
 
 
+
+
+def test_setup_continue_always_reaches_source(qapp, monkeypatch):
+    """Regression (2026-10-02): Continue was a silent no-op when the nav
+    row already pointed at Source (stack stayed on Setup). It must
+    always move the stack to the Source page."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+    from bluray_to_mp4 import makemkv as mm
+    monkeypatch.setattr(mm, "find_drives", lambda **kw: [])
+    import bluray_to_mp4.ui.workers as workers_mod
+    monkeypatch.setattr(workers_mod, "find_drives", lambda **kw: [])
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    # Simulate the worst case: sidebar row already 1 while the stack
+    # somehow sits on Setup (the exact pre-fix mismatch state).
+    w.stack.setCurrentIndex(0)
+    w.nav_list.blockSignals(True)
+    w.nav_list.setCurrentRow(1)
+    w.nav_list.blockSignals(False)
+    assert w.stack.currentIndex() == 0
+    w.btn_setup_continue.click()
+    assert w.stack.currentIndex() == 1, "Continue must land on Source"
+    w.close()
+
+
+
 def test_plan_flow_movie(qapp, monkeypatch):
     """Scan -> plan page fills with movie naming + recommended tracks."""
     from bluray_to_mp4.ui.main_window import MainWindow
