@@ -147,6 +147,7 @@ def test_nvenc_check_distinguishes_build_vs_driver(monkeypatch, tmp_path):
         def __init__(self, rc, out=""):
             self.returncode = rc
             self.stdout = out
+            self.stderr = ""
 
     # ffmpeg reports hevc_nvenc among encoders but the probe fails:
     # message should mention drivers/GPU, not "build lacks".

@@ -126,15 +126,19 @@ def check_nvenc() -> DependencyCheck:
             "skipped: ffmpeg not found (x265 software encode still works)",
             None, required=False,
         )
+    _nvenc_err = ""
     try:
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
              "-c:v", "hevc_nvenc", "-f", "null", "-"],
-            capture_output=True, timeout=60,
+            capture_output=True, text=True, timeout=60,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
         proc = None
+        _nvenc_err = str(exc)
+    else:
+        _nvenc_err = ((proc.stderr or "") + (proc.stdout or "")).strip()
     if proc is not None and proc.returncode == 0:
         return DependencyCheck(
             "NVIDIA NVENC", True,
@@ -154,11 +158,15 @@ def check_nvenc() -> DependencyCheck:
     except (OSError, subprocess.TimeoutExpired):
         pass
     if "hevc_nvenc" in encoders:
+        detail = "ffmpeg has NVENC support, but the hardware probe failed"
+        if _nvenc_err:
+            snippet = " ".join(_nvenc_err.split())[:200]
+            detail = f"{detail}: {snippet}"
+        else:
+            detail += " - check GPU drivers (nvidia-smi)"
+        detail += "; x265 quality mode still works"
         return DependencyCheck(
-            "NVIDIA NVENC", False,
-            "ffmpeg has NVENC support, but the hardware probe failed - "
-            "check GPU drivers (nvidia-smi) or try the app again after a "
-            "reboot; x265 quality mode still works",
+            "NVIDIA NVENC", False, detail,
             "https://www.nvidia.com/drivers", required=False,
         )
     return DependencyCheck(
