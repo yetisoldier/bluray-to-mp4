@@ -85,15 +85,16 @@ jobs:
           $exe = "dist\bluray-to-mp4\bluray-to-mp4.exe"
           & $signtool sign /f "$env:TEMP\cs.pfx" /p $env:YW_CODESIGN_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe
           if ($LASTEXITCODE -ne 0) { throw "signtool sign failed" }
-          # Trust the signer on this runner so full-chain validation passes
-          # (self-signed root: the runner must trust its own signer to verify).
-          # LocalMachine stores: admin-only, NO interactive confirmation prompt
-          # (CurrentUser\Root pops a GUI dialog and hangs headless CI).
-          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("$env:TEMP\cs.pfx", $env:YW_CODESIGN_PW)
-          foreach ($storeName in @("TrustedPeople", "Root")) {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, "LocalMachine")
-            $store.Open("ReadWrite"); $store.Add($cert); $store.Close()
-          }
+          # Trust the YetiWurks Root CA (chain anchor) + signing leaf on this
+          # runner so full-chain validation passes. LocalMachine stores:
+          # admin-only, NO interactive confirmation prompt (CurrentUser\Root
+          # pops a GUI dialog and hangs headless CI).
+          $rootCa = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("packaging\YetiWurks-Root-CA.cer")
+          $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
+          $rootStore.Open("ReadWrite"); $rootStore.Add($rootCa); $rootStore.Close()
+          $leaf = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("$env:TEMP\cs.pfx", $env:YW_CODESIGN_PW)
+          $tpStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
+          $tpStore.Open("ReadWrite"); $tpStore.Add($leaf); $tpStore.Close()
           $si = Get-AuthenticodeSignature $exe
           Write-Host "Signer: $($si.SignerCertificate.Subject)"
           if ($si.Status -ne "Valid") { throw "signature invalid on runner: $($si.Status) $($si.StatusMessage)" }
@@ -102,6 +103,7 @@ jobs:
       - name: Ship trust files (publisher cert + one-time install script)
         shell: pwsh
         run: |
+          Copy-Item packaging\YetiWurks-Root-CA.cer dist\bluray-to-mp4\
           Copy-Item packaging\YetiWurks-CodeSigning.cer dist\bluray-to-mp4\
           Copy-Item packaging\install-cert.ps1 dist\bluray-to-mp4\
           Write-Host "Trust files shipped in the app folder"

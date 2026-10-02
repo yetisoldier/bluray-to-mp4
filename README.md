@@ -77,9 +77,19 @@ missing download page, so you never have to guess.
    [latest release](../../releases)
 2. Extract it anywhere (e.g. `C:\Tools\bluray-to-mp4`) and run
    `bluray-to-mp4.exe`
-3. Install the required tools from the table above (the Setup screen
+3. **One-time, per PC (optional):** to stop Windows flagging the app as an
+   unknown publisher, right-click `install-cert.ps1` in the app folder →
+   "Run with PowerShell". It installs the YetiWurks Root CA and marks the
+   signer trusted machine-wide (self-elevates to admin). After that the
+   exe runs without warnings and shows **YetiWurks LLC** as publisher.
+4. Install the required tools from the table above (the Setup screen
    links them)
-4. Insert a disc, press **Scan**
+5. Insert a disc, press **Scan**
+
+> Why: builds are signed with YetiWurks' own code-signing certificate
+> (not a paid public CA), so Windows warns until you opt in to trusting
+> YetiWurks builds. The one-time script is that opt-in. Every CI build is
+> signature-verified before packaging.
 
 ### Option B: from source
 
