@@ -177,3 +177,111 @@ def test_nvenc_check_distinguishes_build_vs_driver(monkeypatch, tmp_path):
     check2 = deps.check_nvenc()
     assert not check2.ok
     assert "build" in check2.detail.lower()
+
+
+def _nvenc_fake_env(monkeypatch, probe_rc=0):
+    """Shared QW-4 test environment: a fake ffmpeg build whose
+    expensive hardware probe can be counted (and made to fail)."""
+    import subprocess as _sp
+
+    from bluray_to_mp4 import deps
+    from bluray_to_mp4.config import Settings
+
+    monkeypatch.setattr(deps, "find_program",
+                        lambda *a, **k: "/opt/fake/ffmpeg")
+
+    class _Proc:
+        def __init__(self, rc, out=""):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    hardware_probes = []
+
+    def fake_run(cmd, **kw):
+        if "-version" in cmd:        # cheap build-identity read; always runs
+            return _Proc(0, "ffmpeg version 8.0-fake build\n")
+        if "-encoders" in cmd:       # only the failure path asks this
+            return _Proc(0, " hevc_nvenc ")
+        hardware_probes.append(cmd)  # the expensive GPU probe
+        return _Proc(probe_rc)
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+
+    saves = []
+    monkeypatch.setattr(Settings, "save", lambda self: saves.append(1))
+    return hardware_probes, saves
+
+
+def test_nvenc_cache_pass_saves_stamp_then_skips_probe(monkeypatch):
+    """QW-4: a PASSING probe is stamped into settings.extras as
+    '<ffmpeg path>|<version line>'; a repeat check with the same build
+    returns the cached verdict WITHOUT running the hardware probe."""
+    from bluray_to_mp4 import deps
+    from bluray_to_mp4.config import Settings
+
+    probes, saves = _nvenc_fake_env(monkeypatch)
+
+    settings = Settings()  # constructed and passed exactly like check_all
+    check = deps.check_nvenc(settings)
+    assert check.ok
+    assert len(probes) == 1
+    assert settings.extras[deps.NVENC_STAMP_KEY] == (
+        "/opt/fake/ffmpeg|ffmpeg version 8.0-fake build")
+    assert len(saves) == 1  # stamp persisted
+
+    # Same build: cached verdict, no hardware probe, no extra save.
+    check2 = deps.check_nvenc(settings)
+    assert check2.ok and "cached" in check2.detail.lower()
+    assert len(probes) == 1
+    assert len(saves) == 1
+
+    # Direct callers (settings=None) always run the real probe.
+    check3 = deps.check_nvenc()
+    assert check3.ok
+    assert len(probes) == 2
+
+
+def test_nvenc_cache_stamp_mismatch_reprobes(monkeypatch):
+    """A stored stamp from a DIFFERENT ffmpeg build (path or version
+    changed) must not satisfy the check: re-probe and overwrite the
+    stamp with the current build's identity."""
+    from bluray_to_mp4 import deps
+    from bluray_to_mp4.config import Settings
+
+    probes, saves = _nvenc_fake_env(monkeypatch)
+    settings = Settings()
+    settings.extras[deps.NVENC_STAMP_KEY] = (
+        "/opt/fake/ffmpeg|ffmpeg version 7.0-OLD")
+
+    check = deps.check_nvenc(settings)
+    assert check.ok
+    assert len(probes) == 1  # cache miss: probed again
+    assert settings.extras[deps.NVENC_STAMP_KEY] == (
+        "/opt/fake/ffmpeg|ffmpeg version 8.0-fake build")
+    assert len(saves) == 1   # new stamp persisted
+
+
+def test_nvenc_cache_failed_probe_clears_stamp(monkeypatch):
+    """A failing probe invalidates whatever stamp was stored: clear it
+    (and persist the clear) so the next check re-probes honestly."""
+    from bluray_to_mp4 import deps
+    from bluray_to_mp4.config import Settings
+
+    probes, saves = _nvenc_fake_env(monkeypatch, probe_rc=1)
+    settings = Settings()
+    settings.extras[deps.NVENC_STAMP_KEY] = (
+        "/opt/fake/ffmpeg|ffmpeg version 7.0-OLD")
+
+    check = deps.check_nvenc(settings)
+    assert not check.ok
+    assert len(probes) == 1
+    assert deps.NVENC_STAMP_KEY not in settings.extras  # cleared
+    assert len(saves) == 1                               # clear persisted
+
+    # No stamp left to lean on: the next check probes again (and has
+    # nothing left to clear, so no extra save).
+    check2 = deps.check_nvenc(settings)
+    assert not check2.ok
+    assert len(probes) == 2
+    assert len(saves) == 1

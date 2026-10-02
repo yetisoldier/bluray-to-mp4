@@ -8,12 +8,13 @@ UI runs, and remote /status all share one picture.
 
 from __future__ import annotations
 
+import os
 import traceback
 
 from PySide6.QtCore import QThread, Signal
 
 from ..config import Settings
-from ..makemkv import find_drives, scan_disc
+from ..makemkv import find_drives, make_runner, scan_disc
 from ..models import Disc
 from ..monitor import JobRecord, state as monitor_state
 from ..pipeline import run_pipeline
@@ -38,7 +39,14 @@ class ScanWorker(QThread):
     def run(self) -> None:  # QThread override
         try:
             if self.mode == "drives":
-                self.drives_listed.emit(find_drives())
+                # QW-3 (Bob audit): an orphan makemkvcon holding the drive
+                # used to hang this call forever - "Looking for drives ..."
+                # spun eternally and the v0.2.7 "timed out" guidance in
+                # _scan_failed could never fire. The 60 s runner timeout
+                # (with make_runner's kill-on-expiry) turns the hang into
+                # the reachable orphan-hint path. Scan/rip stay timeout=None.
+                self.drives_listed.emit(
+                    find_drives(runner=make_runner(timeout=60.0)))
             else:
                 progress = self.progress
 
@@ -137,12 +145,21 @@ class RunWorker(QThread):
 
             for job in result.jobs:
                 if job.completed:
+                    # QW-6 (Bob audit): the output is on disk now - record
+                    # its size so History can show size + achieved GB/hour
+                    # (the number Eric validates by hand every run).
+                    try:
+                        size_bytes = os.path.getsize(os.path.join(
+                            self.plan.get("outdir", ""), job.output_name))
+                    except (OSError, ValueError):
+                        size_bytes = 0
                     monitor_state.job_done(JobRecord(
                         name=job.output_name,
                         kind="series" if result.is_series else "movie",
                         duration_seconds=job.duration_seconds,
                         encoder=result.encoder,
                         srt=bool(job.srt_path),
+                        size_bytes=size_bytes,
                         warnings=(
                             [] if job.srt_path
                             else ([w for w in getattr(result, "warnings", [])

@@ -165,12 +165,22 @@ class MainWindow(QMainWindow):
         content_layout.setContentsMargins(12, 8, 12, 8)
         content_layout.setSpacing(10)
 
-        # Header: current page title + monitor status pill
+        # Header: current page title + total-remaining + monitor pills.
+        # The total pill (design addendum §6) shows the all-steps
+        # forecast in the header while a run is live, so the number is
+        # visible from every page - the Encode card's time_remaining
+        # gets overwritten with per-stage ETAs on progress ticks, and
+        # is invisible from Source/Review/History anyway. Refreshed
+        # once a second by _tick_elapsed -> _forecast_total; cleared
+        # in _stop_liveness (done/failed/cancel all pass through it).
         header_row = QHBoxLayout()
         self.page_title = QLabel("Source")
         self.page_title.setObjectName("h1")
         header_row.addWidget(self.page_title)
         header_row.addStretch()
+        self.total_pill = QLabel("")
+        self.total_pill.setObjectName("statusPill")
+        header_row.addWidget(self.total_pill)
         self.monitor_pill = QLabel("")
         self.monitor_pill.setObjectName("statusPill")
         header_row.addWidget(self.monitor_pill)
@@ -308,7 +318,10 @@ class MainWindow(QMainWindow):
         self.pages.append(page)
 
     def _show_deps_if_needed(self) -> None:
-        checks = check_all()
+        # QW-4: pass settings so check_nvenc can honor/store its
+        # version-stamped cache (a repeat launch skips the hardware
+        # probe for the same ffmpeg build).
+        checks = check_all(self.settings)
         missing = missing_required(checks)
         self.deps_table.setRowCount(len(checks))
         for row, check in enumerate(checks):
@@ -735,9 +748,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(muted("Recently completed outputs (newest first)."))
         card = card_frame()
         cl = QVBoxLayout(card)
-        self.history_table = QTableWidget(0, 4)
+        self.history_table = QTableWidget(0, 6)
         self.history_table.setHorizontalHeaderLabels(
-            ["Output", "Type", "Duration", "Notes"])
+            ["Output", "Type", "Duration", "Size", "GB/hr", "Notes"])
         self.history_table.horizontalHeader().setStretchLastSection(True)
         cl.addWidget(self.history_table)
         btn_row = QHBoxLayout()
@@ -765,10 +778,25 @@ class MainWindow(QMainWindow):
             duration = ("-" if not rec.duration_seconds else
             f"{rec.duration_seconds // 3600}:{(rec.duration_seconds % 3600) // 60:02d}:{rec.duration_seconds % 60:02d}")
             warnings = ", ".join(rec.warnings) if rec.warnings else ""
+            # QW-6: size + achieved GB/hour per record - the budget
+            # check Eric has been doing by hand after every run. Decimal
+            # units (GB = 1e9) match the encode size budgets; unknown
+            # size or duration renders as "-".
+            size_bytes = getattr(rec, "size_bytes", 0)
+            if not size_bytes:
+                size_text = "-"
+            elif size_bytes >= 1_000_000_000:
+                size_text = f"{size_bytes / 1e9:.1f} GB"
+            else:
+                size_text = f"{size_bytes / 1e6:.0f} MB"
+            gbph = rec.gb_per_hour if (size_bytes and rec.duration_seconds) else 0.0
+            gb_text = f"{gbph:.1f}" if gbph else "-"
             self.history_table.setItem(row, 0, QTableWidgetItem(name))
             self.history_table.setItem(row, 1, QTableWidgetItem(rec.kind))
             self.history_table.setItem(row, 2, QTableWidgetItem(duration))
-            self.history_table.setItem(row, 3, QTableWidgetItem(warnings))
+            self.history_table.setItem(row, 3, QTableWidgetItem(size_text))
+            self.history_table.setItem(row, 4, QTableWidgetItem(gb_text))
+            self.history_table.setItem(row, 5, QTableWidgetItem(warnings))
         self.history_table.resizeColumnsToContents()
 
     # ------------------------------------------------------------------
@@ -1036,7 +1064,6 @@ class MainWindow(QMainWindow):
         self.time_elapsed.setText("Elapsed 0:00")
         self._stage_now = "scan"
         self._stage_eta = None
-        self._forecast_total()  # sets time_remaining from the plan
 
         self.run_worker = RunWorker(self.disc.index, plan, self.settings)
         self.run_worker.stage.connect(self._run_stage)
@@ -1044,6 +1071,12 @@ class MainWindow(QMainWindow):
         self.run_worker.done.connect(self._run_done)
         self.run_worker.failed.connect(self._run_failed)
         self.run_worker.start()
+        # Forecast once the worker (and its plan) exists: seeds the
+        # Encode-card estimate and the header pill immediately instead
+        # of waiting for the first stage signal or the 1 s tick (the
+        # old pre-worker call was a silent no-op - run_worker was None,
+        # so _forecast_total_seconds returned None).
+        self._forecast_total()
 
     def _cancel_run(self) -> None:
         if not self.run_worker or not self.run_worker.isRunning():
@@ -1104,9 +1137,20 @@ class MainWindow(QMainWindow):
     def _forecast_total(self) -> None:
         secs = self._forecast_total_seconds()
         if secs is None:
+            # No live run plan: nothing to forecast in the header pill.
+            # (time_remaining is cleared separately in _stop_liveness.)
+            self.total_pill.setText("")
             return
         self.time_remaining.setText(
             f"Total remaining ~{self._fmt_hm(secs)} (all steps)")
+        # Header pill (addendum §6): the all-steps forecast, visible from
+        # every page, only while a run is active. _run_progress's
+        # per-stage ETA overwrites only time_remaining; the pill is
+        # rewritten once a second by _tick_elapsed, so it can never
+        # flicker or go stale, and _stop_liveness clears it on every
+        # done/failed/cancel path.
+        if self._run_started_at is not None and self._stage_now != "done":
+            self.total_pill.setText(f"Total remaining ~{self._fmt_hm(secs)}")
 
     def _tick_elapsed(self) -> None:
         if self._run_started_at is None:
@@ -1125,6 +1169,9 @@ class MainWindow(QMainWindow):
         self._run_started_at = None
         self.stage_bar.set_busy(False)
         self.time_remaining.setText("")
+        # Header pill shares the time_remaining lifecycle: cleared on
+        # done/failed/cancel (every stop path passes through here).
+        self.total_pill.setText("")
 
     def _run_stage(self, msg: str) -> None:
         self.progress_stage.setText(msg)

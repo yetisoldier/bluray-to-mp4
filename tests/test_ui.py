@@ -774,3 +774,176 @@ def test_history_table_stays_inside_card(qapp, monkeypatch):
                for i in range(page_layout.count())]
     assert parent in widgets
     w.close()
+
+
+# ----------------------------------------------------------------------
+# v0.2.16 polish: total-remaining header pill, ScanWorker drive-scan
+# timeout (QW-3), and History size + GB/hr columns (QW-6).
+
+def test_total_pill_shows_forecast_during_run_and_clears_on_stop(
+        qapp, monkeypatch):
+    """The header pill (statusPill style) shows the all-steps forecast
+    only while a run is live; idle and every stop path leave it empty."""
+    import time
+
+    from bluray_to_mp4 import makemkv as mm
+    import bluray_to_mp4.ui.workers as workers_mod
+    from bluray_to_mp4.ui.main_window import MainWindow
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    monkeypatch.setattr(mm, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(workers_mod, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+
+    # Idle: no live run -> the pill must be empty, even after a tick.
+    assert w.total_pill.objectName() == "statusPill"
+    assert w.total_pill.text() == ""
+    w._forecast_total()
+    assert w.total_pill.text() == ""
+
+    # Stubbed live run: worker + plan exist, clock started.
+    plan = {
+        "disc_name": "Disc", "media_type": "bluray", "is_series": True,
+        "encoder": "nvenc", "outdir": "/tmp/x", "want_subtitles": True,
+        "jobs": [
+            {"tid": 0, "output_name": "e0.mp4", "duration_seconds": 2700},
+            {"tid": 1, "output_name": "e1.mp4", "duration_seconds": 2700},
+        ],
+        "tid_names": {},
+    }
+    w.run_worker = RunWorker(0, plan, Settings())
+    w._run_started_at = time.time()
+    w._stage_now = "encode"
+    w._stage_eta = 100.0
+    w._forecast_total()
+    assert "Total remaining" in w.total_pill.text()
+
+    # Every stop path (done/failed/cancel) passes through here: empty.
+    w._stop_liveness()
+    assert w.total_pill.text() == ""
+    w.close()
+
+
+def test_scan_worker_drives_mode_uses_60s_timeout_runner(qapp, monkeypatch):
+    """QW-3: the drives listing must go through a runner built with
+    timeout=60.0 (make_runner kills on expiry) so an orphan makemkvcon
+    can no longer hang 'Looking for drives ...' forever."""
+    from bluray_to_mp4.ui import workers as workers_mod
+    from bluray_to_mp4.ui.workers import ScanWorker
+
+    captured = {}
+
+    def fake_runner(binary, args):
+        return iter([])
+
+    def fake_make_runner(timeout=None, cancel_state=None):
+        captured["timeout"] = timeout
+        return fake_runner
+
+    def fake_find_drives(binary="makemkvcon", *, runner=None, timeout=None):
+        captured["runner"] = runner
+        return []
+
+    monkeypatch.setattr(workers_mod, "make_runner", fake_make_runner)
+    monkeypatch.setattr(workers_mod, "find_drives", fake_find_drives)
+
+    listed, failed = [], []
+    w = ScanWorker(mode="drives")
+    w.drives_listed.connect(listed.append)
+    w.failed.connect(failed.append)
+    w.run()  # drive synchronously; direct slots need no event loop
+
+    assert captured["timeout"] == 60.0
+    assert captured["runner"] is fake_runner
+    assert listed == [[]]   # emitted the (empty) drive list
+    assert failed == []     # and never took the error path
+
+
+def test_history_table_renders_size_and_gb_per_hour(qapp, monkeypatch):
+    """QW-6: History gains Size (humanized MB/GB) + GB/hr columns; the
+    achieved rate reads directly against the encode budgets. Unknown
+    size or duration renders as '-'."""
+    from bluray_to_mp4 import makemkv as mm
+    import bluray_to_mp4.ui.workers as workers_mod
+    from bluray_to_mp4.ui.main_window import MainWindow
+    from bluray_to_mp4.monitor import JobRecord, state as monitor_state
+
+    monkeypatch.setattr(mm, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(workers_mod, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+
+    monkeypatch.setattr(monitor_state, "recent", [
+        JobRecord(name="Movie (2019).mp4", kind="movie",
+                  duration_seconds=7200, encoder="x265",
+                  size_bytes=2_000_000_000),
+        JobRecord(name="Show S01E01.mp4", kind="series",
+                  duration_seconds=3600, encoder="x265",
+                  size_bytes=500_000_000),
+        JobRecord(name="Legacy.mp4", kind="movie",
+                  duration_seconds=3600, encoder="x265"),  # size unknown
+    ])
+    w._refresh_history()
+
+    headers = [w.history_table.horizontalHeaderItem(c).text()
+               for c in range(w.history_table.columnCount())]
+    assert headers == ["Output", "Type", "Duration", "Size", "GB/hr", "Notes"]
+    assert w.history_table.item(0, 3).text() == "2.0 GB"
+    assert w.history_table.item(0, 4).text() == "1.0"
+    assert w.history_table.item(1, 3).text() == "500 MB"
+    assert w.history_table.item(1, 4).text() == "0.5"
+    assert w.history_table.item(2, 3).text() == "-"
+    assert w.history_table.item(2, 4).text() == "-"
+    w.close()
+
+
+def test_run_worker_records_output_size(qapp, monkeypatch, tmp_path):
+    """QW-6: after each completed job the worker stats the output file
+    and stores size_bytes on the JobRecord (0 when the file is gone)."""
+    from bluray_to_mp4.monitor import MonitorState
+    from bluray_to_mp4.ui import workers as workers_mod
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    class _Job:
+        def __init__(self, name):
+            self.output_name = name
+            self.completed = True
+            self.srt_path = None
+            self.duration_seconds = 7200
+
+    class _Result:
+        is_series = False
+        encoder = "x265"
+        jobs = [_Job("movie.mp4")]
+        errors = []
+        warnings = []
+
+    monkeypatch.setattr(workers_mod, "monitor_state", MonitorState())
+    monkeypatch.setattr(workers_mod, "run_pipeline",
+                        lambda *a, **k: _Result())
+
+    (tmp_path / "movie.mp4").write_bytes(b"x" * 4096)
+    plan = {
+        "disc_name": "Disc", "media_type": "bluray", "is_series": False,
+        "encoder": "x265", "outdir": str(tmp_path),
+        "jobs": [{"tid": 0, "output_name": "movie.mp4",
+                  "duration_seconds": 7200}],
+        "tid_names": {},
+    }
+    worker = RunWorker(0, plan, Settings())
+    worker.start()
+    _pump(qapp, worker)
+
+    state = workers_mod.monitor_state
+    assert state.jobs_done == 1
+    rec = state.recent[0]
+    assert rec.size_bytes == 4096
+    # Same pinned formula as the monitor unit test: bytes/1e9 per hour.
+    assert abs(rec.gb_per_hour - (4096 / 1e9 / 2.0)) < 1e-12

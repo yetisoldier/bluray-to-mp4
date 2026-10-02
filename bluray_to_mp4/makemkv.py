@@ -210,7 +210,19 @@ def make_runner(timeout: float | None = None, cancel_state: _CancelState | None 
                 except subprocess.TimeoutExpired:
                     proc.kill()
             else:
-                rc = proc.wait(timeout=timeout)
+                try:
+                    rc = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    # QW-3 (Bob audit, 2026-10-02): wait(timeout) expiring
+                    # must not leak the still-running child as a SECOND
+                    # orphan makemkvcon - kill and reap it, then surface
+                    # the timeout so the UI's v0.2.7 "timed out" guidance
+                    # can fire. Only this path changes: the cancel branch
+                    # above and every timeout=None caller (scan, rip,
+                    # CLI) behave exactly as before.
+                    proc.kill()
+                    proc.wait()
+                    raise
                 if rc != 0:
                     raise MakeMkvError(f"makemkvcon exited with code {rc}")
 

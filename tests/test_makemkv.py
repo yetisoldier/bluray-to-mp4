@@ -189,3 +189,85 @@ def test_rip_titles_no_summary_empty_outdir_still_raises(tmp_path):
     ]
     with pytest.raises(MakeMkvError, match="without producing any files"):
         rip_titles(0, [0], str(out), runner=fake_runner(script))
+
+
+def test_make_runner_timeout_kills_and_reaps_child(monkeypatch):
+    """QW-3: wait(timeout) expiring must kill the still-running child
+    (no second orphan makemkvcon), reap it, and re-raise the timeout so
+    the UI's 'timed out' guidance can fire."""
+    import subprocess
+
+    from bluray_to_mp4 import makemkv as mm
+
+    class _FakeStdout:
+        def __iter__(self):
+            return iter([])      # no output lines: fall to the timed wait
+
+        def close(self):
+            pass
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _FakeStdout()
+            self.kills = 0
+            self.waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if timeout is not None:  # the timed wait: child still running
+                raise subprocess.TimeoutExpired("makemkvcon", timeout)
+            return 0                 # the untimed reap after kill()
+
+        def kill(self):
+            self.kills += 1
+
+    proc = _FakeProc()
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: proc)
+
+    runner = mm.make_runner(timeout=5.0)
+    with pytest.raises(subprocess.TimeoutExpired):
+        list(runner("makemkvcon", ["-r", "info", "disc:9999"]))
+
+    assert proc.kills == 1     # child was killed, not leaked
+    assert proc.waits == 2     # timed wait raised, then kill() reaped
+
+
+def test_make_runner_timeout_kills_and_reaps_child(monkeypatch):
+    """QW-3: wait(timeout) expiring must kill the still-running child
+    (no second orphan makemkvcon), reap it, and re-raise the timeout so
+    the UI's 'timed out' guidance can fire."""
+    import subprocess
+
+    from bluray_to_mp4 import makemkv as mm
+
+    class _FakeStdout:
+        def __iter__(self):
+            return iter([])      # no output lines: fall to the timed wait
+
+        def close(self):
+            pass
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _FakeStdout()
+            self.kills = 0
+            self.waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if timeout is not None:  # the timed wait: child still running
+                raise subprocess.TimeoutExpired("makemkvcon", timeout)
+            return 0                 # the untimed reap after kill()
+
+        def kill(self):
+            self.kills += 1
+
+    proc = _FakeProc()
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: proc)
+
+    runner = mm.make_runner(timeout=5.0)
+    with pytest.raises(subprocess.TimeoutExpired):
+        list(runner("makemkvcon", ["-r", "info", "disc:9999"]))
+
+    assert proc.kills == 1     # child was killed, not leaked
+    assert proc.waits == 2     # timed wait raised, then kill() reaped

@@ -12,17 +12,25 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .binaries import find_program
 from . import binaries
 
+if TYPE_CHECKING:  # deps stays settings-free at runtime (import-light)
+    from .config import Settings
+
 __all__ = ["DependencyCheck", "check_all", "MAKEMKV_URL", "FFMPEG_URL",
-           "SUBTITLE_EDIT_URL", "PYTHON_URL"]
+           "SUBTITLE_EDIT_URL", "PYTHON_URL", "NVENC_STAMP_KEY"]
 
 MAKEMKV_URL = "https://www.makemkv.com/download/"
 FFMPEG_URL = "https://ffmpeg.org/download.html"
 SUBTITLE_EDIT_URL = "https://github.com/SubtitleEdit/subtitleedit/releases"
 PYTHON_URL = "https://www.python.org/downloads/windows/"
+
+# QW-4 (Bob audit, 2026-10-02): settings.extras key holding the stamp of
+# the exact ffmpeg build (path + version line) whose NVENC probe passed.
+NVENC_STAMP_KEY = "nvenc_ok_stamp"
 
 
 @dataclass
@@ -119,8 +127,50 @@ def check_ffmpeg() -> DependencyCheck:
     return DependencyCheck("ffmpeg", False, "ffmpeg not found on PATH", FFMPEG_URL)
 
 
-def check_nvenc() -> DependencyCheck:
-    """NVENC capability via a hardware encode probe."""
+def _nvenc_cache_stamp(ffmpeg: str) -> str:
+    """Identity of the ffmpeg build that would run the NVENC probe.
+
+    Path + the first `-version` line: if either changes (new binary,
+    updated build), a cached verdict no longer applies and the real
+    hardware probe must run again. The `-version` call is a fast
+    metadata read - the expensive part being cached is the NVENC
+    encode probe (GPU/driver session) plus its -encoders fallback.
+    """
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-version"], capture_output=True, text=True,
+            timeout=15, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return f"{ffmpeg}|"
+    lines = (proc.stdout or "").splitlines()
+    return f"{ffmpeg}|{lines[0].strip() if lines else ''}"
+
+
+def _cache_save(settings) -> None:
+    """Persist a stamp change; cache is best-effort and must never
+    break the Setup screen (read-only disk, locked config, ...)."""
+    if settings is None:
+        return
+    try:
+        settings.save()
+    except OSError:
+        pass
+
+
+def check_nvenc(settings: "Settings | None" = None) -> DependencyCheck:
+    """NVENC capability via a hardware encode probe.
+
+    QW-4 cache: with `settings` (the UI passes its Settings instance),
+    a PASSING probe is stamped into settings.extras[NVENC_STAMP_KEY]
+    as "<ffmpeg path>|<version line>"; while the exact same build is
+    still in place the cached verdict is returned (detail notes
+    "cached") and the hardware probe is skipped. A failing probe
+    clears the stamp. settings=None (direct/CLI callers) always runs
+    the probe. The cache is cosmetic-only by construction: pipeline's
+    detect_encoder() re-probes hardware on every real run start, so a
+    stale cache can never send an encode down a broken path.
+    """
     ffmpeg = find_program(
         "ffmpeg",
         env_var="B2M_FFMPEG",
@@ -131,6 +181,16 @@ def check_nvenc() -> DependencyCheck:
         return DependencyCheck(
             "NVIDIA NVENC", False,
             "skipped: ffmpeg not found (x265 software encode still works)",
+            None, required=False,
+        )
+    extras = getattr(settings, "extras", None)
+    # Stamp identity is only needed when there is a cache to consult/
+    # update; settings=None (direct callers) skips straight to the probe.
+    stamp = _nvenc_cache_stamp(ffmpeg) if extras is not None else ""
+    if extras is not None and extras.get(NVENC_STAMP_KEY) == stamp:
+        return DependencyCheck(
+            "NVIDIA NVENC", True,
+            "hardware HEVC encoding available (fast mode, cached probe)",
             None, required=False,
         )
     _nvenc_err = ""
@@ -147,10 +207,17 @@ def check_nvenc() -> DependencyCheck:
     else:
         _nvenc_err = ((proc.stderr or "") + (proc.stdout or "")).strip()
     if proc is not None and proc.returncode == 0:
+        if extras is not None:
+            extras[NVENC_STAMP_KEY] = stamp
+            _cache_save(settings)
         return DependencyCheck(
             "NVIDIA NVENC", True,
             "hardware HEVC encoding available (fast mode)", None, required=False,
         )
+    # Probe failed: whatever stamp is stored no longer speaks for this
+    # build - clear it so the next check re-probes honestly.
+    if extras is not None and extras.pop(NVENC_STAMP_KEY, None) is not None:
+        _cache_save(settings)
     # Distinguish "this ffmpeg has no NVENC" from "GPU/driver problem":
     # a NVENC-less build errors with 'Unknown encoder' before ever touching
     # the GPU; a driver problem fails differently (or ffmpeg uses a
@@ -250,13 +317,13 @@ def check_python_encoder_modules() -> DependencyCheck:
         )
 
 
-def check_all() -> list[DependencyCheck]:
+def check_all(settings: "Settings | None" = None) -> list[DependencyCheck]:
     return [
         check_makemkv(),
         check_ffmpeg(),
         check_ffprobe(),
         check_subtitle_edit(),
-        check_nvenc(),
+        check_nvenc(settings),
         check_python_encoder_modules(),
     ]
 

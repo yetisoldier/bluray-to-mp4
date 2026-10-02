@@ -81,3 +81,37 @@ def test_failure_path(server):
     assert status["stage"] == "error"
     assert status["last_error"].startswith("makemkvcon")
     assert not status["busy"]
+
+
+def test_job_record_gb_per_hour_pins_formula():
+    """QW-6: gb_per_hour uses decimal GB (1e9) per hour of video - the
+    same unit as the encode size budgets (2.0 GB/hr Blu-ray, 1.0 GB/hr
+    DVD) - and never divides by zero for unknown size or duration."""
+    rec = JobRecord(name="Movie (2019).mp4", kind="movie",
+                    duration_seconds=7200, encoder="x265",
+                    size_bytes=2_000_000_000)
+    # 2 GB across 2 h -> exactly 1.0 GB/hr.
+    assert abs(rec.gb_per_hour - 1.0) < 1e-12
+    # Different shape, same rate: 0.5 GB across half an hour.
+    rec2 = JobRecord(name="E.mp4", kind="series", duration_seconds=1800,
+                     encoder="nvenc", size_bytes=500_000_000)
+    assert abs(rec2.gb_per_hour - 1.0) < 1e-12
+    # Unknown duration or size reads as 0.0, never a crash.
+    assert JobRecord(name="a", kind="movie", duration_seconds=0,
+                     encoder="x", size_bytes=123).gb_per_hour == 0.0
+    assert JobRecord(name="b", kind="movie", duration_seconds=60,
+                     encoder="x").gb_per_hour == 0.0
+
+
+def test_history_json_includes_size_and_rate(server):
+    """The /history payload carries size_bytes + gb_per_hour so remote
+    check-ins see the achieved size and rate, not just names."""
+    _, base, state = server
+    state.job_done(JobRecord(name="Movie (2019).mp4", kind="movie",
+                             duration_seconds=7200, encoder="x265",
+                             size_bytes=2_000_000_000))
+    code, history = _get(base + "/history?token=***", token="s3cret")
+    assert code == 200
+    job = history["jobs"][0]
+    assert job["size_bytes"] == 2_000_000_000
+    assert job["gb_per_hour"] == 1.0

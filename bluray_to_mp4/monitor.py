@@ -42,8 +42,24 @@ class JobRecord:
     duration_seconds: int
     encoder: str
     srt: bool = False
+    # QW-6 (Bob audit, 2026-10-02): output size at job_done time so
+    # History can show size + achieved GB/hour - the number Eric
+    # validates by hand every run. 0 = unknown/missing.
+    size_bytes: int = 0
     warnings: list[str] = field(default_factory=list)
     finished_at: float = field(default_factory=time.time)
+
+    @property
+    def gb_per_hour(self) -> float:
+        """Achieved size rate in GB (decimal) per hour of video.
+
+        Matches the project's size-budget units (encode.py: GB = 1e9,
+        2.0 GB/hr Blu-ray, 1.0 GB/hr DVD), so the History column reads
+        directly against the budget. 0.0 when duration is unknown.
+        """
+        if self.duration_seconds > 0:
+            return self.size_bytes / 1e9 / (self.duration_seconds / 3600)
+        return 0.0
 
 
 class MonitorState:
@@ -155,6 +171,8 @@ class MonitorState:
                     "duration_seconds": r.duration_seconds,
                     "encoder": r.encoder,
                     "srt": r.srt,
+                    "size_bytes": r.size_bytes,
+                    "gb_per_hour": round(r.gb_per_hour, 2),
                     "warnings": list(r.warnings),
                     "finished_at": r.finished_at,
                 }
