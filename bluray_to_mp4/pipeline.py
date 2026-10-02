@@ -317,6 +317,20 @@ def run_pipeline(
     os.makedirs(outdir, exist_ok=True)
     rip_dir = workdir or os.path.join(outdir, ".rip")
     os.makedirs(rip_dir, exist_ok=True)
+    # A prior cancelled/killed run can leave partial .mkv intermediates
+    # behind; makemkvcon robot mode then HANGS on its interactive
+    # "already exists - overwrite?" prompt with nobody to answer it
+    # (validation run 3, 2026-10-02). The .rip dir is ours alone -
+    # purge any stale contents before ripping so every run starts clean.
+    for _stale in os.listdir(rip_dir):
+        _p = os.path.join(rip_dir, _stale)
+        try:
+            if os.path.isdir(_p):
+                shutil.rmtree(_p, ignore_errors=True)
+            else:
+                os.remove(_p)
+        except OSError:
+            pass  # locked file: makemkv will surface its own error
 
     for tid, out_name in names:
         title = disc.title(tid)

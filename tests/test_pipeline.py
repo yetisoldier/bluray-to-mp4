@@ -328,6 +328,37 @@ def test_success_removes_default_rip_dir(tmp_path, monkeypatch):
     assert not os.path.exists(os.path.join(str(outdir), ".rip"))
 
 
+
+
+def test_stale_rip_intermediates_purged_before_rip(tmp_path, monkeypatch):
+    """Validation run 3 (2026-10-02): a partial .mkv left by a killed run
+    made makemkvcon hang on its interactive overwrite prompt forever.
+    run_pipeline must purge the .rip dir before ripping."""
+    _stub_probe(monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode",
+        lambda args, *, duration_seconds, binary="ffmpeg",
+        on_progress=None, cancel=None: None,
+    )
+    outdir = tmp_path / "out"
+    stale = outdir / ".rip" / "Mamma Mia_t00.mkv"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"partial rip from a killed run")
+    script = MOVIE_DISC_OUTPUT.splitlines() + [
+        'MSG:3307,0,2,"File added","File %1 added","'
+        + str(outdir / ".rip" / "movie_t00.mkv") + '","0"',
+        'MSG:5004,0,2,"1 titles saved, 0 failed",'
+        '"%1 titles saved, %2 failed","1","0"',
+    ]
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(script),
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert not stale.exists()
+
+
+
 def test_failure_preserves_rip_dir_with_warning(tmp_path, monkeypatch):
     """C6: a single-job failure now RETURNS a partial result (no raise);
     intermediates are kept and the failure lands in result.errors."""

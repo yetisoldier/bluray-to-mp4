@@ -2,7 +2,19 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.8] - 2026-10-02
+
+### Fixed
+
+- **Stale rip intermediates could hang the whole run.** A cancelled or
+  force-quit run left partial .mkv files in the .rip workdir; the next
+  run's makemkvcon then sat forever on its interactive
+  "already exists - overwrite?" prompt in robot mode, where nothing
+  can answer it. The pipeline now purges the .rip workdir (ours alone)
+  before every rip so each run starts clean (regression test included).
+
 ## [0.2.7] - 2026-10-02
+
 
 ### Fixed
 
