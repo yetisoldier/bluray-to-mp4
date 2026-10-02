@@ -130,8 +130,12 @@ class MainWindow(QMainWindow):
         # stack and sidebar can never disagree (the 2026-10-02 Continue bug:
         # row was set to 1 pre-connect, stack stayed on Setup, and Continue's
         # 1->1 was a no-op that left the page frozen on Setup).
+        # NOTE: the initial row itself is set AFTER all pages are built
+        # (see __init__ below) - _nav_changed touches self.stack, which
+        # does not exist yet during sidebar construction; setting it here
+        # crashed _nav_changed with a startup AttributeError traceback
+        # (Eric's terminal, validation run 5, fixed v0.2.11).
         self.nav_list.currentRowChanged.connect(self._nav_changed)
-        self.nav_list.setCurrentRow(1)  # Source is the default page
         nav_layout.addWidget(self.nav_list)
         nav_layout.addStretch()
         layout.addWidget(navbar, stretch=0)
@@ -166,6 +170,10 @@ class MainWindow(QMainWindow):
         self._build_review_page()  # index 2
         self._build_encode_page()  # index 3
         self._build_history_page() # index 4
+        # Initial page: set only once the stack and all five pages exist,
+        # so _nav_changed fires safely (v0.2.11 - setting it during
+        # sidebar construction crashed with 'no attribute stack').
+        self.nav_list.setCurrentRow(1)  # Source is the default page
 
         # Status bar + menubar
         self.statusBar().showMessage("Ready")
@@ -188,6 +196,10 @@ class MainWindow(QMainWindow):
         help_menu.addAction("&About", self._show_about)
 
     def _nav_changed(self, row: int) -> None:
+        # Guard: the signal can fire during construction (before the
+        # stack exists); never crash there (v0.2.11).
+        if not hasattr(self, "stack"):
+            return
         self.stack.setCurrentIndex(row)
         titles = ["Setup", "Source", "Review", "Encode", "History"]
         self.page_title.setText(titles[row] if 0 <= row < len(titles) else "")

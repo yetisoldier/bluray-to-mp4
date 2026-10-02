@@ -2,7 +2,21 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.11] - 2026-10-02
+
+### Fixed
+
+- **Startup traceback in the console** ("AttributeError: 'MainWindow'
+  object has no attribute 'stack'"). The v0.2.7 nav-signal fix set the
+  initial sidebar row while the window was still being constructed -
+  before the content stack existed - so the very first page-change
+  signal crashed. The app recovered (the rip still ran), but printed
+  the traceback and opened on Setup instead of Source. Initial row is
+  now set after all pages are built, and _nav_changed guards against
+  pre-construction calls.
+
 ## [0.2.10] - 2026-10-02
+
 
 ### Fixed
 
