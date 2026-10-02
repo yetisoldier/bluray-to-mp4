@@ -2,7 +2,21 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.3] - 2026-10-02
+
+### Added
+
+- **YetiWurks LLC publisher metadata**: the exe's file properties (and any
+  Windows dialog) now show YetiWurks LLC as publisher, with product version
+  0.2.3 and proper copyright.
+- **Code-signed builds**: every CI build is signed with the YetiWurks code
+  signing certificate (embedded signature, RFC3161 timestamp). Install the
+  bundled `YetiWurks-CodeSigning.cer` once on each PC (see README) and
+  Windows stops warning that the app is from an unknown publisher.
+- About dialog credits YetiWurks LLC.
+
 ## [0.2.2] - 2026-10-02
+
 
 ### Fixed
 

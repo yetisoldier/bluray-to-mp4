@@ -201,7 +201,9 @@ class MainWindow(QMainWindow):
             "About bluray-to-mp4",
             f"bluray-to-mp4 v{bluray_to_mp4.__version__}\n\n"
             "Local disc-to-MP4 ripper with recommendations and monitoring.\n"
-            "Requires: MakeMKV, ffmpeg/ffprobe (bundled when built with CI).\n\n"
+            "ffmpeg/ffprobe and Subtitle Edit are bundled; only MakeMKV is a\n"
+            "separate install.\n\n"
+            "Published by YetiWurks LLC\n"
             "Private repo: https://github.com/yetisoldier/bluray-to-mp4",
         )
 

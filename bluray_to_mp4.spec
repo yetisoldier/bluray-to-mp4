@@ -66,6 +66,7 @@ exe = EXE(
     name="bluray-to-mp4",
     console=True,  # keep console for first-run dependency output + monitor URL
     icon=None,
+    version="packaging/version_info.txt",  # YetiWurks LLC publisher metadata
 )
 
 coll = COLLECT(

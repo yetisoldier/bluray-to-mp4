@@ -54,8 +54,53 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
 
+      - name: Stamp version into exe metadata
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          Write-Host "Stamping publisher metadata for v$ver"
+          $vf = "packaging/version_info.txt"
+          $c = Get-Content $vf -Raw
+          $parts = $ver.Split('.')
+          $c = $c -replace "filevers=\(\d+, \d+, \d+, \d+\)", "filevers=($($parts[0]), $($parts[1]), $($parts[2]), 0)"
+          $c = $c -replace "prodvers=\(\d+, \d+, \d+, \d+\)", "prodvers=($($parts[0]), $($parts[1]), $($parts[2]), 0)"
+          $c = $c -replace "StringStruct\('FileVersion', '[\d.]+'\)", "StringStruct('FileVersion', '$ver')"
+          $c = $c -replace "StringStruct\('ProductVersion', '[\d.]+'\)", "StringStruct('ProductVersion', '$ver')"
+          Set-Content $vf $c -NoNewline
+
       - name: Build exe
         run: pyinstaller bluray_to_mp4.spec --noconfirm
+
+      - name: Sign the exe (YetiWurks LLC)
+        shell: pwsh
+        env:
+          YW_CODESIGN_PFX_B64: ${{ secrets.YW_CODESIGN_PFX_B64 }}
+          YW_CODESIGN_PW: ${{ secrets.YW_CODESIGN_PW }}
+        run: |
+          $env:YW_CODESIGN_PW = $env:YW_CODESIGN_PW.Trim()
+          [IO.File]::WriteAllBytes("$env:TEMP\cs.pfx", [Convert]::FromBase64String($env:YW_CODESIGN_PFX_B64))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
+          if (-not $signtool) { throw "signtool.exe not found" }
+          $exe = "dist\bluray-to-mp4\bluray-to-mp4.exe"
+          & $signtool sign /f "$env:TEMP\cs.pfx" /p $env:YW_CODESIGN_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool sign failed" }
+          # Trust the signer on this runner (no prompt for these stores),
+          # then prove the embedded signature fully validates.
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("$env:TEMP\cs.pfx", $env:YW_CODESIGN_PW)
+          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "CurrentUser")
+          $store.Open("ReadWrite"); $store.Add($cert); $store.Close()
+          $si = Get-AuthenticodeSignature $exe
+          Write-Host "Signer: $($si.SignerCertificate.Subject)"
+          if ($si.Status -ne "Valid") { throw "signature invalid on runner: $($si.Status) $($si.StatusMessage)" }
+          Write-Host "Signed as YetiWurks LLC - signature verified"
+
+      - name: Ship trust files (publisher cert + one-time install script)
+        shell: pwsh
+        run: |
+          Copy-Item packaging\YetiWurks-CodeSigning.cer dist\bluray-to-mp4\
+          Copy-Item packaging\install-cert.ps1 dist\bluray-to-mp4\
+          Write-Host "Trust files shipped in the app folder"
 
       - name: Package
         shell: pwsh
