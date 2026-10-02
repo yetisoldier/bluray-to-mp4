@@ -19,6 +19,7 @@ __all__ = [
     "ProbedStream",
     "parse_probe",
     "probe_streams",
+    "probe_duration_seconds",
     "nth_of_type",
     "is_interlaced",
 ]
@@ -76,6 +77,37 @@ def probe_streams(path: str, *, binary: str = "ffprobe") -> list[ProbedStream]:
             f"ffprobe failed on {path}: {result.stderr.strip()[:300]}"
         )
     return parse_probe(result.stdout)
+
+
+def probe_duration_seconds(path: str, *, binary: str = "ffprobe") -> float:
+    """Container duration of a media file in seconds (single csv value).
+
+    Used to verify that an existing rip in the workdir is complete
+    before reusing it (v0.2.12): a partial file either fails to probe
+    or reports a duration far shorter than the scanned title.
+    """
+    binary = resolve_ffprobe(binary)
+    result = subprocess.run(
+        [binary, "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise FfprobeError(
+            f"ffprobe failed on {path}: {result.stderr.strip()[:300]}"
+        )
+    text = result.stdout.strip()
+    if not text:
+        raise FfprobeError(f"ffprobe reported no duration for {path}")
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise FfprobeError(
+            f"unparsable ffprobe duration for {path}: {text[:100]!r}"
+        ) from exc
 
 
 def nth_of_type(streams: list[ProbedStream], codec_type: str, n: int) -> ProbedStream | None:

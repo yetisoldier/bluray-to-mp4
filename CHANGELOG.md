@@ -2,6 +2,29 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.12] - 2026-10-02
+
+### Added
+
+- **A complete rip is no longer thrown away.** A cancelled or killed
+  run can leave a fully ripped .mkv in the .rip workdir (Eric's
+  "Mamma Mia! Here We Go Again" ripped 100% before run 5 died on the
+  probe step). Before ripping each title, the pipeline now checks the
+  expected file and duration-verifies it with ffprobe against the
+  scanned title (within max(60 s, 5%)): a verified rip moves straight
+  to encoding with no re-rip. Corrupt/partial leftovers fail the probe
+  or the duration check and are deleted and re-ripped as before.
+
+### Fixed
+
+- **The run-start .rip purge now preserves expected job files.** The
+  v0.2.8 purge deleted EVERYTHING in .rip; it now removes only files
+  no planned job expects, so a reusable rip survives to the
+  verification step while stale junk still gets cleaned. The
+  anti-hang guarantee holds: an unverifiable expected file is deleted
+  per-file before makemkvcon runs, so its interactive overwrite prompt
+  is never triggered.
+
 ## [0.2.11] - 2026-10-02
 
 ### Fixed

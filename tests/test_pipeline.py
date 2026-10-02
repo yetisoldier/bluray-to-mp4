@@ -8,10 +8,12 @@ import pytest
 from bluray_to_mp4 import pipeline as pipeline_mod
 from bluray_to_mp4.cli import build_parser
 from bluray_to_mp4.ffprobe import (
+    FfprobeError,
     ProbedStream,
     is_interlaced,
     nth_of_type,
     parse_probe,
+    probe_duration_seconds,
 )
 from bluray_to_mp4.makemkv import _CancelState, make_runner
 from bluray_to_mp4.pipeline import EncodeCancelled, execute_encode, run_pipeline
@@ -535,3 +537,149 @@ def test_rip_progress_duplicate_lines_carry_eta(tmp_path, monkeypatch):
     # The duplicate line (same frac as its predecessor) still carries ETA.
     assert rips[0][2] == rips[1][2]
     assert rips[1][3] is not None
+
+
+# ---------------------------------------------------------------------
+# v0.2.12: reuse of a complete existing rip in the workdir
+
+
+def _make_reusable_rip(outdir, monkeypatch, duration=7590.0):
+    """Place a 'complete' MKV at the expected .rip path and stub the
+    duration probe to agree with the scanned title (2:06:30 = 7590s)."""
+    mkv_path = outdir / ".rip" / "Blade_Runner_2049_t00.mkv"
+    mkv_path.parent.mkdir(parents=True, exist_ok=True)
+    mkv_path.write_bytes(b"existing complete rip")
+    monkeypatch.setattr(
+        pipeline_mod, "probe_duration_seconds",
+        lambda path, *, binary="ffprobe": float(duration))
+    return mkv_path
+
+
+def _stub_encode(monkeypatch):
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode",
+        lambda args, *, duration_seconds, binary="ffmpeg",
+        on_progress=None, cancel=None: None,
+    )
+
+
+def _no_rip_runner():
+    """Answers the disc scan but FAILS the test if a rip is attempted -
+    used when an existing rip must be reused instead of re-ripped."""
+    def run(binary: str, args: list[str]):
+        if "mkv" in args:
+            raise AssertionError(
+                "rip must not run when a complete rip is reusable")
+        yield from MOVIE_DISC_OUTPUT.splitlines()
+    return run
+
+
+def test_reuses_complete_existing_rip(tmp_path, monkeypatch):
+    _stub_probe(monkeypatch)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    _make_reusable_rip(outdir, monkeypatch)
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=_no_rip_runner(), on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("Reusing existing rip" in s for s in stages)
+
+
+def test_unreadable_existing_rip_deleted_and_reripped(tmp_path, monkeypatch):
+    _stub_probe(monkeypatch)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    mkv_path = outdir / ".rip" / "Blade_Runner_2049_t00.mkv"
+    mkv_path.parent.mkdir(parents=True, exist_ok=True)
+    mkv_path.write_bytes(b"garbage that ffprobe cannot parse")
+
+    def boom(path, *, binary="ffprobe"):
+        raise FfprobeError("ffprobe failed")
+    monkeypatch.setattr(pipeline_mod, "probe_duration_seconds", boom)
+
+    script = MOVIE_DISC_OUTPUT.splitlines() + [
+        'MSG:3307,0,2,"File added","File %1 added","'
+        + str(mkv_path) + '","0"',
+        'MSG:5004,0,2,"1 titles saved, 0 failed",'
+        '"%1 titles saved, %2 failed","1","0"',
+    ]
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(script), on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("Ripping title" in s for s in stages)
+
+
+def test_partial_existing_rip_deleted_and_reripped(tmp_path, monkeypatch):
+    _stub_probe(monkeypatch)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    mkv_path = outdir / ".rip" / "Blade_Runner_2049_t00.mkv"
+    mkv_path.parent.mkdir(parents=True, exist_ok=True)
+    mkv_path.write_bytes(b"partial rip - only 10% of the title")
+    monkeypatch.setattr(
+        pipeline_mod, "probe_duration_seconds",
+        lambda path, *, binary="ffprobe": 759.0)  # 10% of 7590s
+
+    def rip_must_see_file_gone(binary: str, args: list[str]):
+        if "mkv" in args:
+            assert not os.path.exists(mkv_path), (
+                "partial file must be deleted before the re-rip")
+            yield 'MSG:3307,0,2,"File added","File %1 added","' \
+                  + str(mkv_path) + '","0"'
+            yield 'MSG:5004,0,2,"1 titles saved, 0 failed",' \
+                  '"%1 titles saved, %2 failed","1","0"'
+            return
+        yield from MOVIE_DISC_OUTPUT.splitlines()
+
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=rip_must_see_file_gone, on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("Ripping title" in s for s in stages)
+
+
+def test_purge_removes_stale_preserves_expected(tmp_path, monkeypatch):
+    _stub_probe(monkeypatch)
+    outdir = tmp_path / "out"
+    mkv_path = _make_reusable_rip(outdir, monkeypatch)
+    stale = outdir / ".rip" / "stale_junk.mkv"
+    stale.write_bytes(b"leftover from another title")
+
+    def boom(*args, **kwargs):
+        raise pipeline_mod.EncodeError("simulated encode failure")
+    monkeypatch.setattr(pipeline_mod, "execute_encode", boom)
+
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=_no_rip_runner(),
+    )
+    assert result.jobs and not result.jobs[0].completed
+    # .rip is preserved on failure; the stale file is gone, the expected
+    # reusable rip survives for the next run.
+    assert not stale.exists()
+    assert mkv_path.exists()
+
+
+def test_probe_duration_seconds_parses_and_errors(monkeypatch):
+    from bluray_to_mp4 import ffprobe as ff
+
+    class _Ok:
+        returncode, stdout, stderr = 0, "5400.123\n", ""
+
+    monkeypatch.setattr(ff.subprocess, "run", lambda *a, **kw: _Ok())
+    assert ff.probe_duration_seconds("/x.mp4") == 5400.123
+
+    class _Empty:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(ff.subprocess, "run", lambda *a, **kw: _Empty())
+    with pytest.raises(FfprobeError):
+        ff.probe_duration_seconds("/x.mp4")

@@ -17,7 +17,13 @@ from dataclasses import dataclass, field
 
 from .binaries import resolve_ffmpeg
 from .encode import EncodePlan, build_encode_args
-from .ffprobe import ProbedStream, is_interlaced, nth_of_type, probe_streams
+from .ffprobe import (
+    ProbedStream,
+    is_interlaced,
+    nth_of_type,
+    probe_duration_seconds,
+    probe_streams,
+)
 from .makemkv import (
     EncodeCancelled,
     Runner,
@@ -317,20 +323,6 @@ def run_pipeline(
     os.makedirs(outdir, exist_ok=True)
     rip_dir = workdir or os.path.join(outdir, ".rip")
     os.makedirs(rip_dir, exist_ok=True)
-    # A prior cancelled/killed run can leave partial .mkv intermediates
-    # behind; makemkvcon robot mode then HANGS on its interactive
-    # "already exists - overwrite?" prompt with nobody to answer it
-    # (validation run 3, 2026-10-02). The .rip dir is ours alone -
-    # purge any stale contents before ripping so every run starts clean.
-    for _stale in os.listdir(rip_dir):
-        _p = os.path.join(rip_dir, _stale)
-        try:
-            if os.path.isdir(_p):
-                shutil.rmtree(_p, ignore_errors=True)
-            else:
-                os.remove(_p)
-        except OSError:
-            pass  # locked file: makemkv will surface its own error
 
     for tid, out_name in names:
         title = disc.title(tid)
@@ -371,6 +363,29 @@ def run_pipeline(
                 )
         return result
 
+    # A prior cancelled/killed run can leave partial .mkv intermediates
+    # behind; makemkvcon robot mode then HANGS on its interactive
+    # "already exists - overwrite?" prompt with nobody to answer it
+    # (validation run 3, 2026-10-02). The .rip dir is ours alone - purge
+    # stale contents before ripping so every run starts clean.
+    # v0.2.12: files this run actually plans to produce are EXPECTED and
+    # survive the purge - a complete leftover rip is duration-verified in
+    # the job loop below and reused instead of re-ripped (Eric's "Mamma
+    # Mia! Here We Go Again": a finished t00.mkv sat in .rip after the
+    # cancelled run). Only files no planned job expects are removed.
+    _expected = {os.path.normcase(job.input_path) for job in result.jobs}
+    for _stale in os.listdir(rip_dir):
+        _p = os.path.join(rip_dir, _stale)
+        if os.path.normcase(_p) in _expected:
+            continue
+        try:
+            if os.path.isdir(_p):
+                shutil.rmtree(_p, ignore_errors=True)
+            else:
+                os.remove(_p)
+        except OSError:
+            pass  # locked file: makemkv will surface its own error
+
     # Real run: rip, probe, resolve, encode - one title at a time.
     # C6: a job failure is isolated - recorded on the job and in
     # result.errors, and the queue continues with the next title.
@@ -381,42 +396,75 @@ def run_pipeline(
                 raise EncodeCancelled("cancelled between titles")
             title = disc.title(job.tid)
             try:
-                stage(f"Ripping title {job.tid} ({job.output_name}) ...")
-                _rip_t0 = time.time()
-                _rip_last_frac = 0.0
-                _rip_last_eta: float | None = None
+                # v0.2.12: a complete rip already sitting in the workdir
+                # (left by a cancelled run after its rip finished) is
+                # ffprobe-verified and REUSED - no hours-long re-rip.
+                # Corrupt/partial leftovers are deleted per-file, so the
+                # v0.2.8 anti-hang guarantee (makemkvcon's interactive
+                # overwrite prompt never has anyone to answer it) holds.
+                reusable = False
+                if os.path.isfile(job.input_path):
+                    stage(
+                        f"Verifying existing {os.path.basename(job.input_path)} ..."
+                    )
+                    probed = None
+                    try:
+                        probed = probe_duration_seconds(job.input_path)
+                    except Exception:
+                        probed = None  # corrupt/unreadable -> re-rip
+                    reusable = (
+                        probed is not None
+                        and title.duration_seconds > 0
+                        and abs(probed - title.duration_seconds)
+                        <= max(60.0, 0.05 * title.duration_seconds)
+                    )
+                    if reusable:
+                        stage(
+                            f"Reusing existing rip of {job.output_name}"
+                            " - skipping re-rip"
+                        )
+                    else:
+                        try:
+                            os.remove(job.input_path)
+                        except OSError:
+                            pass  # locked file: makemkv surfaces its own error
+                if not reusable:
+                    stage(f"Ripping title {job.tid} ({job.output_name}) ...")
+                    _rip_t0 = time.time()
+                    _rip_last_frac = 0.0
+                    _rip_last_eta: float | None = None
 
-                def _rip_progress(frac, prgv, *, _job=job):
-                    # Rip ETA from elapsed/fraction once data actually moves;
-                    # before the BD+ open finishes PRGV stays 0 and no honest
-                    # estimate exists yet (eta stays None). Once an estimate
-                    # exists it is CARRIED FORWARD on every update, including
-                    # duplicate-frac PRGV lines - consumers must never see
-                    # the estimate vanish between real ticks (validation run
-                    # 5: the UI's Remaining label flickered back to
-                    # "estimating ..." on duplicates and looked stuck).
-                    nonlocal _rip_t0, _rip_last_frac, _rip_last_eta
-                    if frac <= 0.002:
-                        on_progress(("rip", _job.tid, frac))
-                        return
-                    elapsed = time.time() - _rip_t0
-                    if frac > _rip_last_frac:
-                        _rip_last_eta = max(0.0, elapsed / frac - elapsed)
-                    _rip_last_frac = frac
-                    on_progress(("rip", _job.tid, frac, _rip_last_eta))
+                    def _rip_progress(frac, prgv, *, _job=job):
+                        # Rip ETA from elapsed/fraction once data actually moves;
+                        # before the BD+ open finishes PRGV stays 0 and no honest
+                        # estimate exists yet (eta stays None). Once an estimate
+                        # exists it is CARRIED FORWARD on every update, including
+                        # duplicate-frac PRGV lines - consumers must never see
+                        # the estimate vanish between real ticks (validation run
+                        # 5: the UI's Remaining label flickered back to
+                        # "estimating ..." on duplicates and looked stuck).
+                        nonlocal _rip_t0, _rip_last_frac, _rip_last_eta
+                        if frac <= 0.002:
+                            on_progress(("rip", _job.tid, frac))
+                            return
+                        elapsed = time.time() - _rip_t0
+                        if frac > _rip_last_frac:
+                            _rip_last_eta = max(0.0, elapsed / frac - elapsed)
+                        _rip_last_frac = frac
+                        on_progress(("rip", _job.tid, frac, _rip_last_eta))
 
-                def _rip_info(text):
-                    # Live MakeMKV status (BD+ open etc.) so the rip phase
-                    # never looks frozen while PRGV sits at 0.
-                    on_stage(f"{text} - ripping {job.output_name}")
+                    def _rip_info(text):
+                        # Live MakeMKV status (BD+ open etc.) so the rip phase
+                        # never looks frozen while PRGV sits at 0.
+                        on_stage(f"{text} - ripping {job.output_name}")
 
-                saved = rip_titles(
-                    index, [job.tid], rip_dir, runner=runner,
-                    on_progress=_rip_progress if on_progress else None,
-                    on_info=_rip_info if on_stage else None,
-                    cancel=cancel,
-                )
-                job.input_path = saved[0] if saved else job.input_path
+                    saved = rip_titles(
+                        index, [job.tid], rip_dir, runner=runner,
+                        on_progress=_rip_progress if on_progress else None,
+                        on_info=_rip_info if on_stage else None,
+                        cancel=cancel,
+                    )
+                    job.input_path = saved[0] if saved else job.input_path
 
                 stage(f"Probing {os.path.basename(job.input_path)} ...")
                 streams = probe_streams(job.input_path)
