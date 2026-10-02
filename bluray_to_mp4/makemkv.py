@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import subprocess
 from dataclasses import dataclass
 from typing import Callable, Iterator
@@ -345,6 +346,7 @@ def rip_titles(
         f"--minlength={minlength}",
     ]
     saved: list[str] = []
+    saved_count = 0  # titles-saved count from RIP_COMPLETED lines
     failures: list[str] = []
     for line in run(binary, args):
         if cancel is not None and cancel():
@@ -369,13 +371,30 @@ def rip_titles(
                 if params[0].lower().endswith(".mkv"):
                     saved.append(params[0])
             elif code in RIP_COMPLETED_CODES and params:
-                if params[0].isdigit() and int(params[0]) == 0 and not failures:
-                    raise MakeMkvError("MakeMKV finished but saved 0 titles.")
+                if params[0].isdigit():
+                    if int(params[0]) == 0 and not failures:
+                        raise MakeMkvError(
+                            "MakeMKV finished but saved 0 titles.")
+                    saved_count = max(saved_count, int(params[0]))
         elif kind == "PRGV" and on_progress is not None:
             current, _total, maximum = payload
             on_progress(current / maximum if maximum else 0.0, payload)
     if not saved:
         if failures:
             raise TitleRipError(failures[0])
+        # MakeMKV 2.0.0 no longer reports finished output files via
+        # MSG:3307 (those lines now carry disc-internal files such as
+        # the .mpls playlist; validation run 6: a 100% rip raised
+        # "finished without producing any files" while the .mkv sat
+        # in the output dir). After a successful "N titles saved",
+        # recover the paths from the output directory itself.
+        if saved_count > 0:
+            found = [
+                os.path.join(str(outdir), name)
+                for name in sorted(os.listdir(str(outdir)))
+                if name.lower().endswith(".mkv")
+            ]
+            if found:
+                return found
         raise MakeMkvError("makemkvcon finished without producing any files.")
     return saved

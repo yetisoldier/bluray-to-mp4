@@ -129,3 +129,27 @@ def test_rip_titles_ignores_disc_internal_file_added_lines():
     ]
     saved = rip_titles(0, [0], "/tmp/out", runner=fake_runner(script))
     assert saved == ["/tmp/out/movie_t00.mkv"]
+
+
+def test_rip_titles_recovers_saved_files_from_outdir():
+    """MakeMKV 2.0.0 no longer reports finished .mkv files via MSG:3307
+    (those lines now carry disc-internal files like the .mpls playlist);
+    validation run 6: a 100% rip raised 'finished without producing any
+    files' while the .mkv sat in outdir. After a successful 'N titles
+    saved', the paths must be recovered from the output directory."""
+    import os
+    out = "/tmp/b2m_2000_out"
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "Mamma Mia! Here We Go Again_t00.mkv"), "wb") as f:
+        f.write(b"ripped")
+    script = [
+        'MSG:1005,0,1,"MakeMKV started","%1 started","MakeMKV v2.0.0"',
+        'MSG:3307,0,2,"File 00803.mpls was added","File %1 was added","00803.mpls","1"',
+        'MSG:5004,0,2,"1 titles saved, 0 failed","%1 titles saved, %2 failed","1","0"',
+    ]
+    saved = rip_titles(0, [0], out, runner=fake_runner(script))
+    assert len(saved) == 1
+    assert saved[0].endswith("Mamma Mia! Here We Go Again_t00.mkv")
+    assert not any(p.endswith(".mpls") for p in saved)
+    import shutil
+    shutil.rmtree(out, ignore_errors=True)
