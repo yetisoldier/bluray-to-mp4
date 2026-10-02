@@ -16,10 +16,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download ffmpeg (win64, full build with NVENC + all encoders)
+      - name: Download ffmpeg (n8.1: NVENC SDK 13.0 matches driver 590+; n9.0 needs 610)
         shell: pwsh
         run: |
-          $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip"
+          $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
           $zipPath = "$env:TEMP\ffmpeg.zip"
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -TimeoutSec 600
           Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\ffmpeg-extract" -Force

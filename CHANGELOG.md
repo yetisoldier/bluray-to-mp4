@@ -2,7 +2,19 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.4] - 2026-10-02
+
+### Fixed
+
+- **NVENC now actually works on driver 591.x.** v0.2.2/0.2.3 bundled
+  ffmpeg n9.0, which is compiled against NVENC SDK 13.1 and demands
+  driver 610+ ("Driver does not support the required nvenc API version.
+  Required: 13.1 Found: 13.0"). The bundle is now ffmpeg n8.1 (NVENC
+  SDK 13.0, needs only driver 590+), matching current shipped NVIDIA
+  drivers. No driver update required.
+
 ## [0.2.3] - 2026-10-02
+
 
 ### Added
 
