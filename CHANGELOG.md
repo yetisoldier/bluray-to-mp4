@@ -2,6 +2,46 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.2] - 2026-10-02
+
+### Fixed
+
+- **NVENC now works in the packaged app.** The bundled ffmpeg is the full
+  NVENC-capable build, and packaged builds prefer their own bundled tools
+  over anything on PATH (a system ffmpeg without NVENC was shadowing ours).
+  CI verifies hevc_nvenc is present in the bundled build before packaging.
+- **Setup screen tells you *why* NVENC failed**: driver/hardware problem vs
+  software-only ffmpeg build - no more guessing.
+- **Subtitle Edit ships in the zip.** The portable SubtitleEdit is bundled
+  into the app (packaging/tools/SubtitleEdit), so subtitle OCR works with
+  zero extra installs. Search order: env override > bundled > PATH > install dirs.
+
+## [0.2.1] - 2026-10-01
+
+
+### Fixed (Karen stage-3 validation, all landed & tested)
+
+- **D1** CLI real-run progress crash: encode progress emits 4-tuples, CLI now
+  tolerates both shapes (with a regression test)
+- **D2** Season spin starts at 1 (fresh series discs no longer preview/rip
+  as S00E01)
+- **D3** Naming edits live-refresh previews (season, start-episode,
+  series name, movie title, year wired to _update_previews)
+- **D4** Setup screen finds ffmpeg wherever the encoder does
+- **D5** Partial failures read honestly ("P of N done, 1 failed")
+- G1: Descriptive narration subtitles excluded (same family as commentary)
+- G2: Commentary-only discs warn instead of silently recommending commentary
+- G3: Missing subtitle stream after rip warns (was silent drop)
+- G4: B2M_TMDB_KEY env var honored (CLI-help promise kept)
+- G8: Expired-key detection uses MSG codes, not substring (no false positives)
+- G9: History entries carry real durations + per-job warnings
+- G10: PermissionError from ffmpeg subprocess caught as typed error
+- G11: Dead import removed
+- G12: Vacuous test asserts replaced with real ones
+- G13: Per-episode titles editable in the Review table (double-click); the
+  CHANGELOG's v0.2.0 claim is now actually true
+
+## [0.2.0] - 2026-10-01
 ## [0.2.0] - 2026-10-01
 
 ### Changed

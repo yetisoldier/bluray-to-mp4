@@ -140,15 +140,41 @@ def check_nvenc() -> DependencyCheck:
             "NVIDIA NVENC", True,
             "hardware HEVC encoding available (fast mode)", None, required=False,
         )
+    # Distinguish "this ffmpeg has no NVENC" from "GPU/driver problem":
+    # a NVENC-less build errors with 'Unknown encoder' before ever touching
+    # the GPU; a driver problem fails differently (or ffmpeg uses a
+    # non-CUDA-capable build like the shared one).
+    encoders = ""
+    try:
+        probe = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=30,
+        )
+        encoders = probe.stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if "hevc_nvenc" in encoders:
+        return DependencyCheck(
+            "NVIDIA NVENC", False,
+            "ffmpeg has NVENC support, but the hardware probe failed - "
+            "check GPU drivers (nvidia-smi) or try the app again after a "
+            "reboot; x265 quality mode still works",
+            "https://www.nvidia.com/drivers", required=False,
+        )
     return DependencyCheck(
         "NVIDIA NVENC", False,
-        "not detected - x265 quality mode still works, just slower",
-        "https://www.nvidia.com/drivers", required=False,
+        "this ffmpeg build lacks NVENC support (software-only build) - "
+        "re-download the release zip; x265 quality mode still works",
+        None, required=False,
     )
 
 
 def check_subtitle_edit() -> DependencyCheck:
-    """Subtitle Edit CLI (SubtitleEdit.exe) for PGS->SRT OCR."""
+    """Subtitle Edit CLI (SubtitleEdit.exe) for PGS->SRT OCR.
+
+    Bundled with the app since v0.2.2 (packaging/tools/SubtitleEdit), so
+    the packaged build should always find it next to the exe.
+    """
     found = find_program(
         "SubtitleEdit",
         env_var="B2M_SUBTITLE_EDIT",
@@ -172,7 +198,8 @@ def check_subtitle_edit() -> DependencyCheck:
             )
     return DependencyCheck(
         "Subtitle Edit", False,
-        "not found - subtitle OCR disabled until installed (MP4s still work)",
+        "not found - subtitle OCR disabled (MP4s still work); reinstall the "
+        "latest release zip to get the bundled copy",
         SUBTITLE_EDIT_URL, required=False,
     )
 

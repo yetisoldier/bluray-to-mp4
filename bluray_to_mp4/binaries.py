@@ -26,18 +26,32 @@ def _local_appdata() -> str:
 
 
 def _app_internal_dirs() -> list[str]:
-    """Directories inside the packaged app where bundled tools may live."""
+    """Directories inside the packaged app where bundled tools may live.
+
+    In the packaged app the bundled tools take priority over anything on
+    PATH: we ship the right ffmpeg (with NVENC) and SubtitleEdit, and a
+    random system ffmpeg must never shadow them. Unpackaged (dev) runs
+    keep PATH first so a dev's own tools still work.
+    """
     import sys
     internal = []
-    if getattr(sys, "frozen", False):  # PyInstaller
-        internal.append(os.path.join(sys._MEIPASS, "tools"))
-        internal.append(os.path.join(sys.executable, "..", "tools"))
+    if getattr(sys, "frozen", False):  # PyInstaller onefile/onedir
+        roots = [
+            os.path.join(sys._MEIPASS, "tools"),
+            os.path.join(sys._MEIPASS, "..", "tools"),
+            os.path.join(sys.executable, "..", "tools"),
+        ]
+        internal.extend(roots)
+        # Subtitle Edit ships as a subfolder of the bundled tools dir;
+        # listed after the roots so our own ffmpeg.exe always wins over
+        # anything the SE folder might contain.
+        internal.extend(os.path.join(r, "SubtitleEdit") for r in roots)
     return internal
 
 
 def _search_dirs(extra: list[str]) -> list[str]:
-    """PATH first, then bundled-app folders, then system install dirs."""
-    return extra + _app_internal_dirs()
+    """Bundled-app tools first (packaged builds), then caller dirs."""
+    return _app_internal_dirs() + extra
 
 
 def _makemkv_dirs() -> list[str]:
@@ -59,6 +73,10 @@ def _ffmpeg_dirs() -> list[str]:
 
 def _subtitle_edit_dirs() -> list[str]:
     return [
+        # Bundled SubtitleEdit ships inside the app zip (packaging/tools/)
+        # as tools/SubtitleEdit/SubtitleEdit.exe; _app_internal_dirs covers
+        # it automatically in packaged builds.
+        "SubtitleEdit",
         os.path.join(_program_files(), "Subtitle Edit"),
         os.path.join(_local_appdata(), "Programs", "Subtitle Edit"),
     ]
@@ -85,10 +103,19 @@ def find_program(
             on_path = shutil.which(override)
             if on_path:
                 return on_path
+    bundled = _app_internal_dirs()
+    if bundled:
+        # Packaged app: our bundled ffmpeg (with NVENC) and SubtitleEdit
+        # win over any random system copy found on PATH.
+        for directory in bundled:
+            for candidate in exe_names or [name]:
+                full = os.path.join(directory, candidate)
+                if os.path.isfile(full):
+                    return full
     on_path = shutil.which(name)
     if on_path:
         return on_path
-    for directory in _search_dirs(search_dirs or []):
+    for directory in (search_dirs or []):
         for candidate in exe_names or [name]:
             full = os.path.join(directory, candidate)
             if os.path.isfile(full):

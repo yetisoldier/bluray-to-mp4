@@ -4,9 +4,10 @@ Build on a Windows machine with:
     pip install pyinstaller PySide6
     pyinstaller bluray_to_mp4.spec --noconfirm
 
-The dist folder runs without Python installed. MakeMKV, ffmpeg, and
-Subtitle Edit remain external installs (see README); the in-app
-dependency checker walks users through them.
+The dist folder runs without Python installed. CI bundles ffmpeg (full
+NVENC-capable build) and Subtitle Edit portable into the app zip, so only
+MakeMKV remains a separate install. The in-app dependency checker walks
+users through anything missing.
 """
 
 import os

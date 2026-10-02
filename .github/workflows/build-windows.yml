@@ -16,10 +16,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download ffmpeg (win64, static build)
+      - name: Download ffmpeg (win64, full build with NVENC + all encoders)
         shell: pwsh
         run: |
-          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.zip"
           $zipPath = "$env:TEMP\ffmpeg.zip"
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -TimeoutSec 300
           Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\ffmpeg-extract" -Force
@@ -27,7 +27,22 @@ jobs:
           New-Item -ItemType Directory -Force -Path "packaging\tools" | Out-Null
           Copy-Item "$($binDir.FullName)\ffmpeg.exe" "packaging\tools\ffmpeg.exe"
           Copy-Item "$($binDir.FullName)\ffprobe.exe" "packaging\tools\ffprobe.exe"
-          Write-Host "Bundled ffmpeg/ffprobe into packaging\tools"
+          $nvenc = & "packaging\tools\ffmpeg.exe" -hide_banner -encoders 2>$null | Select-String hevc_nvenc
+          if (-not $nvenc) { Write-Error "ffmpeg bundle lacks hevc_nvenc"; exit 1 }
+          Write-Host "ffmpeg bundle OK: hevc_nvenc present"
+
+      - name: Download Subtitle Edit (portable, bundled into the app)
+        shell: pwsh
+        run: |
+          $seUrl = "https://github.com/SubtitleEdit/subtitleedit/releases/download/v5.2.0/SubtitleEdit-Windows-x64.zip"
+          $seZip = "$env:TEMP\se.zip"
+          Invoke-WebRequest -Uri $seUrl -OutFile $seZip -TimeoutSec 300
+          Expand-Archive -Path $seZip -DestinationPath "$env:TEMP\se-extract" -Force
+          New-Item -ItemType Directory -Force -Path "packaging\tools\SubtitleEdit" | Out-Null
+          Copy-Item "$env:TEMP\se-extract\*" "packaging\tools\SubtitleEdit\" -Recurse -Force
+          if (-not (Test-Path "packaging\tools\SubtitleEdit\SubtitleEdit.exe")) {
+            Write-Error "SubtitleEdit.exe missing after extract"; exit 1
+          }
 
       - name: Install tooling
         run: |
