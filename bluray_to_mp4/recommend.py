@@ -123,6 +123,9 @@ class Selection:
     audio_reasons: list[str] = field(default_factory=list)
     subtitle_reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # v0.2.15: user picked "(no subtitles)" on the Review page - the
+    # rip-time first-stream fallback must stay off for this title.
+    subtitle_user_declined: bool = False
 
     @property
     def has_english_audio(self) -> bool:

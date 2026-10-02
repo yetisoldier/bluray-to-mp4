@@ -10,6 +10,7 @@ from bluray_to_mp4.cli import build_parser
 from bluray_to_mp4.ffprobe import (
     FfprobeError,
     ProbedStream,
+    first_video_width,
     is_interlaced,
     nth_of_type,
     parse_probe,
@@ -17,6 +18,7 @@ from bluray_to_mp4.ffprobe import (
 )
 from bluray_to_mp4.makemkv import _CancelState, make_runner
 from bluray_to_mp4.pipeline import EncodeCancelled, execute_encode, run_pipeline
+from bluray_to_mp4.subtitles import OcrResult
 from tests.fixtures import MOVIE_DISC_OUTPUT, SERIES_DISC_OUTPUT, fake_runner
 
 
@@ -148,13 +150,21 @@ _RIP_LINES = [
 ]
 
 
-def _stub_probe(monkeypatch):
+def _stub_probe(monkeypatch, *, width=3840, subtitle_count=0):
+    """Stub probe_streams: a video stream of the given width (the movie
+    fixture's scan says 3840x2160, so 3840 keeps reuse tests reusing),
+    one audio stream, and optional N subtitle streams."""
+    streams = [
+        ProbedStream(0, "video", "h264", width=width),
+        ProbedStream(1, "audio", "ac3", channels=6),
+    ]
+    streams += [
+        ProbedStream(2 + i, "subtitle", "hdmv_pgs_subtitle")
+        for i in range(subtitle_count)
+    ]
     monkeypatch.setattr(
         pipeline_mod, "probe_streams",
-        lambda path, *, binary="ffprobe": [
-            ProbedStream(0, "video", "h264"),
-            ProbedStream(1, "audio", "ac3", channels=6),
-        ],
+        lambda path, *, binary="ffprobe": streams,
     )
 
 
@@ -563,14 +573,16 @@ def _stub_encode(monkeypatch):
     )
 
 
-def _no_rip_runner():
+def _no_rip_runner(scan=None):
     """Answers the disc scan but FAILS the test if a rip is attempted -
     used when an existing rip must be reused instead of re-ripped."""
+    script = (scan or MOVIE_DISC_OUTPUT).splitlines()
+
     def run(binary: str, args: list[str]):
         if "mkv" in args:
             raise AssertionError(
                 "rip must not run when a complete rip is reusable")
-        yield from MOVIE_DISC_OUTPUT.splitlines()
+        yield from script
     return run
 
 
@@ -683,3 +695,263 @@ def test_probe_duration_seconds_parses_and_errors(monkeypatch):
     monkeypatch.setattr(ff.subprocess, "run", lambda *a, **kw: _Empty())
     with pytest.raises(FfprobeError):
         ff.probe_duration_seconds("/x.mp4")
+
+
+# ---------------------------------------------------------------------
+# v0.2.15 Gap 1: Review-page stream overrides (backend merge contract).
+# The UI combos land in a separate session; these tests pin the
+# run_pipeline-side behavior: merge at selection time, invalid sids
+# keep the recommendation, and an explicit choice/decline disables the
+# v0.2.13 rip-time first-subtitle fallback.
+
+
+def test_stream_override_applies_in_dry_run(tmp_path):
+    """stream_overrides={0: {audio 2, subtitles None}} => job selection
+    uses sid 2, srt_path None, override warning present."""
+    result = _movie_run(
+        tmp_path / "out",
+        stream_overrides={0: {"audio_sid": 2, "subtitle_sid": None}},
+    )
+    job = result.jobs[0]
+    assert job.selection.audio_sid == 2  # commentary AC3, user's call
+    assert job.selection.subtitle_sid is None
+    assert job.selection.subtitle_user_declined is True
+    assert job.srt_path is None  # declined: no SRT reserved
+    assert job.subtitle_stream_index is None
+    assert any("user override" in w for w in result.warnings)
+    assert not any("SRT path reserved" in w for w in result.warnings)
+    # The encode maps the overridden audio ordinal (sid 2 -> 0:a:1).
+    args = job.encode_args
+    assert args[args.index("-map", args.index("-i")) + 1] == "0:a:1?"
+
+
+def test_override_invalid_sid_ignored_with_note(tmp_path):
+    """A sid not on the disc => recommendation kept, note in warnings,
+    no crash (never act on a typo'd/stale sid)."""
+    result = _movie_run(
+        tmp_path / "out",
+        stream_overrides={0: {"audio_sid": 99, "subtitle_sid": 99}},
+    )
+    job = result.jobs[0]
+    assert job.selection.audio_sid == 1     # DTS-HD recommendation kept
+    assert job.selection.subtitle_sid == 4  # plain-English recommendation
+    assert job.selection.subtitle_user_declined is False
+    assert any("ignored user override" in w for w in result.warnings)
+    # An untouched recommendation still reserves the SRT sidecar.
+    assert job.srt_path is not None
+
+
+def _rip_tail(outdir):
+    """Rip-result lines for the movie fixture (scan-independent tail)."""
+    mkv = os.path.join(str(outdir), ".rip", "Blade_Runner_2049_t00.mkv")
+    return [
+        'MSG:3307,0,2,"File added","File %1 added","' + mkv + '","0"',
+        'MSG:5004,0,2,"1 titles saved, 0 failed",'
+        '"%1 titles saved, %2 failed","1","0"',
+    ]
+
+
+def _movie_rip_script(outdir):
+    """Scan + a successful one-title rip of the movie fixture."""
+    return MOVIE_DISC_OUTPUT.splitlines() + _rip_tail(outdir)
+
+
+def test_explicit_no_subtitles_disables_fallback(tmp_path, monkeypatch):
+    """Real run, rip lacks the recommended sub, user picked "(no
+    subtitles)": ships no subtitles, no first-stream fallback fires."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=0)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+        stream_overrides={0: {"audio_sid": None, "subtitle_sid": None}},
+    )
+    job = result.jobs[0]
+    assert job.completed
+    assert job.subtitle_stream_index is None
+    assert job.srt_path is None
+    assert not any("fell back to subtitle stream" in w for w in result.warnings)
+    assert not any("ships without subtitles" in w for w in result.warnings)
+    assert any("user override - subtitles: none" in w for w in result.warnings)
+
+
+def test_explicit_subtitle_choice_disables_fallback(tmp_path, monkeypatch):
+    """Overridden sid missing from the rip => no fallback substitution;
+    the G3 "ships without subtitles" warning only."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=0)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+        stream_overrides={0: {"audio_sid": None, "subtitle_sid": 3}},
+    )
+    job = result.jobs[0]
+    assert job.completed
+    assert job.selection.subtitle_sid == 3
+    assert job.subtitle_stream_index is None
+    assert not any("fell back to subtitle stream" in w for w in result.warnings)
+    assert any("ships without subtitles" in w for w in result.warnings)
+    assert any("user override - subtitle sid 3" in w for w in result.warnings)
+
+
+def test_unchanged_recommendation_keeps_fallback(tmp_path, monkeypatch):
+    """Regression guard: no override + recommended sid missing from the
+    rip => the v0.2.13 first-subtitle fallback still fires."""
+    # Disc recommends subtitle sid 4 (ordinal 1 among sids 3,4,5); the
+    # rip stub carries only ONE subtitle stream, so ordinal 1 is absent.
+    _stub_probe(monkeypatch, width=3840, subtitle_count=1)
+    _stub_encode(monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod, "run_subtitle_ocr",
+        lambda *a, **k: OcrResult(srt_path=str(tmp_path / "out.srt"), cue_count=100),
+    )
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+    )
+    job = result.jobs[0]
+    assert job.completed
+    assert job.selection.subtitle_user_declined is False
+    assert any("fell back to subtitle stream 2" in w for w in result.warnings)
+    assert job.subtitle_stream_index == 2  # the rip's first (only) sub
+    assert job.srt_path is not None
+
+
+# ---------------------------------------------------------------------
+# v0.2.15 Gap 2: reuse safety - the existing rip must be the same
+# MASTER the current disc's scan describes, not just the same runtime
+# (a DVD and a Blu-ray pressing of one movie share a duration).
+
+
+def test_reuse_rejects_resolution_mismatch(tmp_path, monkeypatch):
+    """Scan says 3840x2160, existing rip probes width 720 => re-rip,
+    stage line names a different master."""
+    _stub_probe(monkeypatch, width=720)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    _make_reusable_rip(outdir, monkeypatch)
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+        on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("different master" in s for s in stages)
+    assert any("Ripping title" in s for s in stages)
+
+
+def test_reuse_accepts_matching_resolution(tmp_path, monkeypatch):
+    """Companion: existing rip width matches the scanned 3840 => reuse."""
+    _stub_probe(monkeypatch, width=3840)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    _make_reusable_rip(outdir, monkeypatch)
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=_no_rip_runner(), on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("Reusing existing rip" in s for s in stages)
+
+
+# Scan variants for the tier-2/3 tests: media_type comes from the DRV
+# disc-type code (12=bluray, 1=dvd, 0=unknown) and the scanned width from
+# SINFO attr 19 on the title's first video stream.
+_DVD_SCAN = MOVIE_DISC_OUTPUT.replace(
+    "DRV:0,2,999,12,", "DRV:0,2,999,1,"
+).replace('SINFO:0,0,19,0,"3840x2160"', 'SINFO:0,0,19,0,""')
+_BLURAY_NO_RES_SCAN = MOVIE_DISC_OUTPUT.replace(
+    'SINFO:0,0,19,0,"3840x2160"', 'SINFO:0,0,19,0,""'
+)
+_UNKNOWN_SCAN = MOVIE_DISC_OUTPUT.replace(
+    "DRV:0,2,999,12,", "DRV:0,2,999,0,"
+).replace('SINFO:0,0,19,0,"3840x2160"', 'SINFO:0,0,19,0,""')
+
+
+def test_reuse_dvd_media_type_rejects_hd_rip(tmp_path, monkeypatch):
+    """No scanned resolution, media_type 'dvd', existing rip width 1920
+    (a Blu-ray rip) => reject and re-rip."""
+    _stub_probe(monkeypatch, width=1920)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    _make_reusable_rip(outdir, monkeypatch)
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("different master" in s for s in stages)
+    assert any("Ripping title" in s for s in stages)
+
+
+def test_reuse_bluray_media_type_rejects_sd_rip(tmp_path, monkeypatch):
+    """No scanned resolution, media_type 'bluray', existing rip width 720
+    (a DVD rip) => reject and re-rip."""
+    _stub_probe(monkeypatch, width=720)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    _make_reusable_rip(outdir, monkeypatch)
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_BLURAY_NO_RES_SCAN.splitlines() + _rip_tail(outdir)),
+        on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("different master" in s for s in stages)
+    assert any("Ripping title" in s for s in stages)
+
+
+def test_reuse_unknown_scan_data_keeps_duration_only(tmp_path, monkeypatch):
+    """Tier 3 (deliberate): no scan resolution AND media_type '' => the
+    duration-passing file is reused, exactly as v0.2.12 did."""
+    _stub_probe(monkeypatch, width=720)  # would fail either tier-2 class
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    _make_reusable_rip(outdir, monkeypatch)
+    stages = []
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=_no_rip_runner(scan=_UNKNOWN_SCAN),
+        on_stage=stages.append,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert any("Reusing existing rip" in s for s in stages)
+
+
+def test_first_video_width_parse_and_helper():
+    """Pure-JSON mirror of test_parse_probe_and_interlace_detection:
+    ProbedStream.width parses 'width', first_video_width resolves the
+    first video stream (None when absent or unparsed)."""
+    text = (
+        '{"streams":['
+        '{"index":0,"codec_type":"video","codec_name":"h264",'
+        '"width":1920},'
+        '{"index":1,"codec_type":"audio","codec_name":"ac3","channels":6},'
+        '{"index":2,"codec_type":"subtitle","codec_name":'
+        '"hdmv_pgs_subtitle"}'
+        "]}"
+    )
+    streams = parse_probe(text)
+    assert streams[0].width == 1920
+    assert first_video_width(streams) == 1920
+
+    no_width = parse_probe(
+        '{"streams":[{"index":0,"codec_type":"video",'
+        '"codec_name":"h264"}]}'
+    )
+    assert no_width[0].width == 0
+    assert first_video_width(no_width) is None
+
+    audio_only = parse_probe(
+        '{"streams":[{"index":0,"codec_type":"audio",'
+        '"codec_name":"ac3"}]}'
+    )
+    assert first_video_width(audio_only) is None

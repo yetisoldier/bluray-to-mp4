@@ -22,6 +22,7 @@ __all__ = [
     "probe_duration_seconds",
     "nth_of_type",
     "is_interlaced",
+    "first_video_width",
 ]
 
 INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
@@ -39,6 +40,7 @@ class ProbedStream:
     channels: int = 0
     lang: str = ""
     field_order: str = ""
+    width: int = 0  # v0.2.15: video width in pixels (0 = not reported)
 
 
 def parse_probe(text: str) -> list[ProbedStream]:
@@ -57,6 +59,7 @@ def parse_probe(text: str) -> list[ProbedStream]:
                 channels=int(s.get("channels") or 0),
                 lang=(s.get("tags") or {}).get("language", ""),
                 field_order=s.get("field_order", ""),
+                width=int(s.get("width") or 0),
             )
         )
     return streams
@@ -127,3 +130,16 @@ def is_interlaced(streams: list[ProbedStream]) -> bool:
         if s.codec_type == "video":
             return s.field_order.lower() in INTERLACED_FIELD_ORDERS
     return False
+
+
+def first_video_width(streams: list[ProbedStream]) -> int | None:
+    """Width of the first video stream, or None when absent/unparsed.
+
+    Used by the rip-reuse verification (v0.2.15 design Gap 2): an
+    existing leftover .mkv must be the same master the current disc's
+    scan describes, and width is the discriminator.
+    """
+    for s in streams:
+        if s.codec_type == "video":
+            return s.width or None
+    return None

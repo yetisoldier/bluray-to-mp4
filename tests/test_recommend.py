@@ -73,3 +73,17 @@ def test_unlabeled_sub_still_recommended():
     sel = recommend_title(t, want_subtitles=True)
     assert sel.subtitle_sid == 2
     assert any("not confirmed" in r for r in sel.subtitle_reasons)
+
+
+def test_selection_subtitle_user_declined_default():
+    """v0.2.15: the new Selection field defaults False so the
+    recommendation engine's behavior (and every existing caller) is
+    untouched; the Review page sets it only on an explicit
+    "(no subtitles)" pick, and the pipeline uses it to gate the
+    rip-time first-stream fallback."""
+    from bluray_to_mp4.recommend import Selection
+
+    disc = _movie_disc()
+    sel = recommend_title(disc.title(0))
+    assert sel.subtitle_user_declined is False
+    assert Selection(tid=0).subtitle_user_declined is False

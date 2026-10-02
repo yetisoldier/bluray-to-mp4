@@ -10,6 +10,7 @@ runner records where the SRT will go.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -19,6 +20,7 @@ from .binaries import resolve_ffmpeg
 from .encode import EncodePlan, build_encode_args
 from .ffprobe import (
     ProbedStream,
+    first_video_width,
     is_interlaced,
     nth_of_type,
     probe_duration_seconds,
@@ -127,6 +129,95 @@ def _subtitle_ordinal(title, sid: int | None) -> int | None:
     return None
 
 
+# v0.2.15 (design Gap 2): rip-reuse width verification. A DVD and a
+# Blu-ray pressing of the same movie match on duration; the video width
+# is what separates the two masters.
+_RESOLUTION_RE = re.compile(r"(\d{3,5})[x\u00d7](\d{3,5})")
+_DVD_WIDTH_MAX = 854    # anamorphic PAL/NTSC ceilings
+_BLURAY_WIDTH_MIN = 1280
+
+
+def _scanned_video_width(title) -> int | None:
+    """Width the disc scan reports for the title's first video stream
+    (SINFO attr 19, e.g. '3840x2160'), or None when absent/unparsable."""
+    videos = title.streams_of("video")
+    if not videos:
+        return None
+    match = _RESOLUTION_RE.search(videos[0].resolution or "")
+    return int(match.group(1)) if match else None
+
+
+def _was_overridden(job: TitleJob, stream_overrides: dict | None) -> bool:
+    """True when the user picked a specific subtitle stream for this
+    title on the Review page (v0.2.15). An explicit choice disables the
+    rip-time first-stream fallback exactly like an explicit decline
+    does; only an untouched recommendation keeps the fallback."""
+    entry = (stream_overrides or {}).get(job.tid) or {}
+    return entry.get("subtitle_sid") is not None
+
+
+def _apply_stream_overrides(
+    sel: Selection,
+    title,
+    override: dict[str, int | None] | None,
+) -> tuple[Selection, str | None]:
+    """Merge one Review-page stream override into a recommendation.
+
+    override = {"audio_sid": int | None, "subtitle_sid": int | None} for
+    this title's tid. Returns (selection, note); note is a warning string
+    whenever the user's choice was applied or had to be ignored, so the
+    History page can see the pick was manual (v0.2.15 design Gap 1).
+
+    Rules:
+    - override None/empty or a key absent -> that choice is untouched.
+    - audio_sid must exist among the title's audio streams; an unknown
+      sid keeps the recommendation (never encode a silent file on a
+      typo'd/stale sid) and is reported. audio_sid None also keeps the
+      recommendation - audio is required, so None means "unchanged".
+    - subtitle_sid None means "user wants no subtitles": subtitle_sid is
+      cleared and subtitle_user_declined is set so the rip-time
+      first-stream fallback stays off for this title.
+    - subtitle_sid with a real value must exist among the title's
+      subtitle streams; an unknown sid keeps the recommendation + note.
+    """
+    if not override:
+        return sel, None
+    applied: list[str] = []
+    ignored: list[str] = []
+    audio_sid = override.get("audio_sid")
+    if audio_sid is not None:
+        if any(s.sid == audio_sid for s in title.streams_of("audio")):
+            sel.audio_sid = audio_sid
+            applied.append(f"audio sid {audio_sid}")
+        else:
+            ignored.append(f"audio sid {audio_sid}")
+    if "subtitle_sid" in override:
+        sub_sid = override["subtitle_sid"]
+        if sub_sid is None:
+            # "(no subtitles)" picked: record the explicit decline so the
+            # rip-time fallback can tell "no selection" from "none".
+            sel.subtitle_sid = None
+            sel.subtitle_user_declined = True
+            applied.append("subtitles: none")
+        elif any(s.sid == sub_sid for s in title.streams_of("subtitle")):
+            sel.subtitle_sid = sub_sid
+            applied.append(f"subtitle sid {sub_sid}")
+        else:
+            ignored.append(f"subtitle sid {sub_sid}")
+    notes: list[str] = []
+    if applied:
+        notes.append(
+            f"Title {title.tid}: user override - {', '.join(applied)}"
+        )
+    if ignored:
+        notes.append(
+            f"Title {title.tid}: ignored user override "
+            f"({', '.join(ignored)} not on this disc); "
+            "kept the recommendation"
+        )
+    return sel, (" ".join(notes) if notes else None)
+
+
 def _fallback_label(filename: str) -> str:
     stem = os.path.splitext(os.path.basename(filename))[0]
     return stem.replace("_", " ").strip() or "Episode"
@@ -201,6 +292,7 @@ def run_pipeline(
     episode_titles: dict[int, str] | None = None,
     year: int | None = None,
     title_overrides: dict[int, str] | None = None,
+    stream_overrides: dict[int, dict[str, int | None]] | None = None,  # v0.2.15
     cancel: "Callable[[], bool] | None" = None,
     tmdb_key: str = "",
     tmdb_fetcher=None,
@@ -222,6 +314,13 @@ def run_pipeline(
     want_subtitles=False honors the UI "Include subtitles" toggle: no
     subtitle ordinal is resolved, no OCR runs, no .srt path is reserved
     (and no reserved-path warning in dry runs).
+
+    stream_overrides (v0.2.15, Review-page combos) maps tid ->
+    {"audio_sid": int | None, "subtitle_sid": int | None} and is merged
+    into the recommendation per title: a sid must exist on the disc
+    (invalid ones keep the recommendation + a warning note), an explicit
+    subtitle None means "no subtitles for this title" and disables the
+    rip-time first-stream fallback for it.
 
     on_progress update tuples, one per progress line from each stage:
       ("rip", tid, frac)                 - MakeMKV PRGV progress, no ETA
@@ -294,7 +393,15 @@ def run_pipeline(
             base_names=base_names,
             title_overrides=title_overrides,
         )
-        selected = {tid: recommend_title(disc.title(tid)) for tid, _ in names}
+        selected = {}
+        for tid, _ in names:
+            t = disc.title(tid)
+            sel = recommend_title(t)
+            sel, note = _apply_stream_overrides(
+                sel, t, (stream_overrides or {}).get(tid))
+            selected[tid] = sel
+            if note:
+                result.warnings.append(note)
     else:
         main = main_feature(disc)
         if main is None:
@@ -312,7 +419,12 @@ def run_pipeline(
                 result.warnings.append(f"TMDB year lookup failed: {exc}")
         name = movie_output_name(disc.name, year=year)
         names = [(main.tid, name)]
-        selected = {main.tid: recommend_title(main)}
+        sel = recommend_title(main)
+        sel, note = _apply_stream_overrides(
+            sel, main, (stream_overrides or {}).get(main.tid))
+        selected = {main.tid: sel}
+        if note:
+            result.warnings.append(note)
 
     result.encoder = encoder if encoder != "auto" else detect_encoder()
     if result.encoder == "nvenc":
@@ -419,12 +531,57 @@ def run_pipeline(
                         and abs(probed - title.duration_seconds)
                         <= max(60.0, 0.05 * title.duration_seconds)
                     )
+                    # v0.2.15 (design Gap 2): duration alone cannot tell a
+                    # DVD pressing of a movie from its Blu-ray twin - same
+                    # runtime, different master. Compare the existing rip's
+                    # video width against what the current disc's scan says
+                    # this title should be (tier 1), falling back to a
+                    # media_type width class (tier 2); a rejected file is
+                    # deleted and re-ripped - failing closed is correct for
+                    # a destructive-reuse decision. One extra probe_streams
+                    # call per candidate, only after duration passes.
+                    scanned_width = None
+                    existing_width = None
+                    width_checked = False
+                    if reusable:
+                        scanned_width = _scanned_video_width(title)
+                        try:
+                            existing_width = first_video_width(
+                                probe_streams(job.input_path))
+                        except Exception:
+                            existing_width = None  # probe failure -> reject
+                        width_checked = True
+                        if scanned_width is not None:
+                            reusable = existing_width == scanned_width
+                        elif disc.media_type == "dvd":
+                            reusable = (
+                                existing_width is not None
+                                and existing_width <= _DVD_WIDTH_MAX
+                            )
+                        elif disc.media_type == "bluray":
+                            reusable = (
+                                existing_width is not None
+                                and existing_width >= _BLURAY_WIDTH_MIN
+                            )
+                        # else: neither source known - duration check alone
+                        # decides (v0.2.12 behavior, deliberate tier 3).
                     if reusable:
                         stage(
                             f"Reusing existing rip of {job.output_name}"
                             " - skipping re-rip"
                         )
                     else:
+                        if width_checked:
+                            # A different master, not a partial file - the
+                            # scan (or media class) says this rip is not
+                            # the one this disc would produce.
+                            stage(
+                                f"Existing rip of {job.output_name} is a "
+                                f"different master (width {existing_width or '?'} "
+                                f"vs expected "
+                                f"{scanned_width or disc.media_type or '?'}) "
+                                "- re-ripping"
+                            )
                         try:
                             os.remove(job.input_path)
                         except OSError:
@@ -482,13 +639,19 @@ def run_pipeline(
                     if want_subtitles else None
                 )
                 sub = nth_of_type(streams, "subtitle", sub_ord) if sub_ord is not None else None
-                if sub is None and want_subtitles:
+                if sub is None and want_subtitles and not (
+                    job.selection.subtitle_user_declined
+                    or _was_overridden(job, stream_overrides)
+                ):
                     # Fallback (validation run 7): the disc-scan sid and the
                     # ripped MKV's stream list can disagree; rather than
                     # shipping no subtitles, use the FIRST subtitle stream
                     # (MakeMKV preserves scan order in the rip) so English
                     # subs are included by default - players can turn them
                     # off per Eric's preference.
+                    # v0.2.15: only an UNTOUCHED recommendation keeps the
+                    # fallback - a Review-page pick (or an explicit
+                    # "(no subtitles)") is the user's call, not ours.
                     subs_in_rip = [s for s in streams if s.codec_type == "subtitle"]
                     if subs_in_rip:
                         sub = subs_in_rip[0]
