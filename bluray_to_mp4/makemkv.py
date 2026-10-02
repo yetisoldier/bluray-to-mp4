@@ -240,17 +240,35 @@ def scan_disc(
     minlength: int = 120,
     runner: Runner | None = None,
     timeout: float | None = None,
+    on_line: "Callable[[str, str], None] | None" = None,
 ) -> Disc:
-    """Scan a disc and build the full Disc model (titles, streams, languages)."""
+    """Scan a disc and build the full Disc model (titles, streams, languages).
+
+    on_line(kind, text), when given, receives a human-readable progress
+    line for notable events (MSG codes, titles seen) so the UI can show
+    the scan is alive instead of appearing frozen.
+    """
     run = runner or make_runner(timeout)
     disc = Disc(index=index)
     title: Title | None = None
     stream: StreamInfo | None = None
+
+    def _report(text: str) -> None:
+        if on_line is not None:
+            on_line("scan", text)
+
     for line in run(
         binary,
         ["-r", "--cache=1", "info", f"disc:{index}", f"--minlength={minlength}"],
     ):
         kind, payload = parse_line(line)
+        if on_line is not None:
+            if kind == "MSG":
+                _text = payload[3] if len(payload) > 3 else ""
+                if _text:
+                    _report(_text)
+            elif kind == "TINFO":
+                _report(f"Reading title {payload[0]} ...")
         if kind == "MSG":
             code = payload[0]
             if code in BETA_EXPIRED_CODES:

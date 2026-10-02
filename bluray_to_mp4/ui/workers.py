@@ -25,6 +25,7 @@ class ScanWorker(QThread):
 
     scanned = Signal(object)     # Disc
     drives_listed = Signal(list)
+    progress = Signal(str)       # human-readable scan progress line
     failed = Signal(str)
 
     def __init__(self, mode: str = "drives", index: int = 0,
@@ -39,8 +40,14 @@ class ScanWorker(QThread):
             if self.mode == "drives":
                 self.drives_listed.emit(find_drives())
             else:
+                progress = self.progress
+
+                def _on_line(kind: str, text: str) -> None:
+                    progress.emit(text)
+
                 self.scanned.emit(
-                    scan_disc(self.index, minlength=self.minlength)
+                    scan_disc(self.index, minlength=self.minlength,
+                              on_line=_on_line)
                 )
         except Exception as exc:
             self.failed.emit(str(exc))

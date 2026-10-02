@@ -418,6 +418,7 @@ def test_scan_selected_uses_drive_index_not_row(qapp, monkeypatch):
             self.index = index
             self.scanned = type("S", (), {"connect": lambda s, x: None})()
             self.failed = type("S", (), {"connect": lambda s, x: None})()
+            self.progress = type("S", (), {"connect": lambda s, x: None})()
 
         def start(self):
             launched.append(self.index)
@@ -508,3 +509,30 @@ def test_episode_title_edit_overrides_name(qapp, monkeypatch):
     first = w.outputs_table.item(0, 1).text()
     assert "S01E01" in first  # untouched row unchanged
     w.close()
+
+
+def test_scan_streams_progress_lines(qapp, monkeypatch):
+    """Frozen-scan fix: the scan worker emits readable progress lines while
+    MakeMKV reads the disc table (MSG texts + per-title reads)."""
+    from bluray_to_mp4.ui.workers import ScanWorker
+
+    seen = []
+    w = ScanWorker(mode="scan", index=0)
+    w.progress.connect(lambda t: seen.append(t))
+
+    lines = [
+        'MSG:5004,0,1,"Using direct disc access mode"',
+        'TINFO:0,2,2,"3456"',
+        'TINFO:0,8,0,"Mamma Mia! Here We Go Again"',
+        'TINFO:1,2,2,"1800"',
+        'MSG:5006,0,1,"Loaded content"',
+    ]
+    def fake_run(binary, args):
+        return iter(lines)
+
+    import bluray_to_mp4.makemkv as mkv
+    monkeypatch.setattr(mkv, "make_runner", lambda timeout=None: fake_run)
+    # drive the scan synchronously through the worker's run body
+    w.run()
+    assert any("direct disc access" in t for t in seen), seen
+    assert any("title" in t.lower() for t in seen), seen

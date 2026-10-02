@@ -2,7 +2,20 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.5] - 2026-10-02
+
+### Fixed
+
+- **The scan no longer feels frozen.** MakeMKV's disc read now streams live
+  progress into the Source page (MakeMKV status messages + "Reading title
+  N" lines) instead of a static label while the table of contents is read.
+- **Honest Setup screen.** The button reads "Continue" when everything is
+  ready, with a tooltip naming any optional gaps; "Continue anyway" now
+  appears only when a REQUIRED tool is actually missing (the old label
+  showed even when all six checks passed).
+
 ## [0.2.4] - 2026-10-02
+
 
 ### Fixed
 

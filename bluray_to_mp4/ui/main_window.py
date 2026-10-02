@@ -240,9 +240,11 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.btn_setup_recheck = QPushButton("Re-check")
         self.btn_setup_recheck.clicked.connect(self._show_deps_if_needed)
-        self.btn_setup_continue = QPushButton("Continue anyway")
+        self.btn_setup_continue = QPushButton("Continue")
         self.btn_setup_continue.setObjectName("ghostBtn")
         self.btn_setup_continue.clicked.connect(lambda: self._nav_to(1))
+        self.btn_setup_continue.setToolTip(
+            "All required tools check out; optional gaps are listed above.")
         row.addWidget(self.btn_setup_recheck)
         row.addWidget(self.btn_setup_continue)
         row.addStretch()
@@ -274,10 +276,27 @@ class MainWindow(QMainWindow):
             else:
                 self.deps_table.setCellWidget(row, 3, QLabel(""))
         self.deps_table.resizeColumnsToContents()
+        # "All green" means no missing REQUIRED tools; optional gaps
+        # (e.g. NVENC absent) are informational, never a blocker. When
+        # everything is ready, say so plainly and drop the ominous tone.
         if missing:
+            self.btn_setup_continue.setText("Continue anyway")
+            self.btn_setup_continue.setToolTip(
+                "Some REQUIRED tools are missing - outputs may fail.")
             self._nav_to(0)
-        elif self.stack.currentIndex() == 0:
-            self._nav_to(1)
+        else:
+            missing_optional = [
+                c for c in checks if not c.ok and not getattr(c, "required", True)
+            ]
+            self.btn_setup_continue.setText("Continue")
+            if not missing_optional:
+                self.btn_setup_continue.setToolTip("All tools ready.")
+            else:
+                self.btn_setup_continue.setToolTip(
+                    "All required tools ready; some optional features "
+                    "are unavailable (listed above).")
+            if self.stack.currentIndex() == 0:
+                self._nav_to(1)
         self._refresh_monitor_pill()
 
     # ------------------------------------------------------------------
@@ -383,6 +402,10 @@ class MainWindow(QMainWindow):
         self.scan_status.setStyleSheet(
             "color: palette(bright-text, err);")
 
+    def _scan_progress(self, text: str) -> None:
+        """Live scan heartbeat: MakeMKV reading titles/streams, not frozen."""
+        self.scan_status.setText(text)
+
     def _scan_selected(self) -> None:
         row = self.drives_table.currentRow()
         # Row is a position in the filtered drive list, not the MakeMKV
@@ -395,6 +418,7 @@ class MainWindow(QMainWindow):
         self.scan_worker = ScanWorker(mode="scan", index=self._drives[row].index)
         self.scan_worker.scanned.connect(self._disc_scanned)
         self.scan_worker.failed.connect(self._scan_failed)
+        self.scan_worker.progress.connect(self._scan_progress)
         self.scan_worker.start()
 
     def _disc_scanned(self, disc: Disc) -> None:
