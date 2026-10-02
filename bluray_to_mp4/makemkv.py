@@ -382,19 +382,26 @@ def rip_titles(
     if not saved:
         if failures:
             raise TitleRipError(failures[0])
-        # MakeMKV 2.0.0 no longer reports finished output files via
-        # MSG:3307 (those lines now carry disc-internal files such as
-        # the .mpls playlist; validation run 6: a 100% rip raised
-        # "finished without producing any files" while the .mkv sat
-        # in the output dir). After a successful "N titles saved",
-        # recover the paths from the output directory itself.
-        if saved_count > 0:
+        # v0.2.16 (validation run 9, 14:52): this recovery used to be
+        # gated on MakeMKV 2.0.0's MSG:5004 "N titles saved" summary
+        # line, which the DVD run never emitted - so a 100% rip raised
+        # "finished without producing any files" while the .mkv sat in
+        # the output dir. With no saved-file MSG:3307 .mkv entries and
+        # no title failures, recover .mkv files from outdir
+        # UNCONDITIONALLY: the pipeline's run-start purge guarantees
+        # the dir was empty except this run's output, so every .mkv
+        # there is this rip's product. An empty outdir (no summary
+        # line AND no files) is still a genuine failure. The v0.2.15
+        # saved_count>0 path is subsumed: summary-or-not, found files
+        # return; a saved_count with no .mkv on disk still raises.
+        found = []
+        if os.path.isdir(str(outdir)):
             found = [
                 os.path.join(str(outdir), name)
                 for name in sorted(os.listdir(str(outdir)))
                 if name.lower().endswith(".mkv")
             ]
-            if found:
-                return found
+        if found:
+            return found
         raise MakeMkvError("makemkvcon finished without producing any files.")
     return saved

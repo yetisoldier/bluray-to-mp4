@@ -2,6 +2,49 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.16] - 2026-10-02
+
+### Added
+
+- **DVD VobSub subtitle OCR.** The first real DVD run (2026-10-02)
+  encoded fine but subtitle OCR failed: ffmpeg's `.sup` muxer is
+  Blu-ray PGS-only and DVDs carry VobSub. The probed subtitle codec now
+  chooses the extraction container - PGS (Blu-ray) still extracts to
+  `.sup` exactly as before, VobSub (and unknown codecs) extract to a
+  single-track MKV, the one container ffmpeg accepts for a
+  `dvd_subtitle` copy and one Subtitle Edit reads for OCR directly -
+  no new tool dependencies. The single-track intermediate guarantees
+  Subtitle Edit OCRs exactly the stream the pipeline picked.
+- **Subtitles are now embedded in the MP4.** After the OCR'd SRT is
+  written as the usual sidecar, it is also muxed into the finished
+  MP4 as a soft `mov_text` track - the only subtitle form every
+  player (VLC, Plex, Jellyfin, Apple TV) reads from `.mp4`. The mux
+  writes to a temp sibling and atomically replaces the MP4, so a
+  failed embed can never destroy the finished encode: the run
+  records a warning, the MP4 ships, and the editable sidecar `.srt`
+  is always kept next to it. The embedded track is tagged `eng` when
+  the rip's own stream tags confirm English, `und` otherwise
+  (honest metadata for the v0.2.14 unconfirmed-language case).
+- UI: total-remaining header pill; History: size + GB/hour; Setup:
+  NVENC probe cache; drive-list timeout.
+
+### Changed
+
+- **DVD default size target is 1.0 GB/hour** (was 1.5; Eric's call,
+  2026-10-02 15:05). Blu-ray stays at 2.0 GB/hour.
+
+### Fixed
+
+- **Fresh-rip accounting no longer depends on MakeMKV's summary
+  line.** The end-of-run recovery of saved `.mkv` files was gated on
+  the MSG:5004 "N titles saved" line, which the DVD run (validation
+  run 9, 14:52) never emitted - a 100%-complete rip raised "finished
+  without producing any files" while the file sat in the output
+  directory. When no saved-file entries and no title failures were
+  seen, `.mkv` files in the output dir are now recovered
+  unconditionally (the run starts from a purged directory); an empty
+  directory still raises the existing error.
+
 ## [0.2.15] - 2026-10-02
 
 ### Added

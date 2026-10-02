@@ -1,6 +1,6 @@
 """ffmpeg encode command builder: NVENC fast mode and x265 quality mode.
 
-Targets the project spec: ~2 GB per hour of video (Blu-ray 1080p), ~1-1.5 GB
+Targets the project spec: ~2 GB per hour of video (Blu-ray 1080p), ~1 GB
 per hour for DVD-native SD, AAC 5.1 audio, English subs as sidecar SRT.
 """
 
@@ -19,8 +19,9 @@ CONTAINER_SLACK = 0.03
 AUDIO_KBPS = {8: 640, 6: 448, 2: 192, 1: 128}
 
 # Default size budgets (GB per hour of video).
+# v0.2.16 (Eric decision, 2026-10-02 15:05): DVD target 1.5 -> 1.0.
 BLURAY_GB_PER_HOUR = 2.0
-DVD_GB_PER_HOUR = 1.5
+DVD_GB_PER_HOUR = 1.0
 
 
 def estimate_video_bitrate_kbps(

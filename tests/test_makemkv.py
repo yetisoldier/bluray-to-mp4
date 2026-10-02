@@ -5,6 +5,7 @@ import pytest
 from bluray_to_mp4.makemkv import (
     BetaKeyExpiredError,
     DiscOpenError,
+    MakeMkvError,
     find_drives,
     parse_line,
     rip_titles,
@@ -153,3 +154,38 @@ def test_rip_titles_recovers_saved_files_from_outdir():
     assert not any(p.endswith(".mpls") for p in saved)
     import shutil
     shutil.rmtree(out, ignore_errors=True)
+
+
+def test_rip_titles_recovers_mkvs_without_any_summary(tmp_path):
+    """v0.2.16 (validation run 9, 14:52): the DVD rip emitted NO MSG:3307
+    .mkv lines and NO MSG:5004 summary at all - a 100% rip raised
+    'finished without producing any files' while the .mkv sat in outdir.
+    With no saved-file entries and no title failures, .mkv files in
+    outdir are this run's product (the pipeline purges the dir before
+    ripping) and must be recovered unconditionally."""
+    out = tmp_path / "dvd_out"
+    out.mkdir()
+    mkv = out / "Mamma Mia! Here We Go Again_t00.mkv"
+    mkv.write_bytes(b"ripped")
+    script = [
+        'MSG:1005,0,1,"MakeMKV started","%1 started","MakeMKV v2.0.0"',
+        'MSG:3307,0,2,"File 00803.mpls was added","File %1 added","00803.mpls","1"',
+        "PRGV:65536,65536,65536",
+    ]
+    saved = rip_titles(0, [0], str(out), runner=fake_runner(script))
+    assert saved == [str(mkv)]
+    assert not any(p.endswith(".mpls") for p in saved)
+
+
+def test_rip_titles_no_summary_empty_outdir_still_raises(tmp_path):
+    """Guard: no MSG:3307 .mkv entries, no summary line, and an EMPTY
+    outdir is still a genuine nothing-was-produced failure - the
+    existing error fires (recovery must not invent files)."""
+    out = tmp_path / "empty_out"
+    out.mkdir()
+    script = [
+        'MSG:1005,0,1,"MakeMKV started","%1 started","MakeMKV v2.0.0"',
+        "PRGV:65536,65536,65536",
+    ]
+    with pytest.raises(MakeMkvError, match="without producing any files"):
+        rip_titles(0, [0], str(out), runner=fake_runner(script))

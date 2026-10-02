@@ -9,8 +9,15 @@ def test_bitrate_budget_bluray_2gb_per_hour():
     assert estimate_video_bitrate_kbps(audio_channels=2) == 4119
 
 
-def test_bitrate_budget_dvd_15gb_per_hour():
+def test_bitrate_budget_formula_15gb_per_hour():
+    # Pure formula pin (X GB/h * 2222 kbit/s total, minus slack and
+    # 448k AAC); the DVD DEFAULT moved to 1.0 GB/h in v0.2.16.
     assert estimate_video_bitrate_kbps(target_gb_per_hour=1.5) == 2785
+
+
+def test_bitrate_budget_dvd_default_10gb_per_hour():
+    # v0.2.16 (Eric decision): DVDs now target 1.0 GB/hour.
+    assert estimate_video_bitrate_kbps(target_gb_per_hour=1.0) == 1707
 
 
 def test_nvenc_plan_bluray():
@@ -47,8 +54,8 @@ def test_x265_plan_dvd_keeps_sd_resolution():
     assert "libx265" in args
     # No upscaling for DVD sources.
     assert "scale" not in joined
-    assert plan.gb_per_hour == 1.5
-    assert plan.target_video_kbps == 2785
+    assert plan.gb_per_hour == 1.0
+    assert plan.target_video_kbps == 1707
 
 
 def test_deinterlace_single_vf():

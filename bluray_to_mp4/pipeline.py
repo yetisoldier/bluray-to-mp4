@@ -38,7 +38,12 @@ from .makemkv import (
 from .naming import movie_output_name
 from .recommend import Selection, recommend_title
 from .series import detect_series, episode_output_names, main_feature
-from .subtitles import SubtitleOcrError, run_subtitle_ocr
+from .subtitles import (
+    SubtitleOcrError,
+    mux_language,
+    mux_srt_into_mp4,
+    run_subtitle_ocr,
+)
 from .tmdb import TmdbError, lookup_movie, season_episode_titles
 
 if False:  # pragma: no cover - typing only
@@ -700,14 +705,33 @@ def run_pipeline(
                     try:
                         ocr = run_subtitle_ocr(
                             job.input_path, sub.index, video_out, workdir=rip_dir,
+                            codec_name=sub.codec_name,  # v0.2.16: VobSub -> .mkv
                         )
                         job.srt_path = ocr.srt_path
+                        # v0.2.16: embed the OCR'd subtitles INSIDE the MP4
+                        # as a soft mov_text track (sidecar .srt stays on
+                        # disk for editing). The mux temp-then-replaces, so
+                        # a failure leaves the finished encode bit-identical.
+                        mux_srt_into_mp4(
+                            video_out, ocr.srt_path,
+                            language=mux_language(sub.lang),
+                        )
                         result.warnings.extend(f"{job.output_name}: {n}" for n in ocr.notes)
                     except SubtitleOcrError as exc:
-                        result.warnings.append(
-                            f"{job.output_name}: subtitle OCR failed ({exc}); "
-                            "MP4 was produced without subtitles."
-                        )
+                        # job.srt_path is set before the mux runs, so it is
+                        # the exact discriminator of which stage failed
+                        # (OCR vs embed) - the History view names it right.
+                        if job.srt_path:
+                            result.warnings.append(
+                                f"{job.output_name}: subtitle embed failed "
+                                f"({exc}); MP4 ships without embedded "
+                                "subtitles; sidecar SRT kept."
+                            )
+                        else:
+                            result.warnings.append(
+                                f"{job.output_name}: subtitle OCR failed ({exc}); "
+                                "MP4 was produced without subtitles."
+                            )
 
                 stage(f"Done: {job.output_name}")
             except EncodeCancelled:

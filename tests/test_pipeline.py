@@ -18,7 +18,7 @@ from bluray_to_mp4.ffprobe import (
 )
 from bluray_to_mp4.makemkv import _CancelState, make_runner
 from bluray_to_mp4.pipeline import EncodeCancelled, execute_encode, run_pipeline
-from bluray_to_mp4.subtitles import OcrResult
+from bluray_to_mp4.subtitles import OcrResult, SubtitleOcrError
 from tests.fixtures import MOVIE_DISC_OUTPUT, SERIES_DISC_OUTPUT, fake_runner
 
 
@@ -155,16 +155,19 @@ _RIP_LINES = [
 ]
 
 
-def _stub_probe(monkeypatch, *, width=3840, subtitle_count=0):
+def _stub_probe(monkeypatch, *, width=3840, subtitle_count=0,
+                sub_codec="hdmv_pgs_subtitle", sub_lang=""):
     """Stub probe_streams: a video stream of the given width (the movie
     fixture's scan says 3840x2160, so 3840 keeps reuse tests reusing),
-    one audio stream, and optional N subtitle streams."""
+    one audio stream, and optional N subtitle streams. v0.2.16: the
+    stubbed subtitle streams carry a codec name and language so the
+    VobSub/PGS branch and the mov_text embed tag can be tested."""
     streams = [
         ProbedStream(0, "video", "h264", width=width),
         ProbedStream(1, "audio", "ac3", channels=6),
     ]
     streams += [
-        ProbedStream(2 + i, "subtitle", "hdmv_pgs_subtitle")
+        ProbedStream(2 + i, "subtitle", sub_codec, lang=sub_lang)
         for i in range(subtitle_count)
     ]
     monkeypatch.setattr(
@@ -960,3 +963,159 @@ def test_first_video_width_parse_and_helper():
         '"codec_name":"ac3"}]}'
     )
     assert first_video_width(audio_only) is None
+
+
+# ---------------------------------------------------------------------
+# v0.2.16: DVD VobSub OCR pass-through + embedded MP4 subtitles.
+# The probed subtitle codec chooses the extraction container (.sup for
+# PGS, single-track .mkv for VobSub) and the OCR'd sidecar SRT is muxed
+# into the finished MP4 as a soft mov_text track (sidecar kept; the
+# mux temp-then-replaces so a failure never destroys the encode).
+
+
+def _stub_ocr(monkeypatch, events, *, srt_text=None, raise_exc=None):
+    """Recording run_subtitle_ocr stub: logs ('ocr', video_out) and
+    either returns a realistic OcrResult (sidecar written next to the
+    MP4, like the real one) or raises the given exception."""
+    def fake_ocr(mkv, index, video_out, *, workdir, codec_name="", **kw):
+        events.append(("ocr", video_out, codec_name))
+        if raise_exc is not None:
+            raise raise_exc
+        sidecar = os.path.splitext(video_out)[0] + ".srt"
+        with open(sidecar, "w", encoding="utf-8") as fh:
+            fh.write(srt_text or "1\n00:00:01,000 --> 00:00:03,000\nHi\n")
+        return OcrResult(srt_path=sidecar, cue_count=1, notes=[])
+    monkeypatch.setattr(pipeline_mod, "run_subtitle_ocr", fake_ocr)
+
+
+def _stub_mux(monkeypatch, events, *, raise_exc=None):
+    """Recording mux_srt_into_mp4 stub: logs ('mux', video, srt, lang)."""
+    def fake_mux(video_path, srt_path, *, language="und", **kw):
+        events.append(("mux", video_path, srt_path, language))
+        if raise_exc is not None:
+            raise raise_exc
+        return video_path
+    monkeypatch.setattr(pipeline_mod, "mux_srt_into_mp4", fake_mux)
+
+
+def test_pipeline_passes_codec_name_to_ocr(tmp_path, monkeypatch):
+    """The probed subtitle codec reaches run_subtitle_ocr: a dvd_subtitle
+    stream (DVD VobSub) must arrive as codec_name='dvd_subtitle' so the
+    extraction picks the .mkv intermediate, not the PGS-only .sup."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=2,
+                sub_codec="dvd_subtitle", sub_lang="eng")
+    _stub_encode(monkeypatch)
+    events = []
+    _stub_ocr(monkeypatch, events)
+    _stub_mux(monkeypatch, events)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+    )
+    job = result.jobs[0]
+    assert job.completed
+    assert job.srt_path is not None
+    assert events[0][0] == "ocr"
+    assert events[0][2] == "dvd_subtitle"  # codec_name kwarg pinned
+
+
+def test_pipeline_ocr_failure_dvd_warns_and_ships(tmp_path, monkeypatch):
+    """DVD branch + OCR failure: the fallback contract holds - warning
+    says 'subtitle OCR failed' / 'without subtitles', the job still
+    completes, no srt_path, and the mux never runs."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=2,
+                sub_codec="dvd_subtitle", sub_lang="eng")
+    _stub_encode(monkeypatch)
+    events = []
+    _stub_ocr(
+        monkeypatch, events,
+        raise_exc=SubtitleOcrError(
+            "subtitle extraction failed: sup muxer supports only codec "
+            "hdmv_pgs_subtitle for type subtitle"
+        ),
+    )
+    _stub_mux(monkeypatch, events)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+    )
+    job = result.jobs[0]
+    assert job.completed          # the MP4 ships
+    assert job.srt_path is None
+    assert any("subtitle OCR failed" in w for w in result.warnings)
+    assert any("without subtitles" in w for w in result.warnings)
+    assert not any("embed failed" in w for w in result.warnings)
+    assert [e[0] for e in events] == ["ocr"]  # mux never reached
+
+
+def test_pipeline_embeds_srt_after_ocr(tmp_path, monkeypatch):
+    """Happy path: OCR runs first, then the sidecar is muxed into the
+    finished MP4 with the probed stream's language ('eng' confirmed)."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=2,
+                sub_codec="hdmv_pgs_subtitle", sub_lang="eng")
+    _stub_encode(monkeypatch)
+    events = []
+    _stub_ocr(monkeypatch, events)
+    _stub_mux(monkeypatch, events)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+    )
+    job = result.jobs[0]
+    assert job.completed
+    kinds = [e[0] for e in events]
+    assert kinds == ["ocr", "mux"]  # call order: OCR before embed
+    mux_video, mux_srt, mux_lang = events[1][1], events[1][2], events[1][3]
+    assert mux_video == os.path.join(str(outdir), job.output_name)
+    assert mux_srt == job.srt_path  # the OCR'd sidecar is what gets embedded
+    assert os.path.exists(mux_srt)  # sidecar kept on disk
+    assert mux_lang == "eng"        # confirmed by the rip's own tags
+
+
+def test_pipeline_mux_failure_keeps_mp4_and_sidecar(tmp_path, monkeypatch):
+    """Embed failure after a successful OCR: the warning names the embed
+    stage and the kept sidecar (NOT the OCR-stage wording), the job
+    still completes, and the sidecar SRT survives on disk."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=2,
+                sub_codec="hdmv_pgs_subtitle", sub_lang="eng")
+    _stub_encode(monkeypatch)
+    events = []
+    _stub_ocr(monkeypatch, events)
+    _stub_mux(
+        monkeypatch, events,
+        raise_exc=SubtitleOcrError("subtitle muxing failed: boom"),
+    )
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+    )
+    job = result.jobs[0]
+    assert job.completed                 # MP4 ships, just without subs
+    assert job.srt_path is not None
+    assert os.path.exists(job.srt_path)   # sidecar SRT kept
+    assert any("subtitle embed failed" in w for w in result.warnings)
+    assert any("sidecar SRT kept" in w for w in result.warnings)
+    assert not any("subtitle OCR failed" in w for w in result.warnings)
+    assert not any("MP4 was produced without subtitles" in w for w in result.warnings)
+
+
+def test_pipeline_untagged_sub_embeds_und(tmp_path, monkeypatch):
+    """The v0.2.14 unconfirmed-language case (probed lang='') embeds as
+    'und' - honest metadata for an OCR'd English track whose source
+    stream was never confirmed."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=2,
+                sub_codec="hdmv_pgs_subtitle", sub_lang="")
+    _stub_encode(monkeypatch)
+    events = []
+    _stub_ocr(monkeypatch, events)
+    _stub_mux(monkeypatch, events)
+    outdir = tmp_path / "out"
+    run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+    )
+    assert events[1][3] == "und"

@@ -1,7 +1,7 @@
 # bluray-to-mp4
 
 Rip personal Blu-ray and DVD discs to MP4 with sensible defaults: 1080p HEVC
-at ~2 GB per hour (Blu-ray), native-resolution SD at ~1.5 GB per hour (DVD),
+at ~2 GB per hour (Blu-ray), native-resolution SD at ~1.0 GB per hour (DVD),
 AAC 5.1 audio, English subtitles, and Plex/Jellyfin-standard naming for both
 movies and TV series. Built for people who don't want to learn what a "PGS
 stream" is: the app scans the disc and recommends which tracks to keep, with
@@ -142,10 +142,12 @@ Force an encoder with `--encoder nvenc` or `--encoder x265` (default: auto).
 - **Subtitles**: plain English over SDH ("English (SDH)" includes sound
   effects), forced-only, and foreign tracks.
 - **Sizing**: 2 GB/hour is about 4.4 Mbps total, leaving roughly 3.9 Mbps
-  video + 448 kbps AAC 5.1 after container overhead. DVDs get 1.5 GB/hour at
+  video + 448 kbps AAC 5.1 after container overhead. DVDs get 1.0 GB/hour at
   native resolution.
 - **Subtitles in MP4**: PGS subtitles are images and MP4 cannot hold them,
-  so the recommended track is OCR'd to a matching sidecar `.srt`.
+  so the recommended track is OCR'd to a matching sidecar `.srt` and embedded
+  in the MP4 as a soft `mov_text` track (the sidecar stays next to the file).
+  DVDs' VobSub tracks are OCR'd the same way (v0.2.16).
 
 ## Remote monitoring
 
