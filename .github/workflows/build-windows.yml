@@ -19,9 +19,9 @@ jobs:
       - name: Download ffmpeg (win64, full build with NVENC + all encoders)
         shell: pwsh
         run: |
-          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.zip"
+          $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip"
           $zipPath = "$env:TEMP\ffmpeg.zip"
-          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -TimeoutSec 300
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -TimeoutSec 600
           Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\ffmpeg-extract" -Force
           $binDir = Get-ChildItem "$env:TEMP\ffmpeg-extract" -Recurse -Directory | Where-Object { $_.Name -eq "bin" } | Select-Object -First 1
           New-Item -ItemType Directory -Force -Path "packaging\tools" | Out-Null
