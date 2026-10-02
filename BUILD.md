@@ -16,7 +16,7 @@ and PyInstaller does not cross-compile.
    - builds the exe via `bluray_to_mp4.spec`
    - smoke-tests the exe (`bluray-to-mp4.exe --status` must exit 0)
    - uploads `bluray-to-mp4-windows-x64.zip` as an artifact (30 days)
-4. Download from the run page, or attach to a release:
+**Bundled ffmpeg** (v0.2.0+): CI downloads the gyan.dev static build into `packaging/tools` before PyInstaller runs, so the zip includes ffmpeg/ffprobe. 4. Download from the run page, or attach to a release:
    `gh release create vX.Y.Z <zip> --title ... --notes ...`
 
 ## Option B: local Windows build
