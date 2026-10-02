@@ -55,3 +55,21 @@ def test_subtitle_toggle():
     sel = recommend_title(title, want_subtitles=False)
     assert sel.subtitle_sid is None
     assert sel.subtitle_reasons == []
+
+def test_unlabeled_sub_still_recommended():
+    """v0.2.14: a subtitle with no English confirmation is still selected
+    (best non-commentary/descriptive track) with an explicit caveat in the
+    reasons - the Review page must never show nothing (validation run 7:
+    Mamma Mia's PGS tracks scored below the old >=100 threshold)."""
+    from bluray_to_mp4.models import Attribute, StreamInfo, Title
+
+    t = Title(tid=0)
+    t.streams.append(StreamInfo(0, 0, {1: Attribute(1, 6201, "Video")}))
+    t.streams.append(StreamInfo(0, 1, {1: Attribute(1, 6202, "Audio"),
+                                       28: Attribute(28, 0, "eng"),
+                                       29: Attribute(29, 0, "English")}))
+    t.streams.append(StreamInfo(0, 2, {1: Attribute(1, 6203, "Subtitle"),
+                                       5: Attribute(5, 0, "PGS")}))
+    sel = recommend_title(t, want_subtitles=True)
+    assert sel.subtitle_sid == 2
+    assert any("not confirmed" in r for r in sel.subtitle_reasons)

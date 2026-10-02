@@ -76,6 +76,16 @@ class MainWindow(QMainWindow):
         # Encode-page liveness: elapsed clock + moving dots so a run in
         # progress is visibly alive even at 0% (BD+ open, 2026-10-02).
         self._run_started_at: float | None = None
+        # Total-remaining model (Eric request, validation run 7): the run
+        # is (verify? + rip? + encode + OCR?) per job. Stage estimates:
+        #   rip    ~90 s/minute of title (BD+ ~5 min + 2x drive read)
+        #   encode ~title/6  (NVENC ~6x realtime) or title/1.5 (x265)
+        #   OCR    ~title/20 (measured SE rate, 2026-10-02)
+        # Each stage replaces its forecast with the live ETA the moment
+        # it starts (Eric: "properly adjusted when that step starts").
+        self._stage_now = "scan"      # scan|rip|encode|ocr|done
+        self._stage_eta: float | None = None  # live ETA of current stage
+        self._current_job_index: int | None = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._tick_elapsed)
@@ -995,7 +1005,9 @@ class MainWindow(QMainWindow):
         self.activity_dots.start()
         self.stage_bar.set_busy(True)
         self.time_elapsed.setText("Elapsed 0:00")
-        self.time_remaining.setText("Remaining: estimating ...")
+        self._stage_now = "scan"
+        self._stage_eta = None
+        self._forecast_total()  # sets time_remaining from the plan
 
         self.run_worker = RunWorker(self.disc.index, plan, self.settings)
         self.run_worker.stage.connect(self._run_stage)
@@ -1011,16 +1023,76 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         self.progress_stage.setText("Cancelling ...")
 
+    def _fmt_hm(self, seconds: "float | None") -> str:
+        if seconds is None:
+            return "..."
+        m, s = divmod(max(0, int(seconds)), 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    def _forecast_total_seconds(self) -> float | None:
+        """Forecast the WHOLE remaining run: the current stage's live ETA
+        (measured, when available) plus forecast seconds for every stage
+        and job still ahead (Eric, validation run 7: a total estimate
+        that properly adjusts when each step starts)."""
+        if self.run_worker is None:
+            return None
+        plan = self.run_worker.plan
+        jobs = plan.get("jobs", [])
+        if not jobs:
+            return None
+        encoder = (plan.get("encoder") or
+                   getattr(self.settings, "encoder", "auto"))
+        want_subs = bool(plan.get("want_subtitles", True))
+        nvenc = encoder in ("auto", "nvenc")
+        cur = self._current_job_index
+        if cur is None:
+            cur = 0
+        live = self._stage_eta if self._stage_eta is not None else 0.0
+        total = live
+        for i, j in enumerate(jobs):
+            d = float(j.get("duration_seconds") or 0)
+            if i == cur:
+                # Current job: swap live ETA in for the current stage;
+                # forecast the stages still ahead of it.
+                if self._stage_now not in ("encode", "ocr") and d > 0:
+                    total += d / (6.0 if nvenc else 1.5)   # encode ahead
+                if self._stage_now != "ocr" and want_subs and d > 0:
+                    total += d / 20.0                        # OCR ahead
+                if self._stage_now == "scan" and d > 0:
+                    total += 5 * 60 + d / 40.0               # rip ahead
+                continue
+            if d <= 0:
+                total += 20 * 60  # unknown length: ~2h average fallback
+                continue
+            if i > cur:
+                total += 5 * 60 + d / 40.0                   # rip
+                total += d / (6.0 if nvenc else 1.5)         # encode
+                if want_subs:
+                    total += d / 20.0                       # OCR
+        return total
+
+    def _forecast_total(self) -> None:
+        secs = self._forecast_total_seconds()
+        if secs is None:
+            return
+        self.time_remaining.setText(
+            f"Total remaining ~{self._fmt_hm(secs)} (all steps)")
+
     def _tick_elapsed(self) -> None:
         if self._run_started_at is None:
             return
         s = int(time.time() - self._run_started_at)
         m, sec = divmod(s, 60)
         self.time_elapsed.setText(f"Elapsed {m}:{sec:02d}")
+        self._forecast_total()
 
     def _stop_liveness(self) -> None:
         self._elapsed_timer.stop()
         self.activity_dots.stop()
+        if self._run_started_at is not None:
+            secs = time.time() - self._run_started_at
+            self.time_elapsed.setText(f"Total {self._fmt_hm(secs)}")
         self._run_started_at = None
         self.stage_bar.set_busy(False)
         self.time_remaining.setText("")
@@ -1028,9 +1100,28 @@ class MainWindow(QMainWindow):
     def _run_stage(self, msg: str) -> None:
         self.progress_stage.setText(msg)
         self.log_text.setText(msg)
+        low = msg.lower()
+        prev = getattr(self, "_stage_now", "scan")
+        if "ocr subtitles" in low:
+            self._stage_now = "ocr"
+        elif low.startswith("encoding"):
+            self._stage_now = "encode"
+        elif low.startswith("ripping") or "reusing existing rip" in low:
+            self._stage_now = "rip"
+        elif low.startswith("verifying"):
+            self._stage_now = "verify"
+        if self._stage_now != prev:
+            self._stage_eta = None  # new stage: forecast until live ETA
+        self._forecast_total()
 
     def _run_progress(self, job_name: str, tid: int, frac: float, eta: float | None) -> None:
         self.progress_current.setText(job_name)
+        jobs = self.run_worker.plan.get("jobs", []) if self.run_worker else []
+        self._current_job_index = next(
+            (i for i, j in enumerate(jobs) if j.get("tid") == tid), 0)
+        if eta is not None:
+            self._stage_eta = eta
+        self._forecast_total()
         self.stage_bar.set_value(frac, eta)
         if eta is not None:
             # The pipeline carries the last real estimate forward across
@@ -1056,6 +1147,7 @@ class MainWindow(QMainWindow):
     def _run_done(self, result) -> None:
         self.btn_cancel.setEnabled(False)
         self._stop_liveness()
+        self._stage_now = "done"
         self.stage_bar.set_value(1.0)
         errors = getattr(result, "errors", [])
         if errors:

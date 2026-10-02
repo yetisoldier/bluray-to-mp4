@@ -591,3 +591,33 @@ def test_eta_progress_bar_busy_mode(qapp):
     assert bar.eta_label.text() == "ETA 1:40"
     bar.reset()
     assert bar.eta_label.text() == ""
+
+def test_total_remaining_forecast_includes_all_steps(qapp, monkeypatch):
+    """Eric's validation-day request: the Remaining area must estimate the
+    WHOLE run (all steps, all jobs), swapping in each stage's live ETA as
+    it starts. A series plan with three jobs must forecast rips + encodes
+    + OCR for later jobs, not just the current stage."""
+    w = _series_window(qapp, monkeypatch)
+    from bluray_to_mp4.ui.workers import RunWorker
+    plan = {
+        "disc_name": "Disc", "media_type": "bluray", "is_series": True,
+        "encoder": "nvenc", "outdir": "/tmp/x", "want_subtitles": True,
+        "jobs": [
+            {"tid": 0, "output_name": "e0.mp4", "duration_seconds": 2700},
+            {"tid": 1, "output_name": "e1.mp4", "duration_seconds": 2700},
+        ],
+        "tid_names": {},
+    }
+    w.run_worker = RunWorker(0, plan, Settings())
+    w._current_job_index = 0
+    w._stage_now = "encode"
+    w._stage_eta = 100.0
+    secs = w._forecast_total_seconds()
+    # Current job: live 100s encode + OCR ahead (2700/20 = 135).
+    # Next job: rip (300 + 67.5) + encode (450) + OCR (135).
+    assert secs is not None
+    assert abs(secs - (100 + 135 + 300 + 67.5 + 450 + 135)) < 0.01
+    w._stage_now = "ocr"
+    secs2 = w._forecast_total_seconds()
+    assert secs2 < secs  # fewer steps ahead once OCR is the current stage
+    w.close()

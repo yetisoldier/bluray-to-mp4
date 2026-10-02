@@ -2,7 +2,29 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.14] - 2026-10-02
+
+### Added
+
+- **Total time remaining across ALL steps.** The Remaining area now
+  forecasts the whole run: current stage's live ETA plus forecast
+  seconds for every stage and job still ahead (rip ~BD+5min+read
+  time, encode at ~6x realtime NVENC / 1.5x x265, OCR ~title/20).
+  Each stage's forecast is replaced by its measured ETA the moment it
+  starts, exactly as requested. On completion the area shows the
+  total run time.
+
+### Fixed
+
+- **Review page: recommended subtitles column could be empty.** The
+  recommender only auto-selected a subtitle it could positively
+  confirm as English; when the scan data doesn't label the language
+  (this disc's PGS tracks), nothing showed and there was nothing to
+  select. The best non-commentary/descriptive subtitle is now always
+  selected with an explicit "English not confirmed" caveat.
+
 ## [0.2.13] - 2026-10-02
+
 
 ### Added
 

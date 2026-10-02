@@ -165,9 +165,19 @@ def recommend_title(title: Title, *, want_subtitles: bool = True) -> Selection:
             score, reasons = _score_sub(s)
             if score > best_sub_score:
                 best_sub, best_sub_score, best_sub_reasons = s, score, reasons
-        if best_sub is not None and best_sub_score >= 100:
+        # v0.2.14 (Eric: English subs included by default, players can
+        # toggle off): only a POSITIVE English match used to select here;
+        # when the scan can't confirm the language (Mamma Mia's PGS
+        # tracks), the Review page showed NOTHING to select. Now the best
+        # non-commentary/descriptive subtitle is always selected; when
+        # English is unconfirmed the reasons say so.
+        if best_sub is not None and best_sub_score >= 0:
             sel.subtitle_sid = best_sub.sid
             sel.subtitle_reasons = best_sub_reasons
+            if best_sub_score < 100:
+                sel.subtitle_reasons = list(best_sub_reasons) + [
+                    "English not confirmed by the disc scan; verify the "
+                    "language before relying on it."]
 
     if not sel.has_english_audio and audios:
         sel.warnings.append(
