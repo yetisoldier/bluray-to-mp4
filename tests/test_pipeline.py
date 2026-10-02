@@ -406,7 +406,10 @@ def test_job_failure_isolated_queue_continues(tmp_path, monkeypatch):
         if "info" in args:
             yield from SERIES_DISC_OUTPUT.splitlines()
             return
-        tid = args[3]  # "-r mkv disc:0 <tid> <dir> --minlength=..."
+        # Args layout changed in v0.2.9 ("-r --progress=-stdout mkv disc:0
+        # <tid> ..."): locate the tid after the disc:N argument.
+        disc_at = next(i for i, a in enumerate(args) if a.startswith("disc:"))
+        tid = args[disc_at + 1]
         if tid == "1":  # second episode: rip blows up
             yield 'MSG:5003,0,1,"Error in title 1",' \
                   '"Error in title %1","1"'

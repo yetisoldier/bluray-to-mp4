@@ -149,14 +149,10 @@ class RunWorker(QThread):
             # records which outputs failed (never a generic success).
             errors = getattr(result, "errors", [])
             if errors:
-                failed_names = [
-                    job.output_name for job in result.jobs
-                    if getattr(job, "error", None)
-                ]
-                monitor_state.fail(
-                    "Failed: "
-                    + (", ".join(failed_names) if failed_names else str(errors[0]))
-                )
+                # Include each failure's REASON, not just file names
+                # (validation run 4: the remote monitor said which output
+                # failed but hid why, so diagnosis needed a second run).
+                monitor_state.fail("; ".join(str(e) for e in errors[:3]))
             else:
                 monitor_state.finish()
             self.done.emit(result)

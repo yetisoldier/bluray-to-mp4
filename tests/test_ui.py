@@ -564,3 +564,30 @@ def test_scan_streams_progress_lines(qapp, monkeypatch):
     w.run()
     assert any("direct disc access" in t for t in seen), seen
     assert any("title" in t.lower() for t in seen), seen
+
+def test_activity_dots_cycle(qapp):
+    """Validation-day ask: the screen must always show life. The dots
+    must visibly move across frames even with no progress data."""
+    from bluray_to_mp4.ui.widgets import ActivityDots
+    dots = ActivityDots()
+    seen = {dots.text()}
+    for _ in range(4):
+        dots._tick()
+        seen.add(dots.text())
+    assert len(seen) >= 3  # frames differ; the animation visibly moves
+
+
+def test_eta_progress_bar_busy_mode(qapp):
+    """Busy mode pulses (Qt indeterminate 0..0) with an 'estimating ...'
+    label and auto-exits when real progress data arrives."""
+    from bluray_to_mp4.ui.widgets import EtaProgressBar
+    bar = EtaProgressBar()
+    bar.set_busy(True)
+    assert bar.eta_label.text() == "estimating ..."
+    assert (bar.bar.minimum(), bar.bar.maximum()) == (0, 0)
+    # Real data arrives: busy mode must exit and show an ETA.
+    bar.set_value(0.5, 100)
+    assert (bar.bar.minimum(), bar.bar.maximum()) == (0, 1000)
+    assert bar.eta_label.text() == "ETA 1:40"
+    bar.reset()
+    assert bar.eta_label.text() == ""

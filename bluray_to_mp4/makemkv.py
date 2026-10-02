@@ -329,17 +329,20 @@ def rip_titles(
     output mid-rip and raises EncodeCancelled.
     """
     run = runner or make_runner(timeout)
+    # Options must precede the command word (usage.txt:
+    # "makemkvcon [options] Command Parameters"). Without --progress,
+    # robot mode emits NO PRGV lines at all ("Default is no output");
+    # the v0.2.6 attempt used '--progress=-', which is not a valid
+    # special name (-stdout/-stderr/-same), so percent/ETA never
+    # appeared. Fixed per official usage.txt, validation run 4.
     args = [
         "-r",
+        "--progress=-stdout",
         "mkv",
         f"disc:{index}",
         ",".join(str(t) for t in tids),
         str(outdir),
         f"--minlength={minlength}",
-        # Without --progress, robot mode emits NO PRGV progress lines to
-        # stdout and the whole rip phase looks frozen at 0% (found in first
-        # real-disc validation, 2026-10-02). '-' = stdout.
-        "--progress=-",
     ]
     saved: list[str] = []
     failures: list[str] = []

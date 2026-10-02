@@ -2,7 +2,30 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.9] - 2026-10-02
+
+### Added
+
+- **The Encode page now always shows life.** Animated activity dots,
+  an elapsed clock, and a time-remaining estimate run on every job.
+  The stage progress bar pulses (indeterminate) until the first real
+  progress event, so BD+ decryption at a legitimate 0% no longer looks
+  frozen (validation-day request).
+
+### Fixed
+
+- **Rip percent/ETA actually stream now.** The v0.2.6 flag was wrong:
+  official usage.txt says valid progress targets are -stdout/-stderr/
+  -same and the default is NO progress output; our "--progress=-"
+  (also misplaced after the command parameters) silently produced
+  nothing. Now: --progress=-stdout before the mkv command.
+- **Remote failures now carry the reason.** The monitor's error
+  message previously named only which output failed, hiding why
+  (validation run 4 failed at 12:11 with no diagnosable cause
+  remotely). It now includes each error's reason.
+
 ## [0.2.8] - 2026-10-02
+
 
 ### Fixed
 

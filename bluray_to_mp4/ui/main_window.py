@@ -8,9 +8,10 @@ Pages are managed by the sidebar index (0=Setup, 1=Source, 2=Review,
 from __future__ import annotations
 
 import os
+import time
 import webbrowser
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -48,7 +49,7 @@ from ..recommend import recommend_title
 from ..series import detect_series, episode_output_names, main_feature
 from ..tmdb import lookup_movie, season_episode_titles
 from .workers import FetchWorker, RunWorker, ScanWorker
-from .widgets import card_frame, muted, section, EtaProgressBar
+from .widgets import ActivityDots, card_frame, muted, section, EtaProgressBar
 
 # closeEvent wait budgets (ms) for background workers; the run worker
 # gets the longer window because ffmpeg honors its terminate signal.
@@ -71,6 +72,13 @@ class MainWindow(QMainWindow):
         self.scan_worker: ScanWorker | None = None
         self.run_worker: RunWorker | None = None
         self.fetch_worker: FetchWorker | None = None
+
+        # Encode-page liveness: elapsed clock + moving dots so a run in
+        # progress is visibly alive even at 0% (BD+ open, 2026-10-02).
+        self._run_started_at: float | None = None
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._tick_elapsed)
 
         self.setWindowTitle("bluray-to-mp4")
         self.setMinimumSize(980, 700)
@@ -622,6 +630,21 @@ class MainWindow(QMainWindow):
         self.progress_stage.setWordWrap(True)
         cl.addWidget(self.progress_stage)
 
+        # Liveness + time row: moving dots, elapsed clock, remaining
+        # estimate (validation-day request: the screen must always show
+        # work happening, even when percent sits at 0 during BD+ open).
+        time_row = QHBoxLayout()
+        self.activity_dots = ActivityDots()
+        time_row.addWidget(self.activity_dots)
+        self.time_elapsed = QLabel("Elapsed 0:00")
+        self.time_elapsed.setObjectName("muted")
+        time_row.addWidget(self.time_elapsed)
+        self.time_remaining = QLabel("")
+        self.time_remaining.setObjectName("muted")
+        time_row.addWidget(self.time_remaining)
+        time_row.addStretch()
+        cl.addLayout(time_row)
+
         self.overall_row = card_frame()
         overall_layout = QVBoxLayout(self.overall_row)
         overall_layout.setSpacing(6)
@@ -952,6 +975,15 @@ class MainWindow(QMainWindow):
         self.stage_bar.reset()
         self.overall_bar.reset()
         self.btn_cancel.setEnabled(True)
+        # Liveness: dots animate, clock ticks, and the stage bar pulses
+        # until the first real progress event arrives (BD+ open can take
+        # minutes with the percent legitimately at 0).
+        self._run_started_at = time.time()
+        self._elapsed_timer.start()
+        self.activity_dots.start()
+        self.stage_bar.set_busy(True)
+        self.time_elapsed.setText("Elapsed 0:00")
+        self.time_remaining.setText("Remaining: estimating ...")
 
         self.run_worker = RunWorker(self.disc.index, plan, self.settings)
         self.run_worker.stage.connect(self._run_stage)
@@ -967,6 +999,20 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         self.progress_stage.setText("Cancelling ...")
 
+    def _tick_elapsed(self) -> None:
+        if self._run_started_at is None:
+            return
+        s = int(time.time() - self._run_started_at)
+        m, sec = divmod(s, 60)
+        self.time_elapsed.setText(f"Elapsed {m}:{sec:02d}")
+
+    def _stop_liveness(self) -> None:
+        self._elapsed_timer.stop()
+        self.activity_dots.stop()
+        self._run_started_at = None
+        self.stage_bar.set_busy(False)
+        self.time_remaining.setText("")
+
     def _run_stage(self, msg: str) -> None:
         self.progress_stage.setText(msg)
         self.log_text.setText(msg)
@@ -974,6 +1020,11 @@ class MainWindow(QMainWindow):
     def _run_progress(self, job_name: str, tid: int, frac: float, eta: float | None) -> None:
         self.progress_current.setText(job_name)
         self.stage_bar.set_value(frac, eta)
+        if eta is not None and eta > 1:
+            m, s = divmod(int(eta), 60)
+            self.time_remaining.setText(f"Remaining ~{m}:{s:02d}")
+        elif frac > 0.0:
+            self.time_remaining.setText("Remaining: estimating ...")
         if eta is not None:
             self.statusBar().showMessage(
                 f"{job_name}: {int(frac*100)}% - {int(eta//60)}:{int(eta%60):02d} remaining")
@@ -989,6 +1040,7 @@ class MainWindow(QMainWindow):
 
     def _run_done(self, result) -> None:
         self.btn_cancel.setEnabled(False)
+        self._stop_liveness()
         self.stage_bar.set_value(1.0)
         errors = getattr(result, "errors", [])
         if errors:
@@ -1011,6 +1063,7 @@ class MainWindow(QMainWindow):
 
     def _run_failed(self, message: str) -> None:
         self.btn_cancel.setEnabled(False)
+        self._stop_liveness()
         self.progress_stage.setText("Failed")
         self.log_text.setText(message)
         self.statusBar().showMessage("Rip failed", 5000)
