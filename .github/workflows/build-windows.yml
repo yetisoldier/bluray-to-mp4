@@ -85,11 +85,13 @@ jobs:
           $exe = "dist\bluray-to-mp4\bluray-to-mp4.exe"
           & $signtool sign /f "$env:TEMP\cs.pfx" /p $env:YW_CODESIGN_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe
           if ($LASTEXITCODE -ne 0) { throw "signtool sign failed" }
-          # Trust the signer on this runner (no prompt for these stores),
-          # then prove the embedded signature fully validates.
+          # Trust the signer on this runner so full-chain validation passes
+          # (self-signed root: the runner must trust its own signer to verify).
           $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("$env:TEMP\cs.pfx", $env:YW_CODESIGN_PW)
-          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "CurrentUser")
-          $store.Open("ReadWrite"); $store.Add($cert); $store.Close()
+          foreach ($storeName in @("TrustedPeople", "Root")) {
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, "CurrentUser")
+            $store.Open("ReadWrite"); $store.Add($cert); $store.Close()
+          }
           $si = Get-AuthenticodeSignature $exe
           Write-Host "Signer: $($si.SignerCertificate.Subject)"
           if ($si.Status -ne "Valid") { throw "signature invalid on runner: $($si.Status) $($si.StatusMessage)" }
