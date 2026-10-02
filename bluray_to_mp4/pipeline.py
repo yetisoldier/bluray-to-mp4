@@ -2,9 +2,9 @@
 
 Movie mode rips the main feature; series mode rips every detected episode
 and names them Plex/Jellyfin style. Encoding uses NVENC when available,
-x265 otherwise. Subtitle OCR to sidecar SRT lands with issue #2; until
-then a selected subtitle stream is still ripped and probed, and the
-runner records where the SRT will go.
+x265 otherwise. A selected subtitle stream is OCR'd to a sidecar SRT
+(shipped in v0.2.2); dry runs report the reserved SRT path instead of
+running the OCR.
 """
 
 from __future__ import annotations
@@ -471,8 +471,10 @@ def run_pipeline(
                     os.path.join(outdir, job.output_name)
                 )[0] + ".srt"
                 result.warnings.append(
-                    "Subtitle OCR lands with roadmap #2; SRT path reserved: "
-                    + job.srt_path
+                    "Subtitle OCR will run (subtitle stream selected, "
+                    "subtitles on); a stream missing from the rip falls "
+                    "back to the first subtitle track (v0.2.13). "
+                    "SRT sidecar reserved: " + job.srt_path
                 )
         return result
 

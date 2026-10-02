@@ -57,7 +57,11 @@ def test_movie_dry_run_reserves_srt_path(tmp_path):
     job = result.jobs[0]
     assert job.selection.subtitle_sid is not None
     assert job.srt_path is not None and job.srt_path.endswith(".srt")
-    assert any("roadmap #2" in w for w in result.warnings)
+    # QW-2: the stale "roadmap #2" claim (OCR shipped in v0.2.2) is
+    # gone; the dry run now states what will actually happen.
+    assert any("SRT sidecar reserved" in w for w in result.warnings)
+    assert any("Subtitle OCR will run" in w for w in result.warnings)
+    assert not any("roadmap" in w for w in result.warnings)
 
 
 def test_movie_dry_run_no_subtitles_skips_srt(tmp_path):
@@ -67,8 +71,8 @@ def test_movie_dry_run_no_subtitles_skips_srt(tmp_path):
     for job in result.jobs:
         assert job.srt_path is None
         assert job.subtitle_stream_index is None
-    assert not any("roadmap #2" in w for w in result.warnings)
-    assert not any("SRT path reserved" in w for w in result.warnings)
+    assert not any("SRT sidecar reserved" in w for w in result.warnings)
+    assert not any("roadmap" in w for w in result.warnings)
 
 
 def test_series_dry_run_no_subtitles_skips_srt(tmp_path):
@@ -76,7 +80,8 @@ def test_series_dry_run_no_subtitles_skips_srt(tmp_path):
     result = _series_run(tmp_path / "out", want_subtitles=False)
     assert result.is_series and len(result.jobs) == 4
     assert all(job.srt_path is None for job in result.jobs)
-    assert not any("roadmap #2" in w for w in result.warnings)
+    assert not any("SRT sidecar reserved" in w for w in result.warnings)
+    assert not any("roadmap" in w for w in result.warnings)
 
 
 def test_series_dry_run_names_all_episodes(tmp_path):
@@ -719,7 +724,7 @@ def test_stream_override_applies_in_dry_run(tmp_path):
     assert job.srt_path is None  # declined: no SRT reserved
     assert job.subtitle_stream_index is None
     assert any("user override" in w for w in result.warnings)
-    assert not any("SRT path reserved" in w for w in result.warnings)
+    assert not any("SRT sidecar reserved" in w for w in result.warnings)
     # The encode maps the overridden audio ordinal (sid 2 -> 0:a:1).
     args = job.encode_args
     assert args[args.index("-map", args.index("-i")) + 1] == "0:a:1?"

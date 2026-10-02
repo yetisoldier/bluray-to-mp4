@@ -45,7 +45,11 @@ from ..makemkv import MakeMkvError
 from ..models import Disc
 from ..monitor import lan_ip, start_server, stop_server
 from ..naming import movie_output_name
-from ..recommend import recommend_title
+from ..recommend import (
+    classify_sub_label,
+    is_commentary,
+    recommend_title,
+)
 from ..series import detect_series, episode_output_names, main_feature
 from ..tmdb import lookup_movie, season_episode_titles
 from .workers import FetchWorker, RunWorker, ScanWorker
@@ -65,6 +69,11 @@ class MainWindow(QMainWindow):
         self.guess = None
         self._episode_titles: dict[int, str] = {}
         self._title_overrides: dict[int, str] = {}
+        # v0.2.15 (Gap 1): Review-page track overrides. Only tids the
+        # user actually touched appear here; a value of None for
+        # subtitle_sid means the user picked "(no subtitles)". Read at
+        # Start time like the filename overrides, cleared on every scan.
+        self._stream_overrides: dict = {}
         # DriveEntry list backing the drives table rows; row != MakeMKV
         # disc index once status-256 drives are filtered out (C7).
         self._drives: list = []
@@ -556,13 +565,24 @@ class MainWindow(QMainWindow):
         rl.addWidget(section("Recommended tracks"))
         rl.addWidget(muted(
             "Best English audio and plain-English subtitles are pre-selected.\n"
-            "Commentary and descriptive tracks are skipped. Override any choice if needed."))
+            "Commentary and descriptive tracks are skipped. Click a track to "
+            "see every stream on the disc and pick a different one, or "
+            "choose (no subtitles)."))
         self.tracks_table = QTableWidget(0, 4)
         self.tracks_table.setHorizontalHeaderLabels(
             ["Title", "Length", "Recommended audio", "Recommended subtitles"])
         self.tracks_table.horizontalHeader().setStretchLastSection(True)
         self.tracks_table.setEditTriggers(QTableWidget.NoEditTriggers)
         rl.addWidget(self.tracks_table)
+        # v0.2.14 caveat surfacing (v0.2.15 design 1.4): one muted line
+        # under the table, visible only while at least one row's subtitle
+        # recommendation carries the "English not confirmed" caveat.
+        self.sub_caveat_label = muted(
+            "⚠ Subtitle language not confirmed by the disc scan - "
+            "check the dropdown.")
+        self.sub_caveat_label.setObjectName("muted")
+        self.sub_caveat_label.setVisible(False)
+        rl.addWidget(self.sub_caveat_label)
         layout.addWidget(rec_card)
 
         # Outputs + output options
@@ -726,9 +746,11 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_refresh_history)
         btn_row.addStretch()
         cl.addLayout(btn_row)
-        layout.addWidget(self.history_table)
-        history_label = QLabel("")
-        layout.addWidget(history_label)
+        # QW-1 (Bob audit): the table used to be added a SECOND time to
+        # the page layout below, which yanked it out of this card - the
+        # History card rendered as a floating Refresh button over an
+        # orphaned table. The table stays in the card, period.
+        layout.addWidget(card)
         self.stack.addWidget(page)
         self.pages.append(page)
 
@@ -968,7 +990,14 @@ class MainWindow(QMainWindow):
             "season": self.spin_season.value(),
             "start_episode": self.spin_start_ep.value(),
             "episode_titles": self._episode_titles or None,
-            "title_overrides": self._title_overrides,
+            "title_overrides": dict(self._title_overrides),
+            # v0.2.15 (Gap 1): only tids the user actually changed; both
+            # keys per entry, subtitle_sid None = "(no subtitles)".
+            # Copied by value (not by reference) so Review-page edits
+            # during a run can never race the worker thread (QW-5).
+            "stream_overrides": {
+                tid: dict(ov) for tid, ov in self._stream_overrides.items()
+            },
             "year": self.spin_year.value() or None,
             "want_subtitles": self.check_subs.isChecked(),
             "jobs": [],
@@ -1236,6 +1265,10 @@ class MainWindow(QMainWindow):
         self.edit_tmdb_key.setText(self.settings.tmdb_key or "")
         self._episode_titles = {}
         self._title_overrides = {}
+        # Stream overrides belong to THIS scan's sids - a fresh scan
+        # resets them (design 1.3); missing keys mean "use the
+        # recommendation" on the pipeline side.
+        self._stream_overrides = {}
         self._fill_tracks_table()
         self._update_previews()
 
@@ -1247,25 +1280,84 @@ class MainWindow(QMainWindow):
         )
         titles = [t for t in titles if t]
         self.tracks_table.setRowCount(len(titles))
+        any_caveat = False
         for row, t in enumerate(titles):
             sel = recommend_title(t)
             m, s = divmod(t.duration_seconds, 60)
             self.tracks_table.setItem(row, 0, QTableWidgetItem(
                 t.title_name or f"Title {t.tid}"))
             self.tracks_table.setItem(row, 1, QTableWidgetItem(f"{m}:{s:02d}"))
-            audio = next(
-                (a for a in t.streams_of("audio") if a.sid == sel.audio_sid), None)
-            audio_text = ""
-            if audio is not None:
-                audio_text = (
-                    f"{audio.lang_name or '?'} "
-                    f"{audio.codec_long or audio.codec} ({audio.channels}ch)")
-            self.tracks_table.setItem(row, 2, QTableWidgetItem(audio_text))
-            sub = next(
-                (x for x in t.streams_of("subtitle")
-                 if x.sid == sel.subtitle_sid), None)
-            sub_text = ""
-            if sub is not None:
-                sub_text = f"{sub.lang_name or 'English'} ({sub.name or 'PGS'})"
-            self.tracks_table.setItem(row, 3, QTableWidgetItem(sub_text))
+
+            # v0.2.15 (design Gap 1): the audio/subtitle columns are
+            # per-row QComboBox cell widgets (same pattern as the
+            # deps_table "Open" buttons) so a wrong recommendation is
+            # fixable in place. The DEFAULT selection is the
+            # recommendation, so the row reads exactly like the old
+            # static text until a combo is clicked.
+            combo_audio = QComboBox()
+            for stream in sorted(t.streams_of("audio"), key=lambda x: x.sid):
+                label = (f"{stream.lang_name or '?'} "
+                         f"{stream.codec_long or stream.codec} "
+                         f"({stream.channels}ch)")
+                if is_commentary(stream):
+                    label += " [commentary]"
+                combo_audio.addItem(label, stream.sid)
+            if not combo_audio.count():
+                combo_audio.addItem("(no audio)", None)  # broken scan only
+            if sel.audio_sid is None:
+                idx_audio = 0  # no recommendation: first stream
+            else:
+                idx_audio = combo_audio.findData(sel.audio_sid)
+                if idx_audio < 0:
+                    idx_audio = 0
+            # Default index BEFORE the handler connect below, so the
+            # programmatic fill never writes into _stream_overrides.
+            combo_audio.setCurrentIndex(idx_audio)
+            self.tracks_table.setCellWidget(row, 2, combo_audio)
+
+            combo_subs = QComboBox()
+            combo_subs.addItem("(no subtitles)", None)
+            for stream in sorted(t.streams_of("subtitle"),
+                                 key=lambda x: x.sid):
+                label = (f"{stream.lang_name or 'Sub'} "
+                         f"({stream.name or stream.codec})"
+                         f"{classify_sub_label(stream)}")
+                combo_subs.addItem(label, stream.sid)
+            if sel.subtitle_sid is None:
+                idx_subs = 0  # recommendation is "none" or no streams
+            else:
+                idx_subs = combo_subs.findData(sel.subtitle_sid)
+                if idx_subs < 0:
+                    idx_subs = 0
+            # v0.2.14 caveat surfacing (design 1.4): when the scan
+            # cannot confirm the subtitle language, mark the row
+            # instead of leaving the caveat invisible - ⚠ prefix on
+            # the picked item, full reasons on hover.
+            if any("English not confirmed" in r
+                   for r in sel.subtitle_reasons):
+                any_caveat = True
+                combo_subs.setItemText(
+                    idx_subs, "⚠ " + combo_subs.itemText(idx_subs))
+                combo_subs.setToolTip("\n".join(sel.subtitle_reasons))
+            combo_subs.setCurrentIndex(idx_subs)
+            self.tracks_table.setCellWidget(row, 3, combo_subs)
+
+            # Record an override ONLY on a real combo change: both
+            # programmatic setCurrentIndex calls above happen before
+            # this connect, and nothing else moves the combos, so a
+            # tid lands in _stream_overrides only when the user picks.
+            # Both keys are always present; subtitle_sid None is the
+            # explicit "(no subtitles)" choice.
+            def _on_combo_change(*_args, _tid=t.tid, _audio=combo_audio,
+                                 _subs=combo_subs):
+                self._stream_overrides[_tid] = {
+                    "audio_sid": _audio.currentData(),
+                    "subtitle_sid": _subs.currentData(),
+                }
+
+            combo_audio.currentIndexChanged.connect(_on_combo_change)
+            combo_subs.currentIndexChanged.connect(_on_combo_change)
+        # One muted line under the table while ANY row carries the
+        # unconfirmed-English caveat - series discs surface it once.
+        self.sub_caveat_label.setVisible(any_caveat)
         self.tracks_table.resizeColumnsToContents()

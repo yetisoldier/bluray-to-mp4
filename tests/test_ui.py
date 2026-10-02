@@ -14,7 +14,7 @@ pyside6 = pytest.importorskip("PySide6")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QComboBox  # noqa: E402
 
 from bluray_to_mp4.config import Settings  # noqa: E402
 from bluray_to_mp4.makemkv import scan_disc  # noqa: E402
@@ -114,11 +114,13 @@ def test_plan_flow_movie(qapp, monkeypatch):
     # carries the disc label is the meaningful assertion.
     assert w2.edit_movie_title.text() == "Blade Runner 2049"
     assert w2.tracks_table.rowCount() == 1
-    # Recommended audio cell names the DTS-HD track, not the commentary.
-    audio_cell = w2.tracks_table.item(0, 2).text()
-    assert "Master Audio" in audio_cell
-    sub_cell = w2.tracks_table.item(0, 3).text()
-    assert "English" in sub_cell
+    # v0.2.15: the recommendation cells are now combo cell widgets; the
+    # default selection still reads like the old static text did.
+    audio_combo = w2.tracks_table.cellWidget(0, 2)
+    sub_combo = w2.tracks_table.cellWidget(0, 3)
+    # Recommended audio names the DTS-HD track, not the commentary.
+    assert "Master Audio" in audio_combo.currentText()
+    assert "English" in sub_combo.currentText()
     w2.close()
 
 
@@ -620,4 +622,155 @@ def test_total_remaining_forecast_includes_all_steps(qapp, monkeypatch):
     w._stage_now = "ocr"
     secs2 = w._forecast_total_seconds()
     assert secs2 < secs  # fewer steps ahead once OCR is the current stage
+    w.close()
+
+
+
+# ----------------------------------------------------------------------
+# v0.2.15 (design Gap 1): Review-page track override combos.
+
+def _movie_window(qapp, monkeypatch):
+    """Movie-disc window with the review page filled (shared helper)."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    disc = scan_disc(0, runner=fake_runner(MOVIE_DISC_OUTPUT.splitlines()))
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+    return w, disc
+
+
+def test_review_combos_default_to_recommendation(qapp, monkeypatch):
+    """Every row's audio/subtitle cell is a QComboBox; the audio combo
+    lists ALL scanned audio streams and the subtitle combo leads with
+    '(no subtitles)' (userData None); defaults match recommend_title."""
+    from PySide6.QtWidgets import QComboBox
+
+    w, disc = _movie_window(qapp, monkeypatch)
+    title = disc.title(0)  # main feature, movie mode
+    sel = recommend_title(title)
+    audio_combo = w.tracks_table.cellWidget(0, 2)
+    sub_combo = w.tracks_table.cellWidget(0, 3)
+    assert isinstance(audio_combo, QComboBox)
+    assert isinstance(sub_combo, QComboBox)
+    # One item per scanned audio stream with the sid as item userData;
+    # the recommendation is the default selection.
+    assert audio_combo.count() == len(title.streams_of("audio")) == 2
+    sids = sorted(audio_combo.itemData(i) for i in range(audio_combo.count()))
+    assert sids == sorted(s.sid for s in title.streams_of("audio"))
+    assert audio_combo.currentData() == sel.audio_sid
+    assert "Master Audio" in audio_combo.currentText()  # DTS-HD, not AC3
+    assert "[commentary]" in audio_combo.itemText(1)  # commentary flagged
+    # Subtitle combo: leading None entry, then every scanned sub stream.
+    assert sub_combo.count() == len(title.streams_of("subtitle")) + 1 == 4
+    assert sub_combo.itemText(0) == "(no subtitles)"
+    assert sub_combo.itemData(0) is None
+    assert sub_combo.currentData() == sel.subtitle_sid
+    assert "English" in sub_combo.currentText()
+    # Fill wrote nothing into the override dict (defaults, no user edit).
+    assert w._stream_overrides == {}
+    w.close()
+
+
+def test_review_subtitle_none_override_reaches_plan(qapp, monkeypatch, tmp_path):
+    """Picking '(no subtitles)' records {'subtitle_sid': None} for that
+    tid in _stream_overrides, and _start_run copies the dict into
+    plan['stream_overrides'] (RecordingRunWorker pattern)."""
+    import bluray_to_mp4.ui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "RunWorker", _RecordingRunWorker)
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w, disc = _movie_window(qapp, monkeypatch)
+    sub_combo = w.tracks_table.cellWidget(0, 3)
+    sub_combo.setCurrentIndex(0)  # '(no subtitles)'
+    qapp.processEvents()
+
+    tid = disc.title(0).tid
+    # Both keys always present; subtitle None is the explicit decline.
+    assert set(w._stream_overrides[tid]) == {"audio_sid", "subtitle_sid"}
+    assert w._stream_overrides[tid]["subtitle_sid"] is None
+    assert w._stream_overrides[tid]["audio_sid"] == recommend_title(
+        disc.title(0)).audio_sid
+
+    w.edit_outdir.setText(str(tmp_path))
+    w._start_run()
+    plan = w.run_worker.plan
+    assert plan["stream_overrides"] == w._stream_overrides
+    assert plan["stream_overrides"][tid]["subtitle_sid"] is None
+    assert plan["stream_overrides"] is not w._stream_overrides  # copied
+    w.close()
+
+
+def test_review_audio_combo_override_records_sid(qapp, monkeypatch):
+    """Changing the audio combo records the picked sid for that tid
+    (and nothing else lands in _stream_overrides)."""
+    w, disc = _movie_window(qapp, monkeypatch)
+    audio_combo = w.tracks_table.cellWidget(0, 2)
+    tid = disc.title(0).tid
+    # Pick the commentary AC3 (sid 2): the combo must record it.
+    idx = audio_combo.findData(2)
+    assert idx >= 0, "fixture disc must expose audio sid 2"
+    audio_combo.setCurrentIndex(idx)
+    qapp.processEvents()
+    assert w._stream_overrides[tid]["audio_sid"] == 2
+    assert w._stream_overrides[tid]["subtitle_sid"] == recommend_title(
+        disc.title(0)).subtitle_sid
+    # Only the touched tid is present.
+    assert list(w._stream_overrides) == [tid]
+    w.close()
+
+
+def test_unconfirmed_english_caveat_surfaces(qapp, monkeypatch):
+    """A subtitle recommendation with the 'English not confirmed'
+    caveat gets the warning marker + tooltip, and the muted caveat line
+    under the table is visible; without the caveat it stays hidden."""
+    w, disc = _movie_window(qapp, monkeypatch)
+
+    # Fixture subs are positively-labeled English: caveat hidden.
+    # (isHidden(), not isVisible(): the Review page need not be the
+    # active stack page for the label's own state to be correct.)
+    assert w.sub_caveat_label.isHidden()
+    sub_combo = w.tracks_table.cellWidget(0, 3)
+    assert not sub_combo.currentText().startswith("\u26a0")
+
+    # Same disc, subtitle language stripped from the scan: the
+    # recommender can no longer confirm English (v0.2.14 caveat) and
+    # the Review page must surface it.
+    for stream in disc.title(0).streams_of("subtitle"):
+        for attr_id in (28, 29):  # lang code + lang name
+            stream.attrs.pop(attr_id, None)
+
+    w._fill_review_page()
+    assert not w.sub_caveat_label.isHidden()
+    sub_combo = w.tracks_table.cellWidget(0, 3)
+    assert sub_combo.currentText().startswith("\u26a0")
+    assert "not confirmed" in sub_combo.toolTip()
+    w.close()
+
+
+def test_history_table_stays_inside_card(qapp, monkeypatch):
+    """QW-1 regression: the History table's parent chain must keep it
+    inside its card frame (the old second layout.addWidget re-mothered
+    the table out of the card)."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+
+    table = w.history_table
+    # The table's direct parent is the card frame (not the page).
+    parent = table.parentWidget()
+    assert parent is not None and parent.objectName() == "card", (
+        "history table must sit inside the card frame")
+    # The card itself is a direct child of the page layout.
+    page = w.stack.widget(4)  # History page
+    page_layout = page.layout()
+    widgets = [page_layout.itemAt(i).widget()
+               for i in range(page_layout.count())]
+    assert parent in widgets
     w.close()

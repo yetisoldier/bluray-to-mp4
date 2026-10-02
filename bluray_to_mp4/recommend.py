@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 
 from .models import StreamInfo, Title
 
-__all__ = ["Selection", "recommend_title", "recommend_disc"]
+__all__ = ["Selection", "recommend_title", "recommend_disc",
+           "classify_sub_label"]
 
 COMMENTARY_RE = re.compile(r"comment", re.I)
 DESCRIPTIVE_RE = re.compile(r"descriptive|visual.?ly impaired|narrat", re.I)
@@ -64,6 +65,18 @@ def _classify_sub(stream: StreamInfo) -> str:
     if FORCED_RE.search(text):
         return "forced"
     return "normal"
+
+
+def classify_sub_label(stream: StreamInfo) -> str:
+    """Human suffix for UI labels (v0.2.15 Review combos):
+    ' [SDH]' | ' [forced]' | ' [commentary]' | '' for a normal track.
+    Public wrapper so the Review page does not reach into the private
+    _classify_sub."""
+    return {
+        "sdh": " [SDH]",
+        "forced": " [forced]",
+        "commentary": " [commentary]",
+    }.get(_classify_sub(stream), "")
 
 
 def _score_audio(stream: StreamInfo, *, english_bonus: int = 100) -> tuple[int, list[str]]:

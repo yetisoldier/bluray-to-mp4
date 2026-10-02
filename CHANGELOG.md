@@ -2,6 +2,52 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.15] - 2026-10-02
+
+### Added
+
+- **Review page: you can now override the recommended tracks.** Every
+  title's Recommended audio and Recommended subtitles cells are now
+  dropdowns (not fixed text): the audio dropdown lists every audio
+  stream on the disc with novice-friendly labels (language, codec,
+  channels, and a `[commentary]` marker on commentary tracks), and the
+  subtitle dropdown leads with `(no subtitles)` and lists every
+  subtitle stream with its classification (`[SDH]`, `[forced]`). The
+  pre-selected default is still the recommendation, so the row reads
+  exactly like before until you click. Picks are per-title, applied at
+  Start time, and reset by a fresh scan. The pipeline honors them
+  safely: an unknown stream id keeps the recommendation (never a
+  silent encode), and picking `(no subtitles)` ships that title with
+  no subtitles and no rip-time fallback shenanigans.
+- **The v0.2.14 "English not confirmed" subtitle caveat is now
+  visible on the Review page.** When the disc scan cannot confirm the
+  subtitle language, the affected subtitle pick is marked with a
+  warning sign, hovering the dropdown shows the full reasoning, and
+  one muted line appears under the table telling you to check the
+  dropdown.
+- **Rip reuse now verifies the resolution, not just the duration**
+  (backend, committed 94d9813). A leftover rip is reused only when
+  its video width matches what the current disc's scan says it should
+  be - a DVD pressing and a Blu-ray of the same movie no longer
+  cross-match on runtime alone. Width-mismatched leftovers are
+  deleted and re-ripped.
+
+### Fixed
+
+- **History table sits inside its card again** (Bob audit QW-1). The
+  table was added to the page layout twice; the second add yanked it
+  out of the History card, leaving a floating Refresh button over an
+  orphaned table. The card keeps the table.
+- **Dry-run warnings tell the truth about subtitle OCR** (Bob audit
+  QW-2). Dry runs claimed "Subtitle OCR lands with roadmap #2" - OCR
+  shipped in v0.2.2. The dry run now says OCR will run for the
+  selected subtitle stream (with the v0.2.13 first-track fallback
+  noted) and where the SRT sidecar will land.
+- **Per-title overrides no longer shared by reference into the run
+  plan** (Bob audit QW-5, folded in): editing an episode name while a
+  run starts could crash the naming pass mid-iteration. The plan now
+  holds its own copy.
+
 ## [0.2.14] - 2026-10-02
 
 ### Added

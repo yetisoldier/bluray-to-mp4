@@ -127,6 +127,7 @@ class RunWorker(QThread):
                 episode_titles=self.plan.get("episode_titles"),
                 year=self.plan.get("year"),
                 title_overrides=self.plan.get("title_overrides"),
+                stream_overrides=self.plan.get("stream_overrides"),  # v0.2.15
                 tmdb_key=(self.settings.tmdb_key or "").strip(),
                 want_subtitles=bool(self.plan.get("want_subtitles", True)),
                 cancel=lambda: self._cancelled,
