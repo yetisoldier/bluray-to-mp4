@@ -113,7 +113,7 @@ class RunWorker(QThread):
                 if len(update) > 3:  # encode progress carries an ETA
                     eta = update[3]
                 self.progress.emit(
-                    f"{kind.capitalize()}: {job_name}", tid, frac, eta)
+                    f"Ripping: {job_name}" if kind == "rip" else f"{kind.capitalize()}: {job_name}", tid, frac, eta)
                 monitor_state.update(progress=frac, current_job=job_name,
                                      eta_seconds=eta)
 

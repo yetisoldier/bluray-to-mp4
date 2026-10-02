@@ -315,15 +315,18 @@ def rip_titles(
     binary: str = "makemkvcon",
     runner: Runner | None = None,
     on_progress: Callable[[float, tuple], None] | None = None,
+    on_info: Callable[[str], None] | None = None,
     timeout: float | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> list[str]:
     """Rip the given title ids to MKV files in outdir; return created paths.
 
     `on_progress(fraction, prgv)` fires on every PRGV line (fraction is
-    current/max from MakeMKV's constant 65536 scale). cancel() -> True
-    terminates makemkvcon (default runner) or stops consuming output
-    mid-rip and raises EncodeCancelled.
+    current/max from MakeMKV's constant 65536 scale). `on_info(text)` gets
+    each MSG line's formatted text so callers can show live status during
+    the long BD+ open phase, when PRGV legitimately sits at 0. cancel()
+    -> True terminates makemkvcon (default runner) or stops consuming
+    output mid-rip and raises EncodeCancelled.
     """
     run = runner or make_runner(timeout)
     args = [
@@ -333,6 +336,10 @@ def rip_titles(
         ",".join(str(t) for t in tids),
         str(outdir),
         f"--minlength={minlength}",
+        # Without --progress, robot mode emits NO PRGV progress lines to
+        # stdout and the whole rip phase looks frozen at 0% (found in first
+        # real-disc validation, 2026-10-02). '-' = stdout.
+        "--progress=-",
     ]
     saved: list[str] = []
     failures: list[str] = []
@@ -342,6 +349,8 @@ def rip_titles(
         kind, payload = parse_line(line)
         if kind == "MSG":
             code, _flags, _count, text, params = payload
+            if on_info is not None and text:
+                on_info(text)
             if code in BETA_EXPIRED_CODES:
                 raise BetaKeyExpiredError(_BETA_HINT)
             if code == DISC_OPEN_ERROR:

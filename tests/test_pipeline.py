@@ -272,9 +272,13 @@ def test_encode_progress_forwards_eta_4tuple(tmp_path, monkeypatch):
     assert all(p[3] is not None for p in encodes if p[2] > 0.002)
     assert encodes[0] == ("encode", 0, 0.001, None)
     assert encodes[1] == ("encode", 0, 0.50, 123.0)
-    # Rip updates stay 3-tuples with no ETA slot.
+    # Rip updates now carry an ETA once data moves (2026-10-02 fix):
+    # 4-tuples with a float ETA past 0.2%, plain 3-tuple at 0 (BD+ open).
     rips = [p for p in payloads if p[0] == "rip"]
-    assert rips and all(len(p) == 3 for p in rips)
+    assert rips, "no rip progress forwarded"
+    assert all(len(p) == 4 for p in rips if p[2] > 0.002)
+    assert all(isinstance(p[3], float) and p[3] >= 0 for p in rips if p[2] > 0.002)
+    assert all(len(p) == 3 for p in rips if p[2] <= 0.002)
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="needs /bin/sh")

@@ -591,7 +591,7 @@ class MainWindow(QMainWindow):
         cl = QVBoxLayout(card)
         cl.setSpacing(10)
         cl.addWidget(section("Current"))
-        self.progress_current = QLabel("Waiting to start ...")
+        self.progress_current = QLabel("Ripping disc (decryption can take a few minutes) ...")
         self.progress_current.setObjectName("h1")
         cl.addWidget(self.progress_current)
         self.progress_stage = QLabel("")

@@ -368,10 +368,31 @@ def run_pipeline(
             title = disc.title(job.tid)
             try:
                 stage(f"Ripping title {job.tid} ({job.output_name}) ...")
+                _rip_t0 = time.time()
+                _rip_last_frac = 0.0
+
+                def _rip_progress(frac, prgv, *, _job=job, _t0=None):
+                    # Rip ETA from elapsed/fraction once data actually moves;
+                    # before the BD+ open finishes PRGV stays 0 and no honest
+                    # estimate exists yet (returns None).
+                    nonlocal _rip_t0, _rip_last_frac
+                    if frac <= 0.002:
+                        on_progress(("rip", _job.tid, frac))
+                        return
+                    elapsed = time.time() - _rip_t0
+                    eta = elapsed / frac - elapsed if frac > _rip_last_frac else None
+                    _rip_last_frac = frac
+                    on_progress(("rip", _job.tid, frac, eta))
+
+                def _rip_info(text):
+                    # Live MakeMKV status (BD+ open etc.) so the rip phase
+                    # never looks frozen while PRGV sits at 0.
+                    on_stage(f"{text} - ripping {job.output_name}")
+
                 saved = rip_titles(
                     index, [job.tid], rip_dir, runner=runner,
-                    on_progress=lambda frac, prgv: on_progress(("rip", job.tid, frac))
-                    if on_progress else None,
+                    on_progress=_rip_progress if on_progress else None,
+                    on_info=_rip_info if on_stage else None,
                     cancel=cancel,
                 )
                 job.input_path = saved[0] if saved else job.input_path

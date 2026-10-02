@@ -2,7 +2,22 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.6] - 2026-10-02
+
+### Fixed
+
+- **Rip progress was invisible.** MakeMKV robot mode emits no PRGV
+  progress lines unless `--progress=-` is passed; the rip command never
+  passed it, so the entire rip phase sat at 0% with no ETA while the disc
+  decrypted and copied (looked frozen - found in first real-disc
+  validation). Rips now stream live percent + a rate-based ETA, and
+  MakeMKV status messages (BD+ open etc.) surface in the Encode page and
+  monitor while PRGV sits at 0.
+- The Encode page opens with an honest "Ripping disc (decryption can take
+  a few minutes)" instead of "Waiting to start".
+
 ## [0.2.5] - 2026-10-02
+
 
 ### Fixed
 
