@@ -11,7 +11,8 @@ import os
 import shutil
 
 __all__ = ["find_program", "resolve_makemkvcon", "resolve_ffmpeg",
-           "resolve_ffprobe", "resolve_subtitle_edit"]
+           "resolve_ffprobe", "resolve_subtitle_edit",
+           "resolve_realesrgan_ncnn"]
 
 def _program_files() -> str:
     return os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -79,6 +80,28 @@ def _subtitle_edit_dirs() -> list[str]:
         "SubtitleEdit",
         os.path.join(_program_files(), "Subtitle Edit"),
         os.path.join(_local_appdata(), "Programs", "Subtitle Edit"),
+    ]
+
+
+def _realesrgan_dirs() -> list[str]:
+    home = os.path.expanduser("~")
+    local_root = os.path.join(
+        home,
+        ".local",
+        "share",
+        "bluray-to-mp4",
+        "tools",
+        "realesrgan-ncnn-vulkan-v0.2.0-ubuntu",
+        "realesrgan-ncnn-vulkan-v0.2.0-ubuntu",
+    )
+    return [
+        local_root,
+        "RealESRGAN",
+        "realesrgan-ncnn-vulkan",
+        os.path.join(_program_files(), "RealESRGAN"),
+        os.path.join(_program_files(), "Real-ESRGAN"),
+        os.path.join(_local_appdata(), "Programs", "RealESRGAN"),
+        os.path.join(_local_appdata(), "Programs", "Real-ESRGAN"),
     ]
 
 
@@ -174,5 +197,19 @@ def resolve_subtitle_edit(binary: str = "seconv") -> str:
         env_var="B2M_SUBTITLE_EDIT",
         search_dirs=_subtitle_edit_dirs(),
         exe_names=["seconv.exe", "seconv", "SubtitleEdit.exe", "SubtitleEdit"],
+    )
+    return found or binary
+
+
+def resolve_realesrgan_ncnn(binary: str = "realesrgan-ncnn-vulkan") -> str:
+    if binary != "realesrgan-ncnn-vulkan" and (
+        os.path.isfile(binary) or shutil.which(binary)
+    ):
+        return binary
+    found = find_program(
+        "realesrgan-ncnn-vulkan",
+        env_var="B2M_REALESRGAN_NCNN",
+        search_dirs=_realesrgan_dirs(),
+        exe_names=["realesrgan-ncnn-vulkan.exe", "realesrgan-ncnn-vulkan"],
     )
     return found or binary

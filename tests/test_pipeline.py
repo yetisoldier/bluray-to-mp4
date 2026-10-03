@@ -1216,6 +1216,87 @@ def test_dvd_upscale_ignored_for_bluray_dry_run(tmp_path):
     assert "DVD AI upscale planned: 720p" not in result.reasons
 
 
+def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
+    """The real stage returns a video-only mezzanine; final encode maps
+    video from it and audio from the original DVD rip."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    captures = {"upscale": [], "encode": [], "progress": []}
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        captures["upscale"].append(plan)
+        if on_progress is not None:
+            on_progress(0.5, 42.0)
+        return plan.output_path
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        captures["encode"].append(args)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+        on_progress=captures["progress"].append,
+    )
+    assert result.jobs and result.jobs[0].completed
+    plan = captures["upscale"][0]
+    assert plan.mode == "720p"
+    assert plan.output_path.endswith(".upscale/title_00_720p.mkv")
+    args = captures["encode"][0]
+    inputs = [args[i + 1] for i, arg in enumerate(args) if arg == "-i"]
+    assert inputs == [plan.output_path, result.jobs[0].input_path]
+    maps = [args[i + 1] for i, arg in enumerate(args) if arg == "-map"]
+    assert maps == ["1:a:0?", "0:v:0"]
+    assert ("upscale", 0, 0.5, 42.0) in captures["progress"]
+
+
+def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):
+    from bluray_to_mp4.upscale import UpscaleError
+
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    captures = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        raise UpscaleError("simulated engine failure")
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        captures.append(args)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p_anime",
+    )
+    assert result.jobs and result.jobs[0].completed
+    inputs = [captures[0][i + 1] for i, arg in enumerate(captures[0]) if arg == "-i"]
+    assert inputs == [result.jobs[0].input_path]
+    assert any("DVD AI upscale failed" in w for w in result.warnings)
+    assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+def test_dvd_upscale_cancel_still_propagates(tmp_path, monkeypatch):
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        raise EncodeCancelled("cancelled during upscale")
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    outdir = tmp_path / "out"
+    with pytest.raises(EncodeCancelled):
+        run_pipeline(
+            0, str(outdir), encoder="x265", dry_run=False,
+            mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+            dvd_upscale_mode="720p",
+        )
+
+
 def test_gbph_override_reaches_real_run_encode_args(tmp_path, monkeypatch):
     """The real-run EncodePlan rebuild (after rip/probe) honors the
     same override, so real-run and dry-run arg text agree on the

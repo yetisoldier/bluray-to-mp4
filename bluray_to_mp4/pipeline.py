@@ -53,6 +53,7 @@ from .subtitles import (
     run_subtitle_ocr,
 )
 from .tmdb import TmdbError, lookup_movie, season_episode_titles
+from .upscale import UpscaleError, UpscalePlan, run_dvd_upscale
 
 if False:  # pragma: no cover - typing only
     from typing import Callable  # noqa: F401
@@ -734,12 +735,34 @@ def run_pipeline(
 
                 video_input_path = None
                 if job.upscale_mode != "off":
-                    stage(f"AI upscale unavailable for {job.output_name}; encoding original DVD rip ...")
-                    result.warnings.append(
-                        f"{job.output_name}: DVD AI upscale was selected "
-                        "but the engine stage is not available in this build; "
-                        "encoded the original DVD rip instead."
-                    )
+                    stage(f"Upscaling {job.output_name} ({job.upscale_mode}) ...")
+                    try:
+                        video_input_path = run_dvd_upscale(
+                            UpscalePlan(
+                                input_path=job.input_path,
+                                output_path=job.upscale_mezzanine_path
+                                or _upscale_mezzanine_path(rip_dir, job.tid),
+                                workdir=os.path.join(
+                                    rip_dir, ".upscale", f"title_{job.tid:02d}_work"),
+                                mode=job.upscale_mode,
+                                duration_seconds=title.duration_seconds,
+                                deinterlace=deinterlace,
+                            ),
+                            on_progress=lambda frac, eta: on_progress(
+                                ("upscale", job.tid, frac, eta)
+                            ) if on_progress else None,
+                            cancel=cancel,
+                        )
+                        job.upscale_mezzanine_path = video_input_path
+                    except UpscaleError as exc:
+                        stage(
+                            f"AI upscale failed for {job.output_name}; "
+                            "encoding original DVD rip ...")
+                        result.warnings.append(
+                            f"{job.output_name}: DVD AI upscale failed ({exc}); "
+                            "encoded the original DVD rip instead."
+                        )
+                        video_input_path = None
 
                 stage(f"Encoding {job.output_name} ({result.encoder}) ...")
                 job.encode_args = build_encode_args(
