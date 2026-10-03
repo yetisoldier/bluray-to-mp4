@@ -7,4 +7,6 @@ dist/
 build/
 .pytest_cache/
 *.log
+bluray-to-mp4-*.zip
+validation_outputs/
 packaging/tools/

@@ -2,6 +2,23 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.20] - 2026-10-03
+
+### Fixed
+
+- **DVD AI upscale is now available from the CLI.** The v0.2.19 engine and UI
+  could plan and run DVD AI upscale, but unattended CLI runs had no
+  `--dvd-upscale` switch, so release validation could not request the new
+  stage without driving the GUI. `bluray-to-mp4 run` now accepts
+  `--dvd-upscale off|720p|720p_anime` and forwards it into the same pipeline
+  option the UI uses.
+
+### Validated
+
+- Full test suite: 195 passed, 1 skipped.
+- Real Real-ESRGAN proof: SD source -> 720p AI-upscaled mezzanine -> MP4 with
+  audio, embedded `mov_text` English subtitles, and retained SRT sidecar.
+
 ## [0.2.16] - 2026-10-02
 
 ### Added

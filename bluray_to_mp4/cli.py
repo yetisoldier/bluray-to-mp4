@@ -231,6 +231,7 @@ def cmd_run(args) -> int:
         episode_titles=None,
         year=args.year,
         tmdb_key=args.tmdb_key,
+        dvd_upscale_mode=args.dvd_upscale,
         on_stage=stage,
         on_progress=progress if not args.dry_run else None,
     )
@@ -503,6 +504,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--season", type=int, default=1)
     p_run.add_argument("--start-episode", type=int, default=1)
     p_run.add_argument("--year", type=int, help="movie year for naming")
+    p_run.add_argument(
+        "--dvd-upscale",
+        choices=["off", "720p", "720p_anime"],
+        default="off",
+        help="DVD-only AI upscale before encode: off, 720p, or 720p_anime",
+    )
     p_run.add_argument("--tmdb-key", default="",
                         help="TMDB v3 API key for episode-title/year autofill "
                              "(or set B2M_TMDB_KEY)")

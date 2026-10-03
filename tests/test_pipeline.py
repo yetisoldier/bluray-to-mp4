@@ -134,8 +134,11 @@ def test_parse_probe_and_interlace_detection():
 
 def test_cli_parser_smoke():
     parser = build_parser()
-    args = parser.parse_args(["run", "0", "--out", "x", "--dry-run"])
+    args = parser.parse_args([
+        "run", "0", "--out", "x", "--dry-run", "--dvd-upscale", "720p",
+    ])
     assert args.index == 0 and args.dry_run and args.out == "x"
+    assert args.dvd_upscale == "720p"
     assert parser.parse_args(["scan", "0"]).index == 0
     assert parser.parse_args(["drives"]).func is not None
 

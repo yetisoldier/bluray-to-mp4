@@ -9,7 +9,7 @@ reasons, and every recommendation has a dropdown you can override.
 > Personal backups of discs you own only. Keep the tool and its output
 > private; circumvention law varies by jurisdiction.
 
-**Current version: v0.2.16** (Windows x64, exe included)
+**Current version: v0.2.20** (Windows x64, exe included)
 
 ## Quick start
 
@@ -191,6 +191,7 @@ bluray-to-mp4 drives                     # list optical drives + loaded discs
 bluray-to-mp4 scan 0                     # analyze disc 0, show recommendations
 bluray-to-mp4 run 0 --out "D:\Movies" --dry-run    # preview the full plan
 bluray-to-mp4 run 0 --out "D:\Movies"    # rip + encode for real
+bluray-to-mp4 run 0 --out "D:\Movies" --dvd-upscale 720p    # DVD-only AI upscale
 bluray-to-mp4 probe-stream 0             # experimental: stream-from-disc
                                          # investigation (v0.2.17, in progress)
 ```
