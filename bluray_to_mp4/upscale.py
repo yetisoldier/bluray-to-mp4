@@ -47,6 +47,8 @@ class UpscalePlan:
     binary: str = "realesrgan-ncnn-vulkan"
     models_path: str | None = None
     ffmpeg: str = "ffmpeg"
+    tile_size: int = 2048
+    target_height: int = 720
 
 
 def model_name_for_mode(mode: str) -> str:
@@ -150,6 +152,21 @@ def _prepare_filter(deinterlace: bool) -> str:
     return ",".join(filters)
 
 
+def _target_filter(target_height: int) -> str:
+    height = max(2, int(target_height or 720))
+    if height % 2:
+        height += 1
+    return f"scale=-2:{height}:flags=lanczos,setsar=1"
+
+
+def _tile_size_arg(tile_size: int) -> str:
+    # The ncnn binary's default tile size is automatic. On large GPUs that
+    # should be harmless, but Eric's first real run showed visible 3x2 tile
+    # boundaries in the written frames. DVD inputs are tiny for a 3090 Ti, so
+    # force a single oversized tile instead of allowing auto spatial splits.
+    return str(max(2048, int(tile_size or 2048)))
+
+
 def _write_concat_list(segments: list[Path]) -> str:
     fh = NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt")
     with fh:
@@ -238,6 +255,8 @@ def run_dvd_upscale(
                     str(out_dir),
                     "-s",
                     "2",
+                    "-t",
+                    _tile_size_arg(plan.tile_size),
                     "-m",
                     models,
                     "-n",
@@ -262,6 +281,8 @@ def run_dvd_upscale(
                     "-i",
                     str(out_dir / "frame_%08d.png"),
                     "-an",
+                    "-vf",
+                    _target_filter(plan.target_height),
                     "-c:v",
                     "ffv1",
                     "-level",

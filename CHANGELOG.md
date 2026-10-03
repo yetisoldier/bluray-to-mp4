@@ -2,6 +2,31 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.23] - 2026-10-03
+
+### Fixed
+
+- **DVD AI upscale no longer writes visible tile grid artifacts.** Root
+  cause: `realesrgan-ncnn-vulkan` selects its tile size automatically, and
+  on Eric's first real DVD run the GPU driver/Vulkan heap split the small
+  360p extraction frames into a 3x2 tile grid, leaving faint but visible
+  seam lines in every written frame. The upscale stage now passes an
+  explicit `-t 2048` (floored: any smaller or unset request becomes 2048),
+  forcing a single tile per frame instead of driver-chosen spatial splits,
+  and the mezzanine segment encoder now explicitly scales its output to
+  the configured target height (720p, SAR 1) with lanczos instead of
+  assuming the upscaled frames already match the target geometry.
+
+### Added
+
+- Regression tests for the forced tile size and the 720p mezzanine scale
+  filter, including the not-found guard that rejected stubbed resolver
+  resolutions in tests.
+
+### Validated
+
+- Full local test suite: 206 passed, 1 skipped.
+
 ## [0.2.21] - 2026-10-03
 
 ### Added
