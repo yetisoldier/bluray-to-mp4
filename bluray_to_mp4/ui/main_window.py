@@ -169,10 +169,11 @@ class MainWindow(QMainWindow):
         # The total pill (design addendum §6) shows the all-steps
         # forecast in the header while a run is live, so the number is
         # visible from every page - the Encode card's time_remaining
-        # gets overwritten with per-stage ETAs on progress ticks, and
-        # is invisible from Source/Review/History anyway. Refreshed
-        # once a second by _tick_elapsed -> _forecast_total; cleared
-        # in _stop_liveness (done/failed/cancel all pass through it).
+        # shows the same total but only on the Encode page. Single
+        # writer (live run 12 flicker fix): _forecast_total owns both,
+        # refreshed once a second by _tick_elapsed -> _forecast_total
+        # and cleared in _stop_liveness (done/failed/cancel all pass
+        # through it); per-stage ETAs live on stage_bar's eta_label only.
         header_row = QHBoxLayout()
         self.page_title = QLabel("Source")
         self.page_title.setObjectName("h1")
@@ -1085,6 +1086,14 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         self.progress_stage.setText("Cancelling ...")
 
+    @staticmethod
+    def _set_text(label: QLabel, text: str) -> None:
+        """setText only when the string actually changes: the 1 s
+        _tick_elapsed pass then costs nothing on identical values
+        (no per-second repaint churn on a steady estimate)."""
+        if label.text() != text:
+            label.setText(text)
+
     def _fmt_hm(self, seconds: "float | None") -> str:
         if seconds is None:
             return "..."
@@ -1139,18 +1148,24 @@ class MainWindow(QMainWindow):
         if secs is None:
             # No live run plan: nothing to forecast in the header pill.
             # (time_remaining is cleared separately in _stop_liveness.)
-            self.total_pill.setText("")
+            self._set_text(self.total_pill, "")
             return
-        self.time_remaining.setText(
+        # Single writer of the Encode card's time_remaining (live run 12
+        # flicker fix): the all-steps total, refreshed once a second by
+        # _tick_elapsed. _run_progress no longer touches this label -
+        # per-stage ETAs live on stage_bar's eta_label - so the total can
+        # no longer flash for <500 ms between progress events.
+        self._set_text(
+            self.time_remaining,
             f"Total remaining ~{self._fmt_hm(secs)} (all steps)")
         # Header pill (addendum §6): the all-steps forecast, visible from
-        # every page, only while a run is active. _run_progress's
-        # per-stage ETA overwrites only time_remaining; the pill is
-        # rewritten once a second by _tick_elapsed, so it can never
-        # flicker or go stale, and _stop_liveness clears it on every
-        # done/failed/cancel path.
+        # every page, only while a run is active. Rewritten once a second
+        # by _tick_elapsed -> _forecast_total, so it can never flicker or
+        # go stale, and _stop_liveness clears it on every done/failed/
+        # cancel path.
         if self._run_started_at is not None and self._stage_now != "done":
-            self.total_pill.setText(f"Total remaining ~{self._fmt_hm(secs)}")
+            self._set_text(
+                self.total_pill, f"Total remaining ~{self._fmt_hm(secs)}")
 
     def _tick_elapsed(self) -> None:
         if self._run_started_at is None:
@@ -1168,10 +1183,10 @@ class MainWindow(QMainWindow):
             self.time_elapsed.setText(f"Total {self._fmt_hm(secs)}")
         self._run_started_at = None
         self.stage_bar.set_busy(False)
-        self.time_remaining.setText("")
+        self._set_text(self.time_remaining, "")
         # Header pill shares the time_remaining lifecycle: cleared on
         # done/failed/cancel (every stop path passes through here).
-        self.total_pill.setText("")
+        self._set_text(self.total_pill, "")
 
     def _run_stage(self, msg: str) -> None:
         self.progress_stage.setText(msg)
@@ -1199,15 +1214,15 @@ class MainWindow(QMainWindow):
             self._stage_eta = eta
         self._forecast_total()
         self.stage_bar.set_value(frac, eta)
+        # Single-writer rule (live run 12 flicker): _run_progress fires
+        # 2+/s (MakeMKV PRGV duplicates + ffmpeg -progress lines) and
+        # used to overwrite time_remaining with this stage's ETA, so the
+        # once-a-second total from _forecast_total only flashed
+        # briefly. The stage ETA now lives ONLY on stage_bar's eta_label
+        # (set_value above carries the last real estimate across
+        # duplicate lines - validation run 5); time_remaining is owned
+        # by _forecast_total and shows the all-steps total.
         if eta is not None:
-            # The pipeline carries the last real estimate forward across
-            # duplicate PRGV lines, so the countdown holds steady instead
-            # of flickering back to "estimating ..." (validation run 5).
-            if eta > 1:
-                m, s = divmod(int(eta), 60)
-                self.time_remaining.setText(f"Remaining ~{m}:{s:02d}")
-            else:
-                self.time_remaining.setText("Finishing ...")
             self.statusBar().showMessage(
                 f"{job_name}: {int(frac*100)}% - {int(eta//60)}:{int(eta%60):02d} remaining")
         else:

@@ -821,9 +821,81 @@ def test_total_pill_shows_forecast_during_run_and_clears_on_stop(
     w._stage_eta = 100.0
     w._forecast_total()
     assert "Total remaining" in w.total_pill.text()
+    # The Encode card's label mirrors the same all-steps total.
+    assert "Total remaining" in w.time_remaining.text()
 
-    # Every stop path (done/failed/cancel) passes through here: empty.
+    # Every stop path (done/failed/cancel) passes through here: empty,
+    # both the header pill and the Encode card's label.
     w._stop_liveness()
+    assert w.total_pill.text() == ""
+    assert w.time_remaining.text() == ""
+    w.close()
+
+
+def test_total_label_has_single_writer_no_stage_overwrite(qapp, monkeypatch):
+    """Live run 12 (Eric report): the all-steps total on the Encode card
+    only flashed briefly every couple of seconds. Cause: two writers
+    fought over time_remaining - _run_progress (2+/s: MakeMKV PRGV
+    duplicates + ffmpeg -progress lines) stomped the once-a-second
+    'Total remaining' from _forecast_total with the per-stage 'Remaining
+    ~M:SS'. Single-writer fix: _forecast_total owns time_remaining;
+    the stage ETA lives only on stage_bar's eta_label."""
+    import time
+
+    from bluray_to_mp4 import makemkv as mm
+    import bluray_to_mp4.ui.workers as workers_mod
+    from bluray_to_mp4.ui.main_window import MainWindow
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    monkeypatch.setattr(mm, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(workers_mod, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+
+    plan = {
+        "disc_name": "Disc", "media_type": "bluray", "is_series": True,
+        "encoder": "nvenc", "outdir": "/tmp/x", "want_subtitles": True,
+        "jobs": [
+            {"tid": 0, "output_name": "e0.mp4", "duration_seconds": 2700},
+            {"tid": 1, "output_name": "e1.mp4", "duration_seconds": 2700},
+        ],
+        "tid_names": {},
+    }
+    w.run_worker = RunWorker(0, plan, Settings())
+    w._run_started_at = time.time()
+    w._stage_now = "encode"
+    w._stage_eta = 100.0
+
+    # The 1 s tick (_tick_elapsed) writes the all-steps total on the
+    # card label and the header pill - the only writer of both.
+    w._forecast_total()
+    assert "Total remaining" in w.time_remaining.text()
+    assert "Total remaining" in w.total_pill.text()
+
+    # Progress storm: real ETAs, a MakeMKV PRGV duplicate (eta=None), and
+    # a sub-second 'Finishing ...' ETA. None may stomp the card label
+    # back to stage text - that is exactly the flicker Eric saw.
+    for frac, eta in [(0.25, 90.0), (0.25, None), (0.30, 85.0),
+                      (0.35, 0.5), (0.40, 60.0), (0.50, 300.0)]:
+        w._run_progress("Encode: e0", 0, frac, eta)
+        assert "Total remaining" in w.time_remaining.text(), (
+            "progress events must never overwrite the all-steps total")
+        assert "Remaining ~" not in w.time_remaining.text()
+        assert "Finishing" not in w.time_remaining.text()
+
+    # The stage ETA lives on the bar, not on the card: last event was
+    # frac 0.50 with a 5:00 estimate.
+    assert w.stage_bar.bar.value() == 500
+    assert w.stage_bar.eta_label.text() == "ETA 5:00"
+    # The status bar keeps its per-stage detail (unchanged behavior).
+    assert "Encode: e0" in w.statusBar().currentMessage()
+
+    # Stop path clears the card label too, not just the pill.
+    w._stop_liveness()
+    assert w.time_remaining.text() == ""
     assert w.total_pill.text() == ""
     w.close()
 
