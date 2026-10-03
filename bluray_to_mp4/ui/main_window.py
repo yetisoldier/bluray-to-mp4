@@ -663,6 +663,13 @@ class MainWindow(QMainWindow):
         row.addWidget(self.spin_gbph, 1, 5)
         row.addWidget(self.btn_gbph_reset, 1, 6)
         row.addWidget(self.label_gbph_projection, 2, 4, 1, 3)
+        row.addWidget(QLabel("AI upscale:"), 3, 4)
+        self.combo_upscale = QComboBox()
+        self.combo_upscale.addItem("Off", "off")
+        self.combo_upscale.addItem("720p", "720p")
+        self.combo_upscale.addItem("720p (anime)", "720p_anime")
+        self.combo_upscale.currentIndexChanged.connect(self._upscale_changed)
+        row.addWidget(self.combo_upscale, 3, 5, 1, 2)
         row.addWidget(QLabel("TMDB key:"), 2, 0)
         self.edit_tmdb_key = QLineEdit()
         self.edit_tmdb_key.setPlaceholderText(
@@ -962,6 +969,20 @@ class MainWindow(QMainWindow):
         media_type = self.disc.media_type if self.disc else None
         self.spin_gbph.setValue(self._gbph_default_for(media_type))
 
+    def _upscale_mode(self) -> str:
+        return self.combo_upscale.currentData() or "off"
+
+    def _upscale_changed(self) -> None:
+        if self.disc is None:
+            return
+        if self.disc.media_type != "dvd":
+            self.combo_upscale.setCurrentIndex(0)
+            self.combo_upscale.setEnabled(False)
+            return
+        if self._upscale_mode() != "off" and self.spin_gbph.value() < 1.5:
+            self.spin_gbph.setValue(1.5)
+        self._update_gbph_projection()
+
     def _update_gbph_projection(self, outputs=None) -> None:
         """Live projected-size feedback (design 1.4/5): total budget is
         gbph * hours by definition (container slack and audio are inside
@@ -1144,6 +1165,7 @@ class MainWindow(QMainWindow):
             # never race the worker); the pipeline normalizes a value
             # equal to the media-type default back to None.
             "target_gb_per_hour": float(self.spin_gbph.value()),
+            "dvd_upscale_mode": self._upscale_mode(),
             "jobs": [],
             "tid_names": {},
         }
@@ -1443,6 +1465,12 @@ class MainWindow(QMainWindow):
         # from the per-type saved value (design 4), else the encode.py
         # constant - rescanning a different disc type resets the control
         # to that type's effective default.
+        self.combo_upscale.setCurrentIndex(0)
+        is_dvd = self.disc.media_type == "dvd"
+        self.combo_upscale.setEnabled(is_dvd)
+        self.combo_upscale.setToolTip(
+            "Optional DVD-only AI upscale before encoding"
+            if is_dvd else "AI upscale is only available for DVD scans")
         self.spin_gbph.setValue(
             self._gbph_saved_or_default(self.disc.media_type))
         self.edit_tmdb_key.setText(self.settings.tmdb_key or "")

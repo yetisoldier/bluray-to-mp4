@@ -51,6 +51,7 @@ class EncodePlan:
     duration_seconds: int
     media_type: str  # 'bluray' | 'dvd'
     encoder: str  # 'nvenc' | 'x265'
+    video_input_path: str | None = None
     audio_sid: int | None = None
     subtitle_sid: int | None = None
     target_gb_per_hour: float | None = None  # None -> default by media type
@@ -80,15 +81,23 @@ class EncodePlan:
 
 def build_encode_args(plan: EncodePlan) -> list[str]:
     """Full ffmpeg argument list for one encode (without the binary name)."""
-    args = ["-y", "-hide_banner", "-nostdin", "-i", plan.input_path]
+    args = ["-y", "-hide_banner", "-nostdin"]
+    if plan.video_input_path:
+        args += ["-i", plan.video_input_path, "-i", plan.input_path]
+        video_input = "0"
+        audio_input = "1"
+    else:
+        args += ["-i", plan.input_path]
+        video_input = "0"
+        audio_input = "0"
 
     # Audio: encode to AAC at the plan's bitrate.
     # TODO(next milestone): resolve audio_sid against the ripped MKV's real
     # stream layout via ffprobe (MakeMKV renumbers streams in the MKV).
     if plan.audio_sid is not None:
-        args += ["-map", f"0:a:{plan.audio_sid}?"]
+        args += ["-map", f"{audio_input}:a:{plan.audio_sid}?"]
     else:
-        args += ["-map", "0:a:0?"]
+        args += ["-map", f"{audio_input}:a:0?"]
     a_kbps = plan.audio_kbps or AUDIO_KBPS.get(min(plan.audio_channels, 8), 448)
     args += ["-c:a", "aac", "-b:a", f"{a_kbps}k"]
 
@@ -103,7 +112,7 @@ def build_encode_args(plan: EncodePlan) -> list[str]:
     v_kbps = plan.target_video_kbps
     if plan.encoder == "nvenc":
         args += [
-            "-map", "0:v:0",
+            "-map", f"{video_input}:v:0",
             "-c:v", "hevc_nvenc",
             "-preset", "p6",
             "-rc", "vbr",
@@ -115,7 +124,7 @@ def build_encode_args(plan: EncodePlan) -> list[str]:
         ]
     else:  # x265 quality mode
         args += [
-            "-map", "0:v:0",
+            "-map", f"{video_input}:v:0",
             "-c:v", "libx265",
             "-preset", "slow",
             "-b:v", f"{v_kbps}k",

@@ -23,6 +23,9 @@ from .encode import (
     EncodePlan,
     build_encode_args,
 )
+
+DVD_UPSCALE_GB_PER_HOUR = 1.5
+DVD_UPSCALE_MODES = {"off", "720p", "720p_anime"}
 from .ffprobe import (
     ProbedStream,
     first_video_width,
@@ -80,6 +83,8 @@ class TitleJob:
     selection: Selection | None = None
     subtitle_stream_index: int | None = None
     srt_path: str | None = None
+    upscale_mode: str = "off"
+    upscale_mezzanine_path: str | None = None
     completed: bool = False
     error: str | None = None  # set when this job failed but the queue continued
 
@@ -288,6 +293,19 @@ def execute_encode(
         raise EncodeCancelled("cancelled by user")
 
 
+def _normalize_dvd_upscale_mode(mode: str | None, media_type: str | None) -> str:
+    if media_type != "dvd":
+        return "off"
+    mode = mode or "off"
+    if mode not in DVD_UPSCALE_MODES:
+        raise ValueError(f"unknown DVD upscale mode: {mode}")
+    return mode
+
+
+def _upscale_mezzanine_path(rip_dir: str, tid: int) -> str:
+    return os.path.join(rip_dir, ".upscale", f"title_{tid:02d}_720p.mkv")
+
+
 def _resolve_gbph(value: float | None, media_type: str | None) -> float | None:
     """v0.2.18: Review-page size target resolution. An explicit value
     wins; None or a value equal to the disc type's default collapses
@@ -314,6 +332,7 @@ def run_pipeline(
     title_overrides: dict[int, str] | None = None,
     stream_overrides: dict[int, dict[str, int | None]] | None = None,  # v0.2.15
     target_gb_per_hour: float | None = None,  # v0.2.18
+    dvd_upscale_mode: str = "off",  # v0.2.19
     cancel: "Callable[[], bool] | None" = None,
     tmdb_key: str = "",
     tmdb_fetcher=None,
@@ -347,8 +366,12 @@ def run_pipeline(
     wins over the media-type default; None (or a value equal to the
     disc's default) leaves EncodePlan on its built-in default.
 
+    dvd_upscale_mode (v0.2.19): DVD-only optional upscale contract:
+    "off", "720p", or "720p_anime". Non-DVD scans force this to "off".
+
     on_progress update tuples, one per progress line from each stage:
       ("rip", tid, frac)                 - MakeMKV PRGV progress, no ETA
+      ("upscale", tid, frac, eta-or-None) - future AI-upscale stage progress
       ("encode", tid, frac, eta-or-None) - ffmpeg progress; ETA-seconds is
                                           None until frac passes 0.2%, a
                                           float estimate afterwards
@@ -386,6 +409,13 @@ def run_pipeline(
         encoder=encoder if encoder != "auto" else None,  # resolved below
         reasons=list(guess.reasons),
     )
+    upscale_mode = _normalize_dvd_upscale_mode(
+        dvd_upscale_mode, disc.media_type)
+    if upscale_mode != "off":
+        result.reasons.append(
+            "DVD AI upscale planned: "
+            + ("720p anime" if upscale_mode == "720p_anime" else "720p")
+        )
 
     if guess.is_series:
         stage(f"Series disc: {guess.episode_count} episodes detected")
@@ -470,10 +500,16 @@ def run_pipeline(
             selection=sel,
             duration_seconds=title.duration_seconds,
             input_path=os.path.join(rip_dir, title.filename),
+            upscale_mode=upscale_mode,
+            upscale_mezzanine_path=(
+                _upscale_mezzanine_path(rip_dir, tid)
+                if upscale_mode != "off" else None
+            ),
         )
         job.encode_args = build_encode_args(
             EncodePlan(
                 input_path=job.input_path,
+                video_input_path=job.upscale_mezzanine_path,
                 output_path=os.path.join(outdir, out_name),
                 duration_seconds=title.duration_seconds,
                 media_type=disc.media_type or "bluray",
@@ -696,10 +732,20 @@ def run_pipeline(
                         "ripped MKV; the MP4 ships without subtitles."
                     )
 
+                video_input_path = None
+                if job.upscale_mode != "off":
+                    stage(f"AI upscale unavailable for {job.output_name}; encoding original DVD rip ...")
+                    result.warnings.append(
+                        f"{job.output_name}: DVD AI upscale was selected "
+                        "but the engine stage is not available in this build; "
+                        "encoded the original DVD rip instead."
+                    )
+
                 stage(f"Encoding {job.output_name} ({result.encoder}) ...")
                 job.encode_args = build_encode_args(
                     EncodePlan(
                         input_path=job.input_path,
+                        video_input_path=video_input_path,
                         output_path=os.path.join(outdir, job.output_name),
                         duration_seconds=title.duration_seconds,
                         media_type=disc.media_type or "bluray",

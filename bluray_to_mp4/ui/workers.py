@@ -137,8 +137,13 @@ class RunWorker(QThread):
                 eta = None
                 if len(update) > 3:  # encode progress carries an ETA
                     eta = update[3]
-                self.progress.emit(
-                    f"Ripping: {job_name}" if kind == "rip" else f"{kind.capitalize()}: {job_name}", tid, frac, eta)
+                if kind == "rip":
+                    label = f"Ripping: {job_name}"
+                elif kind == "upscale":
+                    label = f"Upscaling: {job_name}"
+                else:
+                    label = f"{kind.capitalize()}: {job_name}"
+                self.progress.emit(label, tid, frac, eta)
                 monitor_state.update(progress=frac, current_job=job_name,
                                      eta_seconds=eta)
 
@@ -154,6 +159,7 @@ class RunWorker(QThread):
                 title_overrides=self.plan.get("title_overrides"),
                 stream_overrides=self.plan.get("stream_overrides"),  # v0.2.15
                 target_gb_per_hour=self.plan.get("target_gb_per_hour"),  # v0.2.18
+                dvd_upscale_mode=self.plan.get("dvd_upscale_mode", "off"),  # v0.2.19
                 tmdb_key=(self.settings.tmdb_key or "").strip(),
                 want_subtitles=bool(self.plan.get("want_subtitles", True)),
                 cancel=lambda: self._cancelled,

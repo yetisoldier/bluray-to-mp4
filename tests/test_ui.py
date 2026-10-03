@@ -1226,6 +1226,39 @@ def test_gbph_projection_label_updates_on_change(qapp, monkeypatch):
     w.close()
 
 
+def test_dvd_upscale_control_is_dvd_only_and_pairs_size_target(qapp, monkeypatch):
+    """v0.2.19: the AI-upscale control is DVD-only, defaults off each
+    scan, and raises the in-memory DVD target to 1.5 GB/hour when used."""
+    w, _ = _movie_window(qapp, monkeypatch)
+    assert not w.combo_upscale.isEnabled()
+    assert w._upscale_mode() == "off"
+    w.close()
+
+    dw, _ = _dvd_window(qapp, monkeypatch)
+    assert dw.combo_upscale.isEnabled()
+    assert dw._upscale_mode() == "off"
+    assert dw.spin_gbph.value() == 1.0
+    dw.combo_upscale.setCurrentIndex(1)
+    assert dw._upscale_mode() == "720p"
+    assert dw.spin_gbph.value() == 1.5
+    dw.close()
+
+
+def test_start_run_writes_upscale_mode_into_plan(qapp, monkeypatch, tmp_path):
+    import bluray_to_mp4.ui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "RunWorker", _RecordingRunWorker)
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w, _ = _dvd_window(qapp, monkeypatch)
+    w.combo_upscale.setCurrentIndex(2)
+    w.edit_outdir.setText(str(tmp_path))
+    w._start_run()
+    assert w.run_worker.plan["dvd_upscale_mode"] == "720p_anime"
+    assert w.run_worker.plan["target_gb_per_hour"] == 1.5
+    w.close()
+
+
 def test_start_run_writes_gbph_into_plan(qapp, monkeypatch, tmp_path):
     """Design 3 step 1: _start_run reads the spin at Start time into
     plan['target_gb_per_hour'] (same read-at-Start contract as

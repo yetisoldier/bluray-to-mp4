@@ -1190,6 +1190,32 @@ def test_gbph_none_keeps_media_type_default(tmp_path):
             == dvd_defaulted.jobs[0].encode_args)
 
 
+def test_dvd_upscale_dry_run_plans_mezzanine_video_input(tmp_path):
+    """v0.2.19: DVD AI-upscale dry-runs expose the future mezzanine
+    video input while keeping audio mapped from the original rip."""
+    result = run_pipeline(
+        0, str(tmp_path / "dvd"), encoder="x265", dry_run=True,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines()),
+        target_gb_per_hour=1.5,
+        dvd_upscale_mode="720p_anime",
+    )
+    job = result.jobs[0]
+    assert job.upscale_mode == "720p_anime"
+    assert job.upscale_mezzanine_path.endswith(".upscale/title_00_720p.mkv")
+    assert "DVD AI upscale planned: 720p anime" in result.reasons
+    maps = [job.encode_args[i + 1] for i, arg in enumerate(job.encode_args) if arg == "-map"]
+    assert maps == ["1:a:0?", "0:v:0"]
+    assert job.encode_args[job.encode_args.index("-i") + 1] == job.upscale_mezzanine_path
+
+
+def test_dvd_upscale_ignored_for_bluray_dry_run(tmp_path):
+    result = _movie_run(tmp_path / "out", dvd_upscale_mode="720p")
+    job = result.jobs[0]
+    assert job.upscale_mode == "off"
+    assert job.upscale_mezzanine_path is None
+    assert "DVD AI upscale planned: 720p" not in result.reasons
+
+
 def test_gbph_override_reaches_real_run_encode_args(tmp_path, monkeypatch):
     """The real-run EncodePlan rebuild (after rip/probe) honors the
     same override, so real-run and dry-run arg text agree on the

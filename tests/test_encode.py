@@ -58,6 +58,24 @@ def test_x265_plan_dvd_keeps_sd_resolution():
     assert plan.target_video_kbps == 1707
 
 
+def test_two_input_plan_maps_video_from_mezzanine_audio_from_original():
+    plan = EncodePlan(
+        input_path="original.mkv",
+        video_input_path="upscaled.mkv",
+        output_path="out.mp4",
+        duration_seconds=5400,
+        media_type="dvd",
+        encoder="nvenc",
+        audio_sid=1,
+        target_gb_per_hour=1.5,
+    )
+    args = build_encode_args(plan)
+    assert args[args.index("-i") + 1] == "upscaled.mkv"
+    assert args[args.index("-i", args.index("-i") + 1) + 1] == "original.mkv"
+    assert [args[i + 1] for i, a in enumerate(args) if a == "-map"] == [
+        "1:a:1?", "0:v:0"]
+
+
 def test_deinterlace_single_vf():
     plan = EncodePlan(
         input_path="in.mkv",
