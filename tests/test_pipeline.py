@@ -1201,7 +1201,8 @@ def test_dvd_upscale_dry_run_plans_mezzanine_video_input(tmp_path):
     )
     job = result.jobs[0]
     assert job.upscale_mode == "720p_anime"
-    assert job.upscale_mezzanine_path.endswith(".upscale/title_00_720p.mkv")
+    assert job.upscale_mezzanine_path.replace("\\", "/").endswith(
+        ".upscale/title_00_720p.mkv")
     assert "DVD AI upscale planned: 720p anime" in result.reasons
     maps = [job.encode_args[i + 1] for i, arg in enumerate(job.encode_args) if arg == "-map"]
     assert maps == ["1:a:0?", "0:v:0"]
@@ -1244,7 +1245,8 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     assert result.jobs and result.jobs[0].completed
     plan = captures["upscale"][0]
     assert plan.mode == "720p"
-    assert plan.output_path.endswith(".upscale/title_00_720p.mkv")
+    assert plan.output_path.replace("\\", "/").endswith(
+        ".upscale/title_00_720p.mkv")
     args = captures["encode"][0]
     inputs = [args[i + 1] for i, arg in enumerate(args) if arg == "-i"]
     assert inputs == [plan.output_path, result.jobs[0].input_path]
