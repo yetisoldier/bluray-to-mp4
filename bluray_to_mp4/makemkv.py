@@ -156,6 +156,10 @@ class _CancelState:
     def __init__(self):
         self.requested = False
         self.proc: subprocess.Popen | None = None
+        # v0.2.17 (design §7.1): the makemkvcon stream-server child
+        # registers here too, so a cancel request can reach it alongside
+        # the rip child (the stream server can never leak).
+        self.stream_proc: subprocess.Popen | None = None
 
     def cancel(self) -> bool:
         self.requested = True

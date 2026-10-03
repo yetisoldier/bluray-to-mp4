@@ -13,7 +13,7 @@ import sys
 
 def main() -> int:
     argv = sys.argv[1:]
-    if argv and argv[0] in ("drives", "scan", "run"):
+    if argv and argv[0] in ("drives", "scan", "run", "probe-stream"):
         from .cli import main as cli_main
         return cli_main()
     if argv and argv[0] == "--status":

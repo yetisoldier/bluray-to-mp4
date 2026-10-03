@@ -33,6 +33,7 @@ hiddenimports = [
     "bluray_to_mp4.encode",
     "bluray_to_mp4.ffprobe",
     "bluray_to_mp4.pipeline",
+    "bluray_to_mp4.streamsource",
     "bluray_to_mp4.srt",
     "bluray_to_mp4.subtitles",
     "bluray_to_mp4.monitor",
