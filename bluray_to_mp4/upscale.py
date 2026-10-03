@@ -11,7 +11,9 @@ import math
 import os
 import shutil
 import subprocess
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -98,6 +100,26 @@ def _run_process(cmd: list[str], *, label: str, cancel=None) -> None:
     except OSError as exc:
         raise UpscaleError(f"{label} could not start: {exc}") from exc
 
+    output_tail: deque[str] = deque(maxlen=80)
+
+    def drain(pipe) -> None:
+        try:
+            for line in pipe:
+                output_tail.append(line.rstrip())
+        finally:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+    drain_threads: list[threading.Thread] = []
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is None:
+            continue
+        thread = threading.Thread(target=drain, args=(pipe,), daemon=True)
+        thread.start()
+        drain_threads.append(thread)
+
     while proc.poll() is None:
         if _cancelled(cancel):
             proc.terminate()
@@ -109,9 +131,11 @@ def _run_process(cmd: list[str], *, label: str, cancel=None) -> None:
             raise EncodeCancelled(f"cancelled during {label}")
         time.sleep(0.2)
 
-    stdout, stderr = proc.communicate()
+    proc.wait()
+    for thread in drain_threads:
+        thread.join(timeout=1)
     if proc.returncode != 0:
-        detail = (stderr or stdout or "").strip().splitlines()[-6:]
+        detail = [line for line in output_tail if line][-6:]
         raise UpscaleError(
             f"{label} failed with code {proc.returncode}: "
             + " | ".join(detail)[:600]
