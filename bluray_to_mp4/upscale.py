@@ -47,7 +47,7 @@ class UpscalePlan:
     binary: str = "realesrgan-ncnn-vulkan"
     models_path: str | None = None
     ffmpeg: str = "ffmpeg"
-    tile_size: int = 2048
+    tile_size: int = 0
     target_height: int = 720
 
 
@@ -144,27 +144,56 @@ def _run_process(cmd: list[str], *, label: str, cancel=None) -> None:
         )
 
 
+def _square_pixel_height_filter(height: int) -> str:
+    height = max(2, int(height or 720))
+    if height % 2:
+        height += 1
+    # DVD storage pixels are often not the display shape. Use DAR to compute
+    # the square-pixel width explicitly before clearing SAR to 1.
+    return f"scale=w='trunc({height}*dar/2)*2':h={height}:flags=lanczos,setsar=1"
+
+
 def _prepare_filter(deinterlace: bool) -> str:
     filters = []
     if deinterlace:
         filters.append("yadif")
-    filters.extend(["scale=-2:360:flags=lanczos", "setsar=1"])
+    filters.append(_square_pixel_height_filter(360))
     return ",".join(filters)
 
 
 def _target_filter(target_height: int) -> str:
-    height = max(2, int(target_height or 720))
-    if height % 2:
-        height += 1
-    return f"scale=-2:{height}:flags=lanczos,setsar=1"
+    return _square_pixel_height_filter(target_height)
 
 
-def _tile_size_arg(tile_size: int) -> str:
-    # The ncnn binary's default tile size is automatic. On large GPUs that
-    # should be harmless, but Eric's first real run showed visible 3x2 tile
-    # boundaries in the written frames. DVD inputs are tiny for a 3090 Ti, so
-    # force a single oversized tile instead of allowing auto spatial splits.
-    return str(max(2048, int(tile_size or 2048)))
+def _png_size(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(24)
+    except OSError:
+        return None
+    if len(header) < 24 or not header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+
+
+def _first_png_extent(directory: Path) -> int:
+    for frame in sorted(directory.glob("*.png")):
+        size = _png_size(frame)
+        if size:
+            return max(size)
+    return 720
+
+
+def _tile_size_arg(tile_size: int, frame_extent: int) -> str:
+    frame_with_margin = int(frame_extent or 720) + 64
+    if tile_size and tile_size > 0:
+        requested = max(int(tile_size), frame_with_margin)
+    else:
+        # One tile, but only slightly larger than the actual frame handed to
+        # Real-ESRGAN. DVD upscale extraction is normally 480x360 or 640x360.
+        requested = max(512, frame_with_margin)
+    rounded = int(math.ceil(requested / 64) * 64)
+    return str(max(rounded, int(frame_extent or 0)))
 
 
 def _write_concat_list(segments: list[Path]) -> str:
@@ -210,6 +239,14 @@ def run_dvd_upscale(
     if output.exists():
         output.unlink()
 
+    def report(frac: float, step: str, idx: int) -> None:
+        if on_progress is not None:
+            on_progress(
+                min(1.0, max(0.0, frac)),
+                None,
+                {"chunk": idx + 1, "chunks": chunks, "step": step},
+            )
+
     segments: list[Path] = []
     try:
         for idx in range(chunks):
@@ -222,6 +259,7 @@ def run_dvd_upscale(
             out_dir.mkdir(parents=True, exist_ok=True)
             segment = chunk / "segment.mkv"
 
+            report(len(segments) / chunks, "extracting frames", idx)
             _run_process(
                 [
                     ffmpeg,
@@ -246,6 +284,8 @@ def run_dvd_upscale(
             if not any(in_dir.iterdir()):
                 raise UpscaleError(f"no frames extracted for chunk {idx + 1}")
 
+            tile_size = _tile_size_arg(plan.tile_size, _first_png_extent(in_dir))
+            report(len(segments) / chunks, "AI upscaling", idx)
             _run_process(
                 [
                     binary,
@@ -256,7 +296,7 @@ def run_dvd_upscale(
                     "-s",
                     "2",
                     "-t",
-                    _tile_size_arg(plan.tile_size),
+                    tile_size,
                     "-m",
                     models,
                     "-n",
@@ -270,6 +310,7 @@ def run_dvd_upscale(
             if not any(out_dir.iterdir()):
                 raise UpscaleError(f"no upscaled frames produced for chunk {idx + 1}")
 
+            report(len(segments) / chunks, "writing mezzanine segment", idx)
             _run_process(
                 [
                     ffmpeg,
@@ -295,8 +336,7 @@ def run_dvd_upscale(
             segments.append(segment)
             shutil.rmtree(in_dir, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
-            if on_progress is not None:
-                on_progress(min(1.0, len(segments) / chunks), None)
+            report(len(segments) / chunks, "chunk complete", idx)
 
         if len(segments) == 1:
             shutil.move(str(segments[0]), output)

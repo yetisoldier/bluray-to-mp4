@@ -6,7 +6,17 @@ from bluray_to_mp4 import upscale as upscale_mod
 from bluray_to_mp4.upscale import UpscalePlan, run_dvd_upscale
 
 
-def test_upscale_forces_single_tile_and_720p_mezzanine(monkeypatch, tmp_path):
+def png_header(width: int, height: int) -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08\x06\x00\x00\x00"
+    )
+
+
+def test_upscale_uses_display_aspect_filters_and_dynamic_tile(monkeypatch, tmp_path):
     calls = []
 
     # Resolve to a distinct path so the "binary not found" guard in
@@ -29,11 +39,11 @@ def test_upscale_forces_single_tile_and_720p_mezzanine(monkeypatch, tmp_path):
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(b"in")
+            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
         elif label.startswith("Real-ESRGAN"):
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(b"out")
+            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
 
@@ -51,20 +61,29 @@ def test_upscale_forces_single_tile_and_720p_mezzanine(monkeypatch, tmp_path):
     )
 
     assert result == str(output)
+    extract_cmd = next(
+        cmd for label, cmd in calls if label.startswith("upscale frame extraction")
+    )
+    assert extract_cmd[extract_cmd.index("-vf") + 1] == (
+        "scale=w='trunc(360*dar/2)*2':h=360:flags=lanczos,setsar=1"
+    )
+
     esrgan_cmd = next(cmd for label, cmd in calls if label.startswith("Real-ESRGAN"))
-    assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "2048"
+    assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "704"
 
     segment_cmd = next(
         cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
     )
-    assert segment_cmd[segment_cmd.index("-vf") + 1] == "scale=-2:720:flags=lanczos,setsar=1"
+    assert segment_cmd[segment_cmd.index("-vf") + 1] == (
+        "scale=w='trunc(720*dar/2)*2':h=720:flags=lanczos,setsar=1"
+    )
 
 
 @pytest.mark.parametrize(
     ("requested", "expected"),
-    [(0, "2048"), (512, "2048"), (4096, "4096")],
+    [(0, "704"), (512, "704"), (1024, "1024"), (4096, "4096")],
 )
-def test_tile_size_is_never_auto(monkeypatch, tmp_path, requested, expected):
+def test_tile_size_covers_frame_without_forcing_2048(monkeypatch, tmp_path, requested, expected):
     seen = []
 
     monkeypatch.setattr(
@@ -83,12 +102,12 @@ def test_tile_size_is_never_auto(monkeypatch, tmp_path, requested, expected):
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(b"in")
+            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
         elif label.startswith("Real-ESRGAN"):
             seen.append(cmd)
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(b"out")
+            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
 

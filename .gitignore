@@ -10,3 +10,4 @@ build/
 bluray-to-mp4-*.zip
 validation_outputs/
 packaging/tools/
+packaging/app_icon.ico

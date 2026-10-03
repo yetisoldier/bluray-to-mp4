@@ -1380,8 +1380,20 @@ class MainWindow(QMainWindow):
                 self.overall_bar.set_busy(True, "queue active ...")
         self._forecast_total()
 
-    def _run_progress(self, job_name: str, tid: int, frac: float, eta: float | None) -> None:
+    def _run_progress(
+        self,
+        job_name: str,
+        tid: int,
+        frac: float,
+        eta: float | None,
+        detail: dict | None = None,
+    ) -> None:
         self.progress_current.setText(job_name)
+        if isinstance(detail, dict) and detail.get("chunk") and detail.get("chunks"):
+            step = detail.get("step") or "working"
+            self.progress_stage.setText(
+                f"Upscaling: chunk {detail['chunk']} of {detail['chunks']} - {step}"
+            )
         jobs = self.run_worker.plan.get("jobs", []) if self.run_worker else []
         self._current_job_index = next(
             (i for i, j in enumerate(jobs) if j.get("tid") == tid), 0)

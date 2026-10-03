@@ -2,6 +2,42 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.24] - 2026-10-03
+
+### Fixed
+
+- **DVD AI upscale now preserves the disc's display aspect ratio.** Frame
+  extraction and the mezzanine segment encoder previously used
+  `scale=-2:H`, which scales the storage pixel grid but keeps non-square
+  DVD pixels, so full-frame 4:3 and anamorphic 16:9 sources rendered with
+  the wrong shape. Both stages now compute the square-pixel width from
+  the input DAR (`scale=w='trunc(H*dar/2)*2':h=H`, SAR forced to 1), so
+  the written frames match the disc's intended geometry.
+
+- **Dynamic tile sizing for the AI upscale.** v0.2.23 forced `-t 2048` to
+  stop the GPU driver's auto tile split from leaving seam lines. The
+  tile argument is now derived from the first extracted frame's actual
+  extent plus a 64px safety margin, rounded up to a 64px multiple —
+  still a single tile covering the whole frame, but no longer demanding
+  a 2048px tile for ~360p content. An explicit `tile_size` plan value is
+  honored as a floor against the frame size.
+
+### Added
+
+- **Chunk-level DVD upscale progress.** The upscale stage reports the
+  active chunk and step with each progress update. The run window shows
+  "Upscaling: chunk 2 of 8 - AI upscaling", and the monitor `/status`
+  endpoint exposes `chunk_current`, `chunk_total`, and `step`.
+
+- **Application icon.** The Qt window loads a bundled `app_icon.svg`, and
+  the Windows exe is built with an icon generated at build time from
+  pure-Python drawing code (`packaging/build_icon.py`), so no binary
+  `.ico` is checked into the repository.
+
+### Validated
+
+- Full local test suite: 251 passed.
+
 ## [0.2.23] - 2026-10-03
 
 ### Fixed

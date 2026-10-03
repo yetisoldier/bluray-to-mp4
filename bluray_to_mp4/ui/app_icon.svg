@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="bluray-to-mp4 app icon">
+  <defs>
+    <linearGradient id="bg" x1="40" y1="20" x2="216" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#10243f"/>
+      <stop offset="1" stop-color="#183452"/>
+    </linearGradient>
+    <radialGradient id="disc" cx="94" cy="86" r="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f8fafc"/>
+      <stop offset="0.48" stop-color="#d8e3ef"/>
+      <stop offset="0.75" stop-color="#9fb2c7"/>
+      <stop offset="1" stop-color="#eef6ff"/>
+    </radialGradient>
+    <linearGradient id="tab" x1="130" y1="125" x2="211" y2="204" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect x="14" y="14" width="228" height="228" rx="42" fill="url(#bg)"/>
+  <circle cx="113" cy="112" r="76" fill="url(#disc)"/>
+  <circle cx="113" cy="112" r="23" fill="#142033"/>
+  <circle cx="113" cy="112" r="42" fill="none" stroke="#7f95ad" stroke-opacity="0.65" stroke-width="8"/>
+  <path d="M134 130 210 158 149 212Z" fill="url(#tab)"/>
+  <path d="M159 151 183 160 164 177Z" fill="#123047" opacity="0.82"/>
+</svg>

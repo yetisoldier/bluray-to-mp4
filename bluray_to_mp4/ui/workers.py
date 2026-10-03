@@ -100,8 +100,9 @@ class RunWorker(QThread):
     """Execute the whole pipeline for the confirmed plan."""
 
     stage = Signal(str)
-    # (stage_name, tid, fraction 0..1, eta_seconds-or-None) for the current job
-    progress = Signal(str, int, float, object)
+    # (stage_name, tid, fraction 0..1, eta_seconds-or-None, detail-dict)
+    # for the current job. detail is currently used by DVD AI upscale.
+    progress = Signal(str, int, float, object, object)
     done = Signal(object)          # PipelineResult
     failed = Signal(str)
 
@@ -138,17 +139,33 @@ class RunWorker(QThread):
                 kind, tid, frac = update[:3]
                 job_name = self.plan.get("tid_names", {}).get(tid, f"title {tid}")
                 eta = None
+                detail = None
                 if len(update) > 3:  # encode progress carries an ETA
                     eta = update[3]
+                if len(update) > 4:
+                    detail = update[4]
                 if kind == "rip":
                     label = f"Ripping: {job_name}"
                 elif kind == "upscale":
                     label = f"Upscaling: {job_name}"
+                    if isinstance(detail, dict):
+                        chunk = detail.get("chunk")
+                        chunks = detail.get("chunks")
+                        step = detail.get("step") or "working"
+                        if chunk and chunks:
+                            label = f"Upscaling: chunk {chunk} of {chunks} - {step}"
                 else:
                     label = f"{kind.capitalize()}: {job_name}"
-                self.progress.emit(label, tid, frac, eta)
+                self.progress.emit(label, tid, frac, eta, detail)
+                extra = {}
+                if isinstance(detail, dict):
+                    extra = {
+                        "chunk_current": detail.get("chunk"),
+                        "chunk_total": detail.get("chunks"),
+                        "step": detail.get("step"),
+                    }
                 monitor_state.update(progress=frac, current_job=job_name,
-                                     eta_seconds=eta)
+                                     eta_seconds=eta, **extra)
 
             result = run_pipeline(
                 self.disc_index,

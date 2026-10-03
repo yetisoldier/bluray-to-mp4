@@ -12,13 +12,19 @@ users through anything missing.
 
 import os
 import glob
+import subprocess
+import sys
 
 block_cipher = None
+
+_icon_path = os.path.join("packaging", "app_icon.ico")
+if not os.path.exists(_icon_path):
+    subprocess.check_call([sys.executable, os.path.join("packaging", "build_icon.py"), _icon_path])
 
 # Optional bundled ffmpeg (downloaded in CI, or placed at
 # packaging/tools/ locally before building). Empty when absent.
 _tools_dir = os.path.join("packaging", "tools")
-_datas = []
+_datas = [(os.path.join("bluray_to_mp4", "ui", "app_icon.svg"), os.path.join("bluray_to_mp4", "ui"))]
 if os.path.isdir(_tools_dir):
     _datas.append((_tools_dir, "tools"))
 
@@ -68,7 +74,7 @@ exe = EXE(
     exclude_binaries=True,
     name="bluray-to-mp4",
     console=True,  # keep console for first-run dependency output + monitor URL
-    icon=None,
+    icon=_icon_path,
     version="packaging/version_info.txt",  # YetiWurks LLC publisher metadata
 )
 

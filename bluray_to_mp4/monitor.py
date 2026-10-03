@@ -159,6 +159,9 @@ class MonitorState:
         self.jobs_done = 0
         self.progress = 0.0  # 0..1 for the active stage
         self.eta_seconds: float | None = None
+        self.chunk_current: int | None = None
+        self.chunk_total: int | None = None
+        self.step: str | None = None
         self.stage_started_at: float | None = None
         self.progress_updated_at: float | None = None
         self.disc_name: str | None = None
@@ -185,6 +188,9 @@ class MonitorState:
             self.stage = "starting"
             self.progress = 0.0
             self.eta_seconds = None
+            self.chunk_current = None
+            self.chunk_total = None
+            self.step = None
             now = time.time()
             self.stage_started_at = now
             self.progress_updated_at = now
@@ -195,7 +201,8 @@ class MonitorState:
 
     def update(self, *, stage: str | None = None, current_job: str | None = None,
                progress: float | None = None, eta_seconds: float | None = None,
-               warning: str | None = None) -> None:
+               chunk_current: int | None = None, chunk_total: int | None = None,
+               step: str | None = None, warning: str | None = None) -> None:
         with self._lock:
             now = time.time()
             if stage is not None:
@@ -211,6 +218,12 @@ class MonitorState:
                 self.progress = new_progress
             if eta_seconds is not None:
                 self.eta_seconds = eta_seconds
+            if chunk_current is not None:
+                self.chunk_current = int(chunk_current)
+            if chunk_total is not None:
+                self.chunk_total = int(chunk_total)
+            if step is not None:
+                self.step = step
             if warning is not None:
                 self.warnings.append(warning)
             self.updated_at = now
@@ -238,6 +251,9 @@ class MonitorState:
             self.stage = "idle"
             self.progress = 0.0
             self.eta_seconds = None
+            self.chunk_current = None
+            self.chunk_total = None
+            self.step = None
             now = time.time()
             self.stage_started_at = now
             self.progress_updated_at = now
@@ -257,6 +273,9 @@ class MonitorState:
                 "jobs_total": self.jobs_total,
                 "progress": round(self.progress, 4),
                 "eta_seconds": self.eta_seconds,
+                "chunk_current": self.chunk_current,
+                "chunk_total": self.chunk_total,
+                "step": self.step,
                 "stage_started_at": self.stage_started_at,
                 "progress_updated_at": self.progress_updated_at,
                 "warnings": list(self.warnings),

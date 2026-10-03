@@ -372,7 +372,9 @@ def run_pipeline(
 
     on_progress update tuples, one per progress line from each stage:
       ("rip", tid, frac)                 - MakeMKV PRGV progress, no ETA
-      ("upscale", tid, frac, eta-or-None) - future AI-upscale stage progress
+      ("upscale", tid, frac, eta-or-None, detail-or-None) - AI-upscale
+                                          stage progress; detail is a dict with
+                                          chunk/chunks/step when available
       ("encode", tid, frac, eta-or-None) - ffmpeg progress; ETA-seconds is
                                           None until frac passes 0.2%, a
                                           float estimate afterwards
@@ -748,8 +750,8 @@ def run_pipeline(
                                 duration_seconds=title.duration_seconds,
                                 deinterlace=deinterlace,
                             ),
-                            on_progress=lambda frac, eta: on_progress(
-                                ("upscale", job.tid, frac, eta)
+                            on_progress=lambda frac, eta, detail=None: on_progress(
+                                ("upscale", job.tid, frac, eta, detail)
                             ) if on_progress else None,
                             cancel=cancel,
                         )

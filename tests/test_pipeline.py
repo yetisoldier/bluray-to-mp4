@@ -1255,7 +1255,7 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     assert inputs == [plan.output_path, result.jobs[0].input_path]
     maps = [args[i + 1] for i, arg in enumerate(args) if arg == "-map"]
     assert maps == ["1:a:0?", "0:v:0"]
-    assert ("upscale", 0, 0.5, 42.0) in captures["progress"]
+    assert ("upscale", 0, 0.5, 42.0, None) in captures["progress"]
 
 
 def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):

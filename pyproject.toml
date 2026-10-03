@@ -1,6 +1,6 @@
 [project]
 name = "bluray-to-mp4"
-version = "0.2.23"
+version = "0.2.24"
 description = "Local Blu-ray/DVD to MP4 ripper with smart recommendations, NVENC/x265 encode, PGS-to-SRT subtitles, and TV series episode handling"
 requires-python = ">=3.11"
 dependencies = []
@@ -16,6 +16,9 @@ dev = ["pytest>=8", "pyinstaller>=6.5"]
 [tool.setuptools.packages.find]
 include = ["bluray_to_mp4", "bluray_to_mp4.*"]
 exclude = ["tests", "packaging"]
+
+[tool.setuptools.package-data]
+"bluray_to_mp4.ui" = ["app_icon.svg"]
 
 [build-system]
 requires = ["setuptools>=68"]

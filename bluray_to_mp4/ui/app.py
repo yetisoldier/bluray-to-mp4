@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import signal
 import sys
+from pathlib import Path
 
 
 def main() -> int:
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from ..config import load_settings
@@ -15,6 +17,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("bluray-to-mp4")
+    icon_path = Path(__file__).with_name("app_icon.svg")
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     settings = load_settings()
     if settings.monitor_enabled:
