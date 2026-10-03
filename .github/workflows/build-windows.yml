@@ -108,9 +108,16 @@ jobs:
           Copy-Item packaging\install-cert.ps1 dist\bluray-to-mp4\
           Write-Host "Trust files shipped in the app folder"
 
-      - name: Package
+      - name: Package with version-stamped name
         shell: pwsh
-        run: Compress-Archive -Path dist\bluray-to-mp4 -DestinationPath bluray-to-mp4-windows-x64.zip
+        run: |
+          # Eric request 2026-10-02 - the zip filename must carry the
+          # build number so fresh extractions are identifiable on disk.
+          $ver = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          Compress-Archive -Path dist\bluray-to-mp4 -DestinationPath "bluray-to-mp4-$ver-windows-x64.zip"
+          Set-Content -Path version.txt -Value $ver
+          Write-Host "Packaged bluray-to-mp4-$ver-windows-x64.zip"
+
 
       - name: Smoke-test the exe
         shell: pwsh
@@ -126,5 +133,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: bluray-to-mp4-windows-x64.zip
+          path: |
+            bluray-to-mp4-*-windows-x64.zip
+            version.txt
           retention-days: 30

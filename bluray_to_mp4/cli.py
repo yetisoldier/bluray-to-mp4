@@ -9,6 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+from . import __version__
 from .makemkv import MakeMkvError, find_drives, scan_disc
 from .recommend import recommend_title
 from .series import detect_series, main_feature
@@ -225,7 +226,14 @@ def cmd_run(args) -> int:
     return 0
 
 
+# A diagnostic must identify itself (Eric, 2026-10-02 probe.3 rule):
+# two RED runs were byte-identical and we could not tell which build
+# produced them. The probe prints its build stamp as the first line.
+PROBE_ID = "probe.3"
+
+
 def cmd_probe_stream(args) -> int:
+    print(f"bluray-to-mp4 probe-stream {PROBE_ID} (app v{__version__})")
     """Probe the MakeMKV stream server against a real disc (v0.2.17 §1.2).
 
     Scans the disc, starts the stream server, probes the recommended
