@@ -26,6 +26,28 @@ start_stream_server walks an ordered argument-variant matrix (A: robot
 D: robot + disc), recording every variant that dies so the probe
 report shows exactly which argv shape makemkvcon accepts.
 
+probe.5 (Eric's diagnostic criteria, 2026-10-02 19:49): the argument
+matrix is only useful as a diagnostic when the report DISTINGUISHES
+the outcomes. classify_attempt_failure maps each attempt's evidence
+onto Eric's classes - 'invalid-command' ("Invalid command: stream":
+the executable rejects the command; rearranging arguments will not
+help), 'deprecated-option' ("Deprecated option ignored": that alone
+does not establish server support), 'disc-source' (investigate the
+source argument, drive access, or disc opening), the bare 'exit' (it
+died with no recognized signature - exit -2 alone does not identify
+the cause), 'timeout' (WE terminated it - fundamentally different from
+a self-exit), and 'alive-unverified' (still running when we gave up
+waiting). Every StreamAttempt carries the COMPLETE drained stdout and
+stderr (the buffers are already bounded at ~2000 chars - no 400-char
+excerpts) plus the process disposition, and start_stream_server
+attaches single-attempt evidence to typed failures and readiness
+timeouts too. Success is defined by video, not survival: readiness
+stays HTTP 2xx, but the probe-stream command only calls that a pass
+after ffprobe identifies a video stream in the served title URL and a
+short ffmpeg encode proves decodable video actually flows - survival
+is not a verdict. probe_title_urls is the multi-title enumeration
+seam the fast-mode pipeline will consume.
+
 Standard library only, fully testable offline: `runner` replaces the
 spawn (tests assert the exact argument shape), `_port_free`/`_http_ok`
 are the socket seams, and no test needs makemkvcon or a real drive.
@@ -34,6 +56,7 @@ are the socket seams, and no test needs makemkvcon or a real drive.
 from __future__ import annotations
 
 import atexit
+import re
 import socket
 import subprocess
 import threading
@@ -61,6 +84,19 @@ __all__ = [
     "start_stream_server",
     "stop_stream_server",
     "probe_title_url",
+    "probe_title_urls",
+    "classify_attempt_failure",
+    "makemkv_version",
+    "OUTCOME_INVALID_COMMAND",
+    "OUTCOME_DEPRECATED_OPTION",
+    "OUTCOME_DISC_SOURCE",
+    "OUTCOME_EXIT",
+    "OUTCOME_TIMEOUT",
+    "OUTCOME_ALIVE_UNVERIFIED",
+    "OUTCOME_HINTS",
+    "PROCESS_EXITED",
+    "PROCESS_TIMEOUT",
+    "PROCESS_ALIVE",
 ]
 
 # usage.txt: --bindport default is 51000; design §7.1 probes 51000..51009.
@@ -78,9 +114,132 @@ STOP_TIMEOUT = 10.0        # terminate -> wait(10) -> kill budget
 # ~2000 chars instead of ~300 (the real error line scrolled past).
 STDERR_TAIL_CHARS = 2000    # stderr ring budget in characters
 TAIL_EXCERPT_CHARS = 2000   # _tail_excerpt default (stdout + stderr)
-ATTEMPT_TAIL_CHARS = 400    # per-variant StreamAttempt excerpts
+# probe.5: per-attempt tails are the WHOLE bounded buffers - the
+# report prints complete evidence, not 400-char excerpts.
+ATTEMPT_TAIL_CHARS = TAIL_EXCERPT_CHARS
 # probe.4 argument-variant matrix, tried in order until one is ready.
 DEFAULT_ATTEMPTS = ["A", "B", "C", "D"]
+
+# ---------------------------------------------------------------------------
+# probe.5: Eric's diagnostic outcome classes (2026-10-02 19:49)
+# ---------------------------------------------------------------------------
+# The four argument attempts are useful as a diagnostic only when the
+# report distinguishes these outcomes; exit -2 alone does not identify
+# the cause.
+OUTCOME_INVALID_COMMAND = "invalid-command"      # executable rejects the command
+OUTCOME_DEPRECATED_OPTION = "deprecated-option"  # obsolete option ignored
+OUTCOME_DISC_SOURCE = "disc-source"              # source/drive/disc opening
+OUTCOME_EXIT = "exit"                            # died, no recognized signature
+OUTCOME_TIMEOUT = "timeout"                      # WE terminated it (readiness ceiling)
+OUTCOME_ALIVE_UNVERIFIED = "alive-unverified"   # running, video never verified
+
+# Process dispositions at record time (probe.5): whether the child
+# exited itself, the app terminated it after the readiness timeout, or
+# it was still running when we gave up waiting - three fundamentally
+# different outcomes that a bare exit code cannot tell apart.
+PROCESS_EXITED = "exited"
+PROCESS_TIMEOUT = "timeout"
+PROCESS_ALIVE = "alive"
+
+# Signature matchers for classify_attempt_failure: case-insensitive,
+# searched over the attempt's stdout and stderr tails together.
+_INVALID_COMMAND_RE = re.compile(
+    r"invalid\s+command|unknown\s+command|unrecognized\s+command"
+    r"|command\s+not\s+(?:found|recognized)|no\s+such\s+command",
+    re.IGNORECASE,
+)
+_DEPRECATED_OPTION_RE = re.compile(
+    r"(?:deprecated|obsolete)\s+(?:option|argument|flag|param)"
+    r"|option\s+'?[\w.-]*'?\s+(?:is\s+)?(?:deprecated|obsolete)",
+    re.IGNORECASE,
+)
+_DISC_SOURCE_RE = re.compile(
+    r"msg:5010\b"                                   # typed disc-open MSG code
+    r"|(?:failed|unable|could\s?not|cannot|can't|error)\s+(?:to\s+)?"
+    r"open\s+(?:the\s+)?(?:disc|source)"            # the DiscOpenError phrasing
+    r"|(?:disc|source)\s+open(?:ing)?\s+failed"
+    r"|no\s+(?:disc|media)\b"
+    r"|disc\s+(?:not\s+found|missing|unreadable|empty)"
+    r"|drive\s+(?:not\s+(?:found|ready)|access\s+denied|error)"
+    r"|(?:disc|source)\s+(?:error|unavailable)",
+    re.IGNORECASE,
+)
+
+# The 'MakeMKV v(N) started' version stamp: the same pattern
+# deps.check_makemkv parses from the scan output, reused so each
+# probe.5 attempt block can name the exact executable version (the
+# MSG:1005 started line rides in the drained stdout tails).
+_MAKEMKV_VERSION_RE = re.compile(r"MakeMKV\s+v(\d+(?:\.\d+)*)")
+
+
+def classify_attempt_failure(
+    stdout_tail: str, stderr_tail: str, exited_vs_timeout: str
+) -> str:
+    """Map one attempt's evidence onto Eric's outcome classes (probe.5).
+
+    'invalid-command' - "Invalid command: stream": the executable
+      rejects the command; rearranging arguments will not help.
+    'deprecated-option' - "Deprecated option ignored": a supplied
+      option is obsolete; that alone does not establish server
+      support.
+    'disc-source' - disc-open/drive/source error phrasings (the
+      typed DiscOpenError message included): investigate the source
+      argument, drive access, or disc opening.
+    'exit' - the process died itself with no recognized signature:
+      the bare case (exit -2 alone does not identify the cause).
+    'timeout' - WE terminated it after the readiness ceiling, which
+      is fundamentally different from a self-exit.
+    'alive-unverified' - still running when we gave up waiting.
+
+    The disposition argument wins over any signature: a process we
+    killed or one that is still alive is a different outcome from a
+    self-exit no matter what the drained output happens to say.
+    """
+    if exited_vs_timeout == PROCESS_ALIVE:
+        return OUTCOME_ALIVE_UNVERIFIED
+    if exited_vs_timeout == PROCESS_TIMEOUT:
+        return OUTCOME_TIMEOUT
+    text = f"{stdout_tail or ''}\n{stderr_tail or ''}"
+    if _INVALID_COMMAND_RE.search(text):
+        return OUTCOME_INVALID_COMMAND
+    if _DEPRECATED_OPTION_RE.search(text):
+        return OUTCOME_DEPRECATED_OPTION
+    if _DISC_SOURCE_RE.search(text):
+        return OUTCOME_DISC_SOURCE
+    return OUTCOME_EXIT
+
+
+def makemkv_version(text: str) -> str:
+    """'MakeMKV v1.17.8 win64 started' -> '1.17.8' ('' when absent).
+
+    probe.5: the report stamps each attempt with the exact executable
+    version, parsed from the MSG:1005 started lines in the drained
+    stdout tails (same pattern as deps.check_makemkv).
+    """
+    m = _MAKEMKV_VERSION_RE.search(text or "")
+    return m.group(1) if m else ""
+
+
+# probe.5: Eric's own one-line reading of each outcome class, so the
+# report's classification headline carries its meaning inline.
+OUTCOME_HINTS = {
+    OUTCOME_INVALID_COMMAND:
+        "the executable rejects the command; rearranging arguments "
+        "will not help",
+    OUTCOME_DEPRECATED_OPTION:
+        "a supplied option is obsolete; this alone does not establish "
+        "server support",
+    OUTCOME_DISC_SOURCE:
+        "investigate the source argument, drive access, or disc opening",
+    OUTCOME_EXIT:
+        "the process died with no recognized failure signature; the "
+        "exit code alone does not identify the cause",
+    OUTCOME_TIMEOUT:
+        "the process stayed silent past the readiness ceiling; the "
+        "app terminated it",
+    OUTCOME_ALIVE_UNVERIFIED:
+        "the process was running but video was never verified",
+}
 
 # The stream server has NO authentication (§1.3); loopback-only binding
 # IS the security model. Never 0.0.0.0, never the LAN.
@@ -100,30 +259,54 @@ class StreamServerError(MakeMkvError):
     probe.4: `.attempts` carries one StreamAttempt per argument variant
     that exited before ready (empty for every other failure mode), so
     the probe report can print the whole try matrix.
+
+    probe.5: `.timeout_attempt` carries the single variant that stayed
+    ALIVE past the readiness ceiling until the app terminated it - the
+    'timeout' outcome, fundamentally different from a self-exit - and
+    typed spawn failures (disc open, beta key) get their evidence
+    attached as `.stream_attempt` on the raised exception itself
+    (BetaKeyExpiredError/DiscOpenError carry the attribute directly;
+    this constructor accepts it uniformly for every shape).
     """
 
     def __init__(self, message: str, *,
-                 attempts: "list[StreamAttempt] | None" = None) -> None:
+                 attempts: "list[StreamAttempt] | None" = None,
+                 timeout_attempt: "StreamAttempt | None" = None,
+                 stream_attempt: "StreamAttempt | None" = None) -> None:
         super().__init__(message)
         self.attempts: "list[StreamAttempt]" = list(attempts or [])
+        self.timeout_attempt: "StreamAttempt | None" = timeout_attempt
+        self.stream_attempt: "StreamAttempt | None" = stream_attempt
 
 
 @dataclass
 class StreamAttempt:
-    """One probe.4 argument-variant try: the argv shape and how it died.
+    """One probe.5 argument-variant try: argv, outcome class, evidence.
 
     Recorded only when the spawned makemkvcon EXITED before its HTTP
     port answered - the case where the argv shape itself is the prime
     suspect. exit_code is makemkvcon's own code (4294967294 = -2 in
-    Eric's probe.3 run); the tails are ~400-char excerpts of the fully
-    drained stdout/stderr ring buffers.
+    Eric's probe.3 run). The tails are the COMPLETE drained stdout and
+    stderr buffers (already bounded at ~TAIL_EXCERPT_CHARS = 2000
+    chars upstream - printed whole in the report, never re-excerpted).
+
+    probe.5: disposition says whether the process exited itself
+    (PROCESS_EXITED), the app terminated it after the readiness
+    timeout (PROCESS_TIMEOUT), or it was still running when we gave
+    up (PROCESS_ALIVE) - three fundamentally different outcomes that
+    a bare exit code cannot tell apart - and classification is Eric's
+    diagnostic outcome (classify_attempt_failure) attached at record
+    time. Hand-built records (tests) may leave classification empty;
+    the report re-derives it from the tails then.
     """
 
     name: str                # 'A' | 'B' | 'C' | 'D'
     args: list[str]          # argv after the makemkvcon binary
     exit_code: int | None    # None only if the process never exited
-    stdout_tail: str = ""   # last ~400 chars of drained stdout
-    stderr_tail: str = ""   # last ~400 chars of drained stderr
+    stdout_tail: str = ""   # complete drained stdout buffer (~2000 chars)
+    stderr_tail: str = ""   # complete drained stderr buffer (~2000 chars)
+    disposition: str = PROCESS_EXITED   # exited | timeout | alive (probe.5)
+    classification: str = ""           # Eric's outcome class (probe.5)
 
 
 @dataclass
@@ -489,20 +672,41 @@ def start_stream_server(
                 server.stop()
             except Exception:
                 pass
-            if exit_code is not None and isinstance(exc, StreamServerError):
+            # probe.5: whatever happened, the COMPLETE evidence is
+            # recorded first - the whole bounded tails plus the process
+            # disposition (exited itself vs the app terminating a live
+            # child) and Eric's outcome class derived from both.
+            out_tail = _tail_excerpt(server.stdout_tail, ATTEMPT_TAIL_CHARS)
+            err_tail = _tail_excerpt(server.stderr_tail, ATTEMPT_TAIL_CHARS)
+            disposition = (PROCESS_EXITED if exit_code is not None
+                           else PROCESS_TIMEOUT)
+            attempt = StreamAttempt(
+                name=name,
+                args=list(args),
+                exit_code=exit_code,
+                stdout_tail=out_tail,
+                stderr_tail=err_tail,
+                disposition=disposition,
+                classification=classify_attempt_failure(
+                    out_tail, err_tail, disposition),
+            )
+            if exit_code is not None:
                 # This argv shape died before ready: record it and let
                 # the next variant try. Typed failures (beta key, disc
-                # open) and a live-but-silent process propagate.
-                records.append(StreamAttempt(
-                    name=name,
-                    args=list(args),
-                    exit_code=exit_code,
-                    stdout_tail=_tail_excerpt(
-                        server.stdout_tail, ATTEMPT_TAIL_CHARS),
-                    stderr_tail=_tail_excerpt(
-                        server.stderr_tail, ATTEMPT_TAIL_CHARS),
-                ))
-                continue
+                # open) cannot be fixed by any argv shape: the same
+                # evidence rides on the exception itself instead.
+                if isinstance(exc, StreamServerError):
+                    records.append(attempt)
+                    continue
+                if isinstance(exc, MakeMkvError):
+                    exc.stream_attempt = attempt
+                raise
+            if isinstance(exc, StreamServerError):
+                # Readiness timeout: the child was ALIVE and WE
+                # terminated it - a fundamentally different outcome
+                # from a self-exit, so it never joins the died-before-
+                # ready records; it rides alone as .timeout_attempt.
+                exc.timeout_attempt = attempt
             raise
         return server
     last = records[-1]
@@ -531,6 +735,18 @@ def probe_title_url(server: "StreamServer", tid: int) -> str:
     only function that knows the URL shape.
     """
     return f"{server.base_url}/title{tid}.ts"
+
+
+def probe_title_urls(server: "StreamServer", tids: "list[int]") -> "list[str]":
+    """Per-title MPEG-TS URLs for several title ids at once (probe.5).
+
+    The probe-stream CLI verifies one recommended title today; the
+    fast-mode pipeline will enumerate every episode title's URL
+    through this export. Same community-reported /title<N>.ts shape
+    as probe_title_url - this module stays the only place that
+    knows it.
+    """
+    return [probe_title_url(server, tid) for tid in tids]
 
 
 def _atexit_cleanup() -> None:

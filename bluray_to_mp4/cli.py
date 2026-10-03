@@ -131,6 +131,28 @@ def _probe_url(url: str, timeout: float,
     return _UrlProbe(False, "failed", "", None, [], "; ".join(failures))
 
 
+def _prove_video_flows(url: str, timeout: float,
+                       ffmpeg_bin: str = "ffmpeg") -> tuple[bool, str]:
+    """probe.5 video-proves-success gate (Eric: survival is not a verdict).
+
+    A served URL can open and even inventory streams while serving
+    nothing actually decodable. A pass is only called a pass after a
+    short ffmpeg encode (-t 5, null mux) proves decodable video flows
+    off the URL. Returns (proved, detail); detail carries the ffmpeg
+    failure excerpt when the encode does not prove out. Never raises
+    for probe failures.
+    """
+    try:
+        rc, err = _run_ffmpeg_read(url, timeout, ffmpeg_bin)
+    except subprocess.TimeoutExpired:
+        return False, f"ffmpeg: timed out after {timeout:.0f}s"
+    except OSError:
+        return False, "ffmpeg: not runnable"
+    if rc == 0:
+        return True, ""
+    return False, f"ffmpeg: {_excerpt(err) or f'exit code {rc}'}"
+
+
 def cmd_drives(args) -> int:
     drives = find_drives()
     if not drives:
@@ -229,36 +251,74 @@ def cmd_run(args) -> int:
 # A diagnostic must identify itself (Eric, 2026-10-02 probe.3 rule):
 # two RED runs were byte-identical and we could not tell which build
 # produced them. The probe prints its build stamp as the first line.
-PROBE_ID = "probe.4"
+PROBE_ID = "probe.5"
+
+
+def _print_stream_attempt(att) -> None:
+    """One probe.5 attempt block: complete diagnostic evidence.
+
+    The attempt letter, the full argv, the exit code, Eric's outcome
+    class with its inline hint, the process disposition, the MakeMKV
+    version stamp when the output carries one, and the COMPLETE
+    stdout/stderr tails - the records already hold the whole bounded
+    buffers (probe.4 printed 400-char excerpts and let the real
+    error line scroll away; probe.5 never re-excerpts).
+    """
+    from .streamsource import (
+        OUTCOME_HINTS,
+        PROCESS_ALIVE,
+        PROCESS_EXITED,
+        PROCESS_TIMEOUT,
+        classify_attempt_failure,
+        makemkv_version,
+    )
+
+    classification = att.classification or classify_attempt_failure(
+        att.stdout_tail, att.stderr_tail, att.disposition)
+    disposition_word = {
+        PROCESS_EXITED: "exited itself",
+        PROCESS_TIMEOUT: "app-terminated after readiness timeout",
+        PROCESS_ALIVE: "still alive at give-up",
+    }.get(att.disposition, att.disposition)
+    argv = " ".join(att.args)
+    print(f"Attempt {att.name}: {argv} -> exit {att.exit_code} "
+          f"[{classification}] [{disposition_word}]")
+    hint = OUTCOME_HINTS.get(classification)
+    if hint:
+        print(f"  meaning: {hint}")
+    version = makemkv_version(att.stdout_tail) or makemkv_version(att.stderr_tail)
+    if version:
+        print(f"  makemkv version: {version}")
+    for label, tail in (("stdout", att.stdout_tail), ("stderr", att.stderr_tail)):
+        if tail.strip():
+            for line in tail.splitlines():
+                print(f"  {label}: {line}")
+        else:
+            print(f"  {label}: (none)")
 
 
 def _print_stream_attempts(attempts) -> None:
-    """probe.4: the argument-variant matrix, one block per dead variant.
-
-    probe.3's report had two blind spots: the ~300-char stdout excerpt
-    let the real error line scroll past, and stderr was discarded. Each
-    StreamAttempt carries its argv shape, exit code, and ~400-char
-    stdout ('out:') and stderr ('err:') tails - printed here BEFORE the
-    verdict so the report shows exactly which shape makemkvcon accepts.
-    """
+    """probe.5: the argument-variant matrix, one full block per attempt."""
     for att in attempts:
-        print(f"Attempt {att.name}: {' '.join(att.args)} "
-              f"-> exit {att.exit_code}")
-        print(f"  out: {_excerpt(att.stdout_tail, 400) or '(none)'}")
-        print(f"  err: {_excerpt(att.stderr_tail, 400) or '(none)'}")
+        _print_stream_attempt(att)
 
 
 def cmd_probe_stream(args) -> int:
-    print(f"bluray-to-mp4 probe-stream {PROBE_ID} (app v{__version__})")
     """Probe the MakeMKV stream server against a real disc (v0.2.17 §1.2).
 
     Scans the disc, starts the stream server, probes the recommended
     title's URL with ffprobe (falling back to a short ffmpeg null read),
     prints a plain-text report plus a GREEN/YELLOW/RED verdict, and
-    stops the server in every path. Exit codes: 0 GREEN/YELLOW, 1 RED,
-    2 operational errors (no drive/disc/makemkvcon).
+    stops the server in every path. probe.5: survival is not a
+    verdict - a pass is only called a pass after ffprobe identifies
+    a video stream AND a short ffmpeg encode proves decodable video
+    actually flows. Exit codes: 0 GREEN/YELLOW, 1 RED, 2 operational
+    errors (no drive/disc/makemkvcon).
     """
+    print(f"bluray-to-mp4 probe-stream {PROBE_ID} (app v{__version__})")
     from .streamsource import (
+        OUTCOME_ALIVE_UNVERIFIED,
+        OUTCOME_HINTS,
         StreamServerError,
         probe_title_url,
         start_stream_server,
@@ -297,11 +357,16 @@ def cmd_probe_stream(args) -> int:
             server = start_stream_server(args.index)
         except StreamServerError as exc:
             # Server misbehaves: RED, not an operational error - the
-            # lifecycle machinery is the thing under test here. probe.4:
-            # every argument variant that exited before ready is printed
-            # with its argv shape and drained stdout/stderr tails.
+            # lifecycle machinery is the thing under test here. probe.5:
+            # every dead variant prints its COMPLETE evidence (argv,
+            # exit code, outcome class, disposition, version stamp,
+            # whole tails), and a readiness timeout prints its own
+            # single-attempt evidence - WE terminated a live child,
+            # which a bare exit code can never tell apart.
             print()
             _print_stream_attempts(exc.attempts)
+            if exc.timeout_attempt is not None:
+                _print_stream_attempt(exc.timeout_attempt)
             print(f"error: {exc}", file=sys.stderr)
             print("Verdict: RED - the stream server misbehaved "
                   "(failed to start or become ready); attach this "
@@ -310,9 +375,15 @@ def cmd_probe_stream(args) -> int:
         except MakeMkvError as exc:
             # makemkvcon missing / beta key / disc won't open: the
             # probe never got to test the server - operational, exit 2.
+            # probe.5: a typed single-attempt failure still prints its
+            # evidence (argv shape, outcome class, whole tails).
+            attempt = getattr(exc, "stream_attempt", None)
+            if attempt is not None:
+                print()
+                _print_stream_attempt(attempt)
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        # probe.4: variants that died before the winning shape, then
+        # probe.5: variants that died before the winning shape, then
         # which argument variant actually went ready.
         _print_stream_attempts(server.attempts)
         print(f"Stream server ready via variant {server.variant}")
@@ -341,24 +412,56 @@ def cmd_probe_stream(args) -> int:
                   f"{', '.join(audios) or 'none'}")
             print(f"Subtitles: {len(subs)} stream(s) - "
                   f"{', '.join(subs) or 'none'}")
-            if videos and audios and subs:
-                verdict = "GREEN"
-                print("Verdict: GREEN - title URL streams video, audio, "
-                      "AND subtitles; fast mode is viable")
-            elif videos and audios:
-                verdict = "YELLOW"
-                print("Verdict: YELLOW - title URL streams video and "
-                      "audio but NO subtitle track; fast mode needs the "
-                      "subtitle-extraction fallback")
-            else:
+            if not videos:
                 verdict = "RED"
-                missing = "no video" if not videos else "no audio"
-                print(f"Verdict: RED - the title URL opened but serves "
-                      f"{missing} stream(s); it is not usable for "
-                      "encoding")
+                print("Verdict: RED - the title URL opened but ffprobe "
+                      "identifies no video stream; it is not usable "
+                      "for encoding")
+            else:
+                # probe.5 video-proves-success gate: survival is not a
+                # verdict. ffprobe seeing a video stream is necessary
+                # but not sufficient - a short ffmpeg encode must prove
+                # decodable video actually flows off the URL.
+                proved, proof_detail = _prove_video_flows(url, args.timeout)
+                if proved:
+                    print("Video proof: decodable video flows (short "
+                          "ffmpeg encode)")
+                else:
+                    print(f"Video proof: FAILED - "
+                          f"{proof_detail or '(no detail)'}")
+                if not proved:
+                    verdict = "RED"
+                    # probe.5: the server is alive but decodable video
+                    # was never verified - the alive-unverified class.
+                    print(f"Outcome: {OUTCOME_ALIVE_UNVERIFIED} - "
+                          f"{OUTCOME_HINTS[OUTCOME_ALIVE_UNVERIFIED]}")
+                    print("Verdict: RED - the title URL serves a video "
+                          "stream but decodable video did not flow "
+                          "through a short ffmpeg encode (survival is "
+                          "not a verdict); fast mode is descoped, "
+                          "attach this report to the milestone issue")
+                elif videos and audios and subs:
+                    verdict = "GREEN"
+                    print("Verdict: GREEN - title URL streams decodable "
+                          "video, audio, AND subtitles; fast mode is "
+                          "viable")
+                elif videos and audios:
+                    verdict = "YELLOW"
+                    print("Verdict: YELLOW - title URL streams decodable "
+                          "video and audio but NO subtitle track; fast "
+                          "mode needs the subtitle-extraction fallback")
+                else:
+                    verdict = "RED"
+                    print("Verdict: RED - the title URL opened but serves "
+                          "no audio stream; it is not usable for "
+                          "encoding")
         else:
             verdict = "RED"
             print(f"Prober output: {probe.stderr_excerpt or '(none)'}")
+            # probe.5: the server is still running but video was never
+            # verified - exactly the alive-unverified outcome class.
+            print(f"Outcome: {OUTCOME_ALIVE_UNVERIFIED} - "
+                  f"{OUTCOME_HINTS[OUTCOME_ALIVE_UNVERIFIED]}")
             print("Verdict: RED - the title URL could not be opened by "
                   "ffprobe or ffmpeg; fast mode is descoped, attach "
                   "this report to the milestone issue")

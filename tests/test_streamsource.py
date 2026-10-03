@@ -9,6 +9,14 @@ probe.4: start_stream_server walks an ordered argument-variant matrix
 (A/B/C/D); a variant that exits before ready is recorded as a
 StreamAttempt and the next shape is tried, and stderr is drained into
 its own ring buffer (probe.3 discarded it with DEVNULL).
+
+probe.5: every attempt records Eric's diagnostic outcome class
+(classify_attempt_failure) plus the process disposition (exited vs
+app-terminated vs alive); tails are the COMPLETE bounded buffers, a
+MakeMKV version stamp rides in the stdout evidence, readiness
+failures attach .timeout_attempt / .stream_attempt, and the CLI's
+pass verdict is gated on a short ffmpeg encode proving decodable
+video flows (survival is not a verdict).
 """
 
 from __future__ import annotations
@@ -185,6 +193,12 @@ def test_matrix_all_die_carries_four_attempt_records(monkeypatch):
     # Drained tails rode along on every record.
     assert "MakeMKV started" in records[0].stdout_tail
     assert records[0].stderr_tail == "Error: failed to start the stream server"
+    # probe.5: every record carries the process disposition (it died
+    # itself) and Eric's outcome class derived from its own evidence
+    # (no recognized signature -> the bare 'exit' class).
+    for r in records:
+        assert r.disposition == streamsource.PROCESS_EXITED
+        assert r.classification == streamsource.OUTCOME_EXIT
     # Message summarizes the matrix; nothing leaked into the live list.
     assert "A, B, C, D" in str(exc.value)
     assert streamsource._LIVE_SERVERS == before
@@ -234,9 +248,18 @@ def test_matrix_typed_error_propagates_without_next_variant(monkeypatch):
         return _FakeProc(rc=1, lines=[
             'MSG:5055,0,0,"Evaluation period has expired","expired"'])
 
-    with pytest.raises(BetaKeyExpiredError):
+    with pytest.raises(BetaKeyExpiredError) as exc:
         streamsource.start_stream_server(0, runner=runner)
     assert len(calls) == 1              # variant A only: no B/C/D tries
+    # probe.5: the typed failure carries its single-attempt evidence
+    # (argv, disposition, outcome class, whole tails) so the report
+    # prints it even on the operational exit path.
+    sa = getattr(exc.value, "stream_attempt", None)
+    assert sa is not None
+    assert sa.name == "A"
+    assert sa.exit_code == 1
+    assert sa.disposition == streamsource.PROCESS_EXITED
+    assert "Evaluation period has expired" in sa.stdout_tail
 
 
 def test_matrix_live_process_timeout_propagates_without_retry(monkeypatch):
@@ -257,6 +280,16 @@ def test_matrix_live_process_timeout_propagates_without_retry(monkeypatch):
     assert "not ready" in str(exc.value)
     assert len(calls) == 1
     assert exc.value.attempts == []      # died-before-ready records only
+    # probe.5: a readiness timeout is a fundamentally different
+    # outcome from a self-exit - the child was ALIVE and WE terminated
+    # it, so the evidence rides alone as .timeout_attempt with the
+    # 'timeout' disposition and outcome class (exit code None).
+    ta = exc.value.timeout_attempt
+    assert ta is not None
+    assert ta.name == "A"
+    assert ta.exit_code is None
+    assert ta.disposition == streamsource.PROCESS_TIMEOUT
+    assert ta.classification == streamsource.OUTCOME_TIMEOUT
     assert streamsource._LIVE_SERVERS == before
 
 
@@ -348,6 +381,10 @@ def test_not_ready_timeout_raises_typed_error_with_tail(monkeypatch):
     assert "not ready" in str(exc.value)
     assert "MakeMKV started" in str(exc.value)      # tail context present
     assert proc.terminated == 1                     # reaped: no leak
+    # probe.5: the readiness timeout attaches its attempt evidence.
+    assert exc.value.timeout_attempt is not None
+    assert exc.value.timeout_attempt.disposition == \
+        streamsource.PROCESS_TIMEOUT
     assert streamsource._LIVE_SERVERS == before
 
 
@@ -517,10 +554,14 @@ def _green_probe(**kw):
         **kw)
 
 
-def _run_cli(monkeypatch, capsys, server, probe, argv=("probe-stream", "0")):
+def _run_cli(monkeypatch, capsys, server, probe, argv=("probe-stream", "0"),
+             proof=(True, "")):
     monkeypatch.setattr(cli, "scan_disc", lambda index: _cli_disc())
     monkeypatch.setattr(streamsource, "start_stream_server", lambda index: server)
     monkeypatch.setattr(cli, "_probe_url", probe)
+    # probe.5: the pass verdict is gated on the video-proof encode; the
+    # CLI harness stubs the seam (its own tests fake ffmpeg below).
+    monkeypatch.setattr(cli, "_prove_video_flows", lambda url, timeout, ffmpeg_bin="ffmpeg": proof)
     args = cli.build_parser().parse_args(list(argv))
     rc = args.func(args)
     captured = capsys.readouterr()
@@ -624,9 +665,10 @@ def test_cli_probe_stream_red_when_server_misbehaves(monkeypatch, capsys):
 
 
 def test_cli_probe_stream_red_prints_attempt_matrix_and_stderr(monkeypatch, capsys):
-    """probe.4: a total server failure prints the whole try matrix -
-    'Attempt A'..'Attempt D' argv summaries, exit codes, and the drained
-    stdout ('out:')/stderr ('err:') tails - before the RED verdict."""
+    """probe.5: a total server failure prints the whole try matrix -
+    'Attempt A'..'Attempt D' argv summaries, exit codes, Eric's outcome
+    classes with inline meaning, dispositions, and the COMPLETE
+    stdout/stderr tails - before the RED verdict."""
     records = [
         StreamAttempt("A", [
             "-r", "stream", "--cache=128", "--bindip=127.0.0.1",
@@ -637,13 +679,13 @@ def test_cli_probe_stream_red_prints_attempt_matrix_and_stderr(monkeypatch, caps
         StreamAttempt("B", [
             "stream", "--upnp=1", "--cache=128", "--bindip=127.0.0.1",
             "--bindport=51000", "--messages=-stdout"],
-            4294967294, "", "Fatal: invalid arguments"),
+            4294967294, "", "Deprecated option ignored: --upnp"),
         StreamAttempt("C", ["stream", "--messages=-stdout"],
-            4294967294, "", "Error: cannot open server port"),
+            4294967294, "", "Error: failed to open disc"),
         StreamAttempt("D", [
             "-r", "stream", "--cache=128", "--bindip=127.0.0.1",
             "--bindport=51000", "--messages=-stdout", "disc:0"],
-            4294967294, "DRV:0,2,999,12", "Fatal: invalid arguments"),
+            4294967294, "DRV:0,2,999,12", "Invalid command: stream"),
     ]
 
     def broken_start(index):
@@ -657,17 +699,24 @@ def test_cli_probe_stream_red_prints_attempt_matrix_and_stderr(monkeypatch, caps
     rc = args.func(args)
     captured = capsys.readouterr()
     assert rc == 1
-    # probe.4 build stamp identifies the report (probe.3 rule).
-    assert cli.PROBE_ID == "probe.4"
+    # probe.5 build stamp identifies the report (probe.3 rule).
+    assert cli.PROBE_ID == "probe.5"
     assert f"probe-stream {cli.PROBE_ID}" in captured.out
-    # Every attempt line: argv summary -> exit code, then out:/err: tails.
+    # Every attempt line: argv summary -> exit code -> outcome class
+    # -> disposition.
     for name in ("A", "B", "C", "D"):
         assert f"Attempt {name}:" in captured.out
-        assert f"-> exit 4294967294" in captured.out
-    assert "out:" in captured.out
-    assert "err:" in captured.out
+    assert "-> exit 4294967294" in captured.out
+    assert "[exit]" in captured.out               # A: no signature
+    assert "[deprecated-option]" in captured.out   # B's stderr signature
+    assert "[disc-source]" in captured.out         # C's stderr signature
+    assert "[invalid-command]" in captured.out     # D's stderr signature
+    assert "[exited itself]" in captured.out
+    assert "rearranging arguments" in captured.out  # invalid-command hint
     assert "Fatal: invalid arguments" in captured.out
     assert "DRV:0,2,999,12" in captured.out
+    assert "stderr: " in captured.out
+    assert "stdout: " in captured.out
     assert "Verdict: RED" in captured.out
 
 
@@ -758,3 +807,308 @@ def test_cli_probe_stream_parser_overrides():
     assert args.index == 1
     assert args.title == 3
     assert args.timeout == 30.0
+
+
+# --------------------------------------------------------------------------
+# probe.5: Eric's diagnostic outcome classes (2026-10-02 19:49)
+# --------------------------------------------------------------------------
+
+def test_classify_invalid_command_signature():
+    """'Invalid command: stream' means the executable rejects the
+    command itself: rearranging arguments will not help."""
+    assert streamsource.classify_attempt_failure(
+        "", "Invalid command: stream",
+        streamsource.PROCESS_EXITED) == streamsource.OUTCOME_INVALID_COMMAND
+    assert streamsource.classify_attempt_failure(
+        "Unknown command: stream", "",
+        streamsource.PROCESS_EXITED) == streamsource.OUTCOME_INVALID_COMMAND
+
+
+def test_classify_deprecated_option_signature():
+    """'Deprecated option ignored' alone does not establish server
+    support."""
+    assert streamsource.classify_attempt_failure(
+        "", "Deprecated option ignored: --upnp",
+        streamsource.PROCESS_EXITED) == streamsource.OUTCOME_DEPRECATED_OPTION
+    assert streamsource.classify_attempt_failure(
+        "option --robot is obsolete", "",
+        streamsource.PROCESS_EXITED) == streamsource.OUTCOME_DEPRECATED_OPTION
+
+
+def test_classify_disc_source_signature():
+    """Disc-open/drive/source phrasings - including the typed
+    DiscOpenError message - map to the disc-source class."""
+    for sig in ("MSG:5010,0,0,\"Failed to open disc\"",
+                "Error: failed to open the disc",
+                "unable to open source",
+                "no disc in drive",
+                "drive not found"):
+        assert streamsource.classify_attempt_failure(
+            "", sig,
+            streamsource.PROCESS_EXITED) == streamsource.OUTCOME_DISC_SOURCE
+
+
+def test_classify_exit_when_no_signature_matches():
+    """A self-exit with no recognized signature is the bare 'exit'
+    class - exit -2 alone does not identify the cause."""
+    assert streamsource.classify_attempt_failure(
+        "DRV:0,2,999,12", "",
+        streamsource.PROCESS_EXITED) == streamsource.OUTCOME_EXIT
+    assert streamsource.classify_attempt_failure(
+        "", "",
+        streamsource.PROCESS_EXITED) == streamsource.OUTCOME_EXIT
+
+
+def test_classify_timeout_when_we_terminated_it():
+    """A process WE killed after the readiness ceiling is 'timeout' -
+    fundamentally different from a self-exit - even if the drained
+    output carries a signature."""
+    assert streamsource.classify_attempt_failure(
+        "", "", streamsource.PROCESS_TIMEOUT) == streamsource.OUTCOME_TIMEOUT
+    # The disposition wins over any signature text.
+    assert streamsource.classify_attempt_failure(
+        "", "Error: failed to open disc",
+        streamsource.PROCESS_TIMEOUT) == streamsource.OUTCOME_TIMEOUT
+
+
+def test_classify_alive_unverified_when_still_running():
+    """Still running at give-up: alive-unverified, disposition wins."""
+    assert streamsource.classify_attempt_failure(
+        "", "", streamsource.PROCESS_ALIVE) == \
+        streamsource.OUTCOME_ALIVE_UNVERIFIED
+    assert streamsource.classify_attempt_failure(
+        "Invalid command: stream", "Invalid command: stream",
+        streamsource.PROCESS_ALIVE) == \
+        streamsource.OUTCOME_ALIVE_UNVERIFIED
+
+
+def test_all_six_outcome_constants_and_hints():
+    """The six classes exist as constants, each with an inline hint
+    (Eric's one-line reading), and dispositions are distinct from
+    classes."""
+    classes = {
+        streamsource.OUTCOME_INVALID_COMMAND,
+        streamsource.OUTCOME_DEPRECATED_OPTION,
+        streamsource.OUTCOME_DISC_SOURCE,
+        streamsource.OUTCOME_EXIT,
+        streamsource.OUTCOME_TIMEOUT,
+        streamsource.OUTCOME_ALIVE_UNVERIFIED,
+    }
+    assert len(classes) == 6
+    assert set(streamsource.OUTCOME_HINTS) == classes
+    for klass in classes:
+        assert streamsource.OUTCOME_HINTS[klass].strip()
+    dispositions = {streamsource.PROCESS_EXITED,
+                    streamsource.PROCESS_TIMEOUT,
+                    streamsource.PROCESS_ALIVE}
+    assert len(dispositions) == 3
+    # Deliberate vocabulary overlap, not a bug: the timeout outcome IS
+    # the app-terminated disposition - one word, two namespaces (the
+    # other two outcome classes rename their disposition).
+    assert streamsource.PROCESS_TIMEOUT == streamsource.OUTCOME_TIMEOUT
+    assert streamsource.PROCESS_EXITED != streamsource.OUTCOME_EXIT
+    assert streamsource.PROCESS_ALIVE != streamsource.OUTCOME_ALIVE_UNVERIFIED
+
+
+def test_makemkv_version_stamp_extraction():
+    """The MSG:1005 'MakeMKV vN.N started' line in the drained stdout
+    yields the exact executable version; no stamp -> ''."""
+    assert streamsource.makemkv_version(
+        'MSG:1005,0,1,"MakeMKV v1.17.8 win64 started"') == "1.17.8"
+    assert streamsource.makemkv_version(
+        "MakeMKV v1.17.8 win64 started") == "1.17.8"
+    assert streamsource.makemkv_version("DRV:0,2,999,12") == ""
+    assert streamsource.makemkv_version("") == ""
+
+
+def test_attempt_records_carry_disposition_and_classification(monkeypatch):
+    """start_stream_server stamps every recorded attempt with the
+    disposition (exited itself vs app-terminated) and Eric's outcome
+    class derived at record time."""
+    _ready_seams(monkeypatch)
+
+    def runner(binary, args):
+        return _FakeProc(
+            rc=4294967294,
+            lines=['MSG:1005,0,1,"MakeMKV v1.17.6 win64 started"'],
+            stderr_lines=["Error: failed to open disc"])
+
+    with pytest.raises(StreamServerError) as exc:
+        streamsource.start_stream_server(0, runner=runner)
+    records = exc.value.attempts
+    assert [r.name for r in records] == ["A", "B", "C", "D"]
+    for r in records:
+        assert r.disposition == streamsource.PROCESS_EXITED
+        assert r.classification == streamsource.OUTCOME_DISC_SOURCE
+        # Version stamp rides in the drained stdout evidence.
+        assert streamsource.makemkv_version(r.stdout_tail) == "1.17.6"
+
+
+def test_attempt_full_tails_not_400_char_excerpts(monkeypatch):
+    """probe.5: attempt tails are the WHOLE bounded buffers (the
+    records already keep ~2000 chars), never re-excerpted to 400."""
+    _ready_seams(monkeypatch)
+    long_line = "x" * 600
+
+    def runner(binary, args):
+        return _FakeProc(
+            rc=-2, lines=[long_line], stderr_lines=[long_line])
+
+    with pytest.raises(StreamServerError) as exc:
+        streamsource.start_stream_server(0, runner=runner)
+    for r in exc.value.attempts:
+        assert len(r.stdout_tail) >= len(long_line)
+        assert len(r.stderr_tail) >= len(long_line)
+    # ATTEMPT_TAIL_CHARS now equals the full excerpt budget.
+    assert streamsource.ATTEMPT_TAIL_CHARS == streamsource.TAIL_EXCERPT_CHARS
+
+
+def test_probe_title_urls_export():
+    """probe_title_urls enumerates several title URLs at once - the
+    fast-mode pipeline's enumeration seam."""
+    server = StreamServer(
+        proc=_FakeProc(), port=51000, base_url="http://127.0.0.1:51000",
+        disc_index=0)
+    assert streamsource.probe_title_urls(server, [0, 1, 2]) == [
+        "http://127.0.0.1:51000/title0.ts",
+        "http://127.0.0.1:51000/title1.ts",
+        "http://127.0.0.1:51000/title2.ts",
+    ]
+    assert streamsource.probe_title_urls(server, []) == []
+
+
+# --------------------------------------------------------------------------
+# probe.5: video-proves-success gate (fake ffprobe/ffmpeg seams only)
+# --------------------------------------------------------------------------
+
+def test_prove_video_flows_runs_short_ffmpeg_encode(monkeypatch):
+    """The gate encodes 5 s off the URL through the _run_ffmpeg_read
+    seam; rc 0 proves decodable video."""
+    seen = {}
+
+    def fake_read(url, timeout, binary="ffmpeg"):
+        seen["url"], seen["timeout"] = url, timeout
+        return 0, ""
+
+    monkeypatch.setattr(cli, "_run_ffmpeg_read", fake_read)
+    proved, detail = cli._prove_video_flows(
+        "http://127.0.0.1:51000/title0.ts", 60.0)
+    assert proved is True
+    assert detail == ""
+    assert seen["url"] == "http://127.0.0.1:51000/title0.ts"
+    assert seen["timeout"] == 60.0
+
+
+def test_prove_video_flows_failure_carries_excerpt(monkeypatch):
+    monkeypatch.setattr(cli, "_run_ffmpeg_read",
+                       lambda url, timeout, binary="ffmpeg": (1, "boom"))
+    proved, detail = cli._prove_video_flows("http://x", 5.0)
+    assert proved is False
+    assert "boom" in detail
+
+
+def test_prove_video_flows_never_raises(monkeypatch):
+    def boom(url, timeout, binary="ffmpeg"):
+        raise OSError("gone")
+
+    monkeypatch.setattr(cli, "_run_ffmpeg_read", boom)
+    proved, detail = cli._prove_video_flows("http://x", 5.0)
+    assert proved is False
+    assert "not runnable" in detail
+
+
+def test_cli_green_requires_video_proof(monkeypatch, capsys):
+    """Survival is not a verdict: ffprobe sees video+audio+subs, but
+    the ffmpeg encode fails to prove decodable video -> RED."""
+    server = _FakeServer()
+    rc, out, err = _run_cli(
+        monkeypatch, capsys, server,
+        lambda url, timeout, ffprobe_bin="ffprobe", ffmpeg_bin="ffmpeg": _green_probe(),
+        proof=(False, "ffmpeg: exit code 1"))
+    assert rc == 1
+    assert "Video proof: FAILED" in out
+    assert "alive-unverified" in out
+    assert "survival is not a verdict" in out
+    assert "Verdict: RED" in out
+    assert server.stop_calls == 1
+
+
+def test_cli_green_notes_video_proof_and_winning_variant(monkeypatch, capsys):
+    """The GREEN path notes the passed video proof and which variant
+    won (here B, with A's failure block printed first)."""
+    server = _FakeServer()
+    server.variant = "B"
+    server.attempts = [StreamAttempt(
+        "A", ["-r", "stream", "--cache=128", "--bindip=127.0.0.1",
+               "--bindport=51000", "--messages=-stdout"],
+        -2, "DRV:0,2,999,12", "Fatal: invalid arguments")]
+    rc, out, err = _run_cli(monkeypatch, capsys, server, lambda url, timeout, ffprobe_bin="ffprobe", ffmpeg_bin="ffmpeg": _green_probe())
+    assert rc == 0
+    assert "Stream server ready via variant B" in out
+    assert "Attempt A:" in out
+    assert "Video proof: decodable video flows" in out
+    assert "Verdict: GREEN" in out
+
+
+def test_cli_red_when_no_video_stream_seen(monkeypatch, capsys):
+    """ffprobe sees no video stream: RED before the proof encode is
+    even relevant."""
+    server = _FakeServer()
+    rc, out, err = _run_cli(
+        monkeypatch, capsys, server,
+        lambda url, timeout, ffprobe_bin="ffprobe", ffmpeg_bin="ffmpeg": cli._UrlProbe(
+            True, "ffmpeg null read", "", None, [("audio", "aac")]))
+    assert rc == 1
+    assert "no video stream" in out
+    assert "Verdict: RED" in out
+
+
+def test_cli_red_timeout_attempt_prints_full_evidence(monkeypatch, capsys):
+    """A readiness timeout prints its own single-attempt block with
+    the timeout disposition - WE terminated a live child."""
+    record = StreamAttempt(
+        "A", ["-r", "stream", "--cache=128", "--bindip=127.0.0.1",
+               "--bindport=51000", "--messages=-stdout"],
+        None, 'MSG:1005,0,1,"MakeMKV v1.17.8 win64 started"', "",
+        disposition=streamsource.PROCESS_TIMEOUT,
+        classification=streamsource.OUTCOME_TIMEOUT)
+
+    def broken_start(index):
+        raise StreamServerError(
+            "stream server at http://127.0.0.1:51000 was not ready "
+            "within 30s", timeout_attempt=record)
+
+    monkeypatch.setattr(cli, "scan_disc", lambda index: _cli_disc())
+    monkeypatch.setattr(streamsource, "start_stream_server", broken_start)
+    args = cli.build_parser().parse_args(["probe-stream", "0"])
+    rc = args.func(args)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "Attempt A:" in captured.out
+    assert "[timeout]" in captured.out
+    assert "app-terminated" in captured.out
+    assert "makemkv version: 1.17.8" in captured.out
+    assert "Verdict: RED" in captured.out
+
+
+def test_cli_operational_error_prints_stream_attempt_evidence(monkeypatch, capsys):
+    """A typed single-attempt failure (beta key) prints its evidence
+    block on the operational exit-2 path too."""
+    record = StreamAttempt(
+        "A", ["-r", "stream", "--cache=128"], 1,
+        "MSG:5055,0,0,\"Evaluation period has expired\"", "")
+
+    def broken_start(index):
+        exc = BetaKeyExpiredError("MakeMKV's evaluation period has expired.")
+        exc.stream_attempt = record
+        raise exc
+
+    monkeypatch.setattr(cli, "scan_disc", lambda index: _cli_disc())
+    monkeypatch.setattr(streamsource, "start_stream_server", broken_start)
+    args = cli.build_parser().parse_args(["probe-stream", "0"])
+    rc = args.func(args)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "Attempt A:" in captured.out
+    assert "evaluation period" in captured.out.lower()
+    assert "error:" in captured.err
