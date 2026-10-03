@@ -100,16 +100,25 @@ def test_makemkv_runner_uses_discovered_path(tmp_path, monkeypatch):
     assert captured["cmd"][0] == str(fake_con)
 
 def test_bundled_tools_beat_path_when_frozen(tmp_path, monkeypatch):
-    """Packaged app: the bundled ffmpeg/SubtitleEdit win over any random
-    system copy on PATH (regression: NVENC probe hit a PATH ffmpeg that
-    lacked hevc_nvenc)."""
+    """Packaged app: bundled tools win over random PATH copies."""
     import shutil as _shutil
     import sys
     from bluray_to_mp4 import binaries
+    from bluray_to_mp4.upscale import resolve_realesrgan_models
 
     tools = tmp_path / "tools"
     tools.mkdir()
     (tools / "ffmpeg.exe").write_text("fake bundled")
+    (tools / "realesrgan-ncnn-vulkan.exe").write_text("fake bundled rg")
+    models = tools / "models"
+    models.mkdir()
+    for name in (
+        "realesrgan-x4plus.param",
+        "realesrgan-x4plus.bin",
+        "realesr-animevideov3-x2.param",
+        "realesr-animevideov3-x2.bin",
+    ):
+        (models / name).write_text("fake model")
     se_dir = tools / "SubtitleEdit"
     se_dir.mkdir()
     (se_dir / "SubtitleEdit.exe").write_text("fake bundled se")
@@ -134,6 +143,11 @@ def test_bundled_tools_beat_path_when_frozen(tmp_path, monkeypatch):
         exe_names=["seconv.exe", "seconv", "SubtitleEdit.exe", "SubtitleEdit"])
     assert se is not None and "SubtitleEdit" in se
     assert se.endswith("seconv.exe")
+
+    realesrgan = binaries.resolve_realesrgan_ncnn()
+    assert realesrgan is not None
+    assert "tools" in realesrgan and "sys" not in realesrgan
+    assert resolve_realesrgan_models(realesrgan) == str(models)
 
 
 def test_nvenc_check_distinguishes_build_vs_driver(monkeypatch, tmp_path):

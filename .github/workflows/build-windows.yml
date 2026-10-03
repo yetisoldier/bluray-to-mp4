@@ -44,6 +44,33 @@ jobs:
             Write-Error "SubtitleEdit.exe missing after extract"; exit 1
           }
 
+      - name: Download Real-ESRGAN ncnn/Vulkan (bundled DVD AI upscale)
+        shell: pwsh
+        run: |
+          $rgUrl = "https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases/download/v0.2.0/realesrgan-ncnn-vulkan-v0.2.0-windows.zip"
+          $rgZip = "$env:TEMP\realesrgan.zip"
+          Invoke-WebRequest -Uri $rgUrl -OutFile $rgZip -TimeoutSec 600
+          Expand-Archive -Path $rgZip -DestinationPath "$env:TEMP\realesrgan-extract" -Force
+          $rgDir = Get-ChildItem "$env:TEMP\realesrgan-extract" -Recurse -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName "realesrgan-ncnn-vulkan.exe") } |
+            Select-Object -First 1
+          if (-not $rgDir) { Write-Error "Real-ESRGAN executable missing after extract"; exit 1 }
+          Copy-Item "$($rgDir.FullName)\*" "packaging\tools\" -Recurse -Force
+          if (-not (Test-Path "packaging\tools\realesrgan-ncnn-vulkan.exe")) {
+            Write-Error "Real-ESRGAN executable was not staged"; exit 1
+          }
+          foreach ($model in @(
+            "models\realesrgan-x4plus.param",
+            "models\realesrgan-x4plus.bin",
+            "models\realesr-animevideov3-x2.param",
+            "models\realesr-animevideov3-x2.bin"
+          )) {
+            if (-not (Test-Path "packaging\tools\$model")) {
+              Write-Error "Real-ESRGAN model missing: $model"; exit 1
+            }
+          }
+          Write-Host "Real-ESRGAN bundle staged with models"
+
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip
@@ -70,6 +97,26 @@ jobs:
 
       - name: Build exe
         run: pyinstaller bluray_to_mp4.spec --noconfirm
+
+      - name: Verify bundled Real-ESRGAN payload
+        shell: pwsh
+        run: |
+          $tools = "dist\bluray-to-mp4\_internal\tools"
+          if (-not (Test-Path $tools)) { $tools = "dist\bluray-to-mp4\tools" }
+          if (-not (Test-Path "$tools\realesrgan-ncnn-vulkan.exe")) {
+            Write-Error "Real-ESRGAN executable missing from PyInstaller output"; exit 1
+          }
+          foreach ($model in @(
+            "models\realesrgan-x4plus.param",
+            "models\realesrgan-x4plus.bin",
+            "models\realesr-animevideov3-x2.param",
+            "models\realesr-animevideov3-x2.bin"
+          )) {
+            if (-not (Test-Path "$tools\$model")) {
+              Write-Error "Real-ESRGAN model missing from PyInstaller output: $model"; exit 1
+            }
+          }
+          Write-Host "Bundled Real-ESRGAN payload verified in $tools"
 
       - name: Sign the exe (YetiWurks LLC)
         shell: pwsh
