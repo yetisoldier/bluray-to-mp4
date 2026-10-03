@@ -26,11 +26,86 @@ __all__ = [
     "JobRecord",
     "MonitorState",
     "MonitorServer",
+    "classify_snapshot",
     "state",
     "start_server",
 ]
 
 _history_lock = threading.Lock()
+DEFAULT_STALE_SECONDS = 300.0
+
+
+def _now() -> float:
+    return time.time()
+
+
+def classify_snapshot(snapshot: dict, *, now: float | None = None,
+                      stale_seconds: float = DEFAULT_STALE_SECONDS) -> dict:
+    """Return remote-watcher health for a monitor snapshot."""
+    now = _now() if now is None else now
+    updated_at = snapshot.get("updated_at")
+    progress_updated_at = snapshot.get("progress_updated_at") or updated_at
+    stage_started_at = snapshot.get("stage_started_at") or updated_at
+
+    def age(value) -> float | None:
+        try:
+            return max(0.0, now - float(value))
+        except (TypeError, ValueError):
+            return None
+
+    update_age = age(updated_at)
+    progress_age = age(progress_updated_at)
+    stage_age = age(stage_started_at)
+    busy = bool(snapshot.get("busy"))
+    progress = float(snapshot.get("progress") or 0.0)
+    jobs_done = int(snapshot.get("jobs_done") or 0)
+    jobs_total = int(snapshot.get("jobs_total") or 0)
+    stage = snapshot.get("stage") or "unknown"
+
+    status = "idle"
+    reasons: list[str] = []
+    if snapshot.get("last_error"):
+        status = "error"
+        reasons.append(str(snapshot["last_error"]))
+    elif busy:
+        status = "running"
+        if update_age is not None and update_age >= stale_seconds:
+            status = "stuck"
+            reasons.append(f"no monitor update for {int(update_age)}s")
+        if progress_age is not None and progress_age >= stale_seconds:
+            if progress >= 0.999:
+                status = "stuck"
+                reasons.append(
+                    f"progress has been at {progress * 100:.1f}% for {int(progress_age)}s"
+                )
+            elif (
+                progress <= 0.001
+                and stage_age is not None
+                and stage_age >= stale_seconds
+            ):
+                status = "stalled"
+                reasons.append(
+                    f"stage {stage!r} has no progress after {int(stage_age)}s"
+                )
+        if (
+            jobs_total
+            and jobs_done >= jobs_total
+            and update_age is not None
+            and update_age >= stale_seconds
+        ):
+            status = "stuck"
+            reasons.append("all jobs appear done but monitor is still busy")
+
+    return {
+        "status": status,
+        "ok": status in ("idle", "running"),
+        "stale_seconds": stale_seconds,
+        "update_age_seconds": update_age,
+        "progress_age_seconds": progress_age,
+        "stage_age_seconds": stage_age,
+        "reasons": reasons,
+    }
+
 
 
 @dataclass
@@ -77,6 +152,8 @@ class MonitorState:
         self.jobs_done = 0
         self.progress = 0.0  # 0..1 for the active stage
         self.eta_seconds: float | None = None
+        self.stage_started_at: float | None = None
+        self.progress_updated_at: float | None = None
         self.disc_name: str | None = None
         self.disc_type: str | None = None
         self.series_mode: bool | None = None
@@ -101,26 +178,35 @@ class MonitorState:
             self.stage = "starting"
             self.progress = 0.0
             self.eta_seconds = None
+            now = time.time()
+            self.stage_started_at = now
+            self.progress_updated_at = now
             self.warnings = []
-            self.started_at = time.time()
-            self.updated_at = time.time()
+            self.started_at = now
+            self.updated_at = now
             self.last_error = None
 
     def update(self, *, stage: str | None = None, current_job: str | None = None,
                progress: float | None = None, eta_seconds: float | None = None,
                warning: str | None = None) -> None:
         with self._lock:
+            now = time.time()
             if stage is not None:
+                if stage != self.stage:
+                    self.stage_started_at = now
                 self.stage = stage
             if current_job is not None:
                 self.current_job = current_job
             if progress is not None:
-                self.progress = max(0.0, min(progress, 1.0))
+                new_progress = max(0.0, min(progress, 1.0))
+                if abs(new_progress - self.progress) >= 0.0001:
+                    self.progress_updated_at = now
+                self.progress = new_progress
             if eta_seconds is not None:
                 self.eta_seconds = eta_seconds
             if warning is not None:
                 self.warnings.append(warning)
-            self.updated_at = time.time()
+            self.updated_at = now
 
     def job_done(self, record: JobRecord) -> None:
         with self._lock:
@@ -135,7 +221,9 @@ class MonitorState:
             self.busy = False
             self.stage = "error"
             self.last_error = message
-            self.updated_at = time.time()
+            now = time.time()
+            self.stage_started_at = now
+            self.updated_at = now
 
     def finish(self) -> None:
         with self._lock:
@@ -143,11 +231,14 @@ class MonitorState:
             self.stage = "idle"
             self.progress = 0.0
             self.eta_seconds = None
-            self.updated_at = time.time()
+            now = time.time()
+            self.stage_started_at = now
+            self.progress_updated_at = now
+            self.updated_at = now
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {
+            payload = {
                 "busy": self.busy,
                 "disc": self.disc_name,
                 "disc_type": self.disc_type,
@@ -159,11 +250,15 @@ class MonitorState:
                 "jobs_total": self.jobs_total,
                 "progress": round(self.progress, 4),
                 "eta_seconds": self.eta_seconds,
+                "stage_started_at": self.stage_started_at,
+                "progress_updated_at": self.progress_updated_at,
                 "warnings": list(self.warnings),
                 "started_at": self.started_at,
                 "updated_at": self.updated_at,
                 "last_error": self.last_error,
             }
+            payload["health"] = classify_snapshot(payload)
+            return payload
 
     def history(self, limit: int = 50) -> list[dict]:
         with self._lock:

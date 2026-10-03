@@ -38,6 +38,7 @@ hiddenimports = [
     "bluray_to_mp4.subtitles",
     "bluray_to_mp4.upscale",
     "bluray_to_mp4.monitor",
+    "bluray_to_mp4.monitor_client",
     "bluray_to_mp4.deps",
     "bluray_to_mp4.config",
     "bluray_to_mp4.ui",

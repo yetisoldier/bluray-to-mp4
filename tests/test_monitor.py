@@ -138,3 +138,80 @@ def test_job_record_carries_target_gbph(server):
     code, history = _get(base + "/history?token=***", token="s3cret")
     assert code == 200
     assert history["jobs"][0]["target_gb_per_hour"] == 0.0
+
+
+def test_snapshot_reports_stage_and_progress_ages():
+    state = MonitorState()
+    state.begin("Disc", "dvd", series_mode=False, encoder="nvenc", jobs_total=1)
+    state.update(stage="Upscaling movie ...", current_job="Movie", progress=1.0)
+    snap = state.snapshot()
+    assert snap["stage_started_at"] is not None
+    assert snap["progress_updated_at"] is not None
+    assert snap["health"]["status"] == "running"
+
+
+def test_classifier_marks_stale_busy_100_percent_as_stuck():
+    from bluray_to_mp4.monitor import classify_snapshot
+
+    snap = {
+        "busy": True,
+        "stage": "Upscaling movie ...",
+        "current_job": "Movie",
+        "jobs_done": 0,
+        "jobs_total": 1,
+        "progress": 1.0,
+        "updated_at": 100.0,
+        "progress_updated_at": 100.0,
+        "stage_started_at": 90.0,
+        "last_error": None,
+    }
+    health = classify_snapshot(snap, now=500.0, stale_seconds=300.0)
+    assert health["status"] == "stuck"
+    assert not health["ok"]
+    assert any("100.0%" in reason for reason in health["reasons"])
+
+
+def test_classifier_marks_no_initial_progress_as_stalled():
+    from bluray_to_mp4.monitor import classify_snapshot
+
+    snap = {
+        "busy": True,
+        "stage": "Ripping title 0 ...",
+        "jobs_done": 0,
+        "jobs_total": 1,
+        "progress": 0.0,
+        "updated_at": 500.0,
+        "progress_updated_at": 100.0,
+        "stage_started_at": 100.0,
+        "last_error": None,
+    }
+    health = classify_snapshot(snap, now=500.0, stale_seconds=300.0)
+    assert health["status"] == "stalled"
+    assert any("no progress" in reason for reason in health["reasons"])
+
+
+def test_lan_watcher_uses_monitor_health(server):
+    from bluray_to_mp4.monitor_client import check_monitor, format_watch_result
+
+    _, base, state = server
+    state.begin("Disc", "dvd", series_mode=False, encoder="nvenc", jobs_total=1)
+    state.update(stage="Upscaling movie ...", current_job="Movie", progress=1.0)
+    with state._lock:
+        state.updated_at = 100.0
+        state.progress_updated_at = 100.0
+        state.stage_started_at = 90.0
+
+    result = check_monitor(base, token="s3cret", stale_seconds=300.0, now=500.0)
+    assert result.reachable
+    assert result.status == "stuck"
+    assert not result.ok
+    assert "STUCK: Movie" in format_watch_result(result)
+
+
+def test_lan_watcher_reports_unreachable():
+    from bluray_to_mp4.monitor_client import check_monitor, format_watch_result
+
+    result = check_monitor("http://127.0.0.1:9", timeout=0.1)
+    assert not result.reachable
+    assert result.status == "unreachable"
+    assert format_watch_result(result).startswith("UNREACHABLE:")

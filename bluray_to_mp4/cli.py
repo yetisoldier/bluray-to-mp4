@@ -1,4 +1,4 @@
-"""Command-line interface: drives | scan | run | probe-stream."""
+"""Command-line interface: drives | scan | run | probe-stream | watch-monitor."""
 
 from __future__ import annotations
 
@@ -199,6 +199,21 @@ def cmd_scan(args) -> int:
         for w in sel.warnings:
             print(f"    ! {w}")
     return 0
+
+
+def cmd_watch_monitor(args) -> int:
+    from .config import MONITOR_TOKEN_DEFAULT
+    from .monitor_client import check_monitor, format_watch_result
+
+    token = args.token if args.token is not None else MONITOR_TOKEN_DEFAULT
+    result = check_monitor(
+        args.url,
+        token=token,
+        timeout=args.timeout,
+        stale_seconds=args.stale_seconds,
+    )
+    print(format_watch_result(result, as_json=args.json))
+    return 0 if result.ok else 1
 
 
 def cmd_run(args) -> int:
@@ -527,6 +542,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_probe.add_argument("--timeout", type=float, default=60.0,
                          help="per-probe timeout in seconds (default: 60)")
     p_probe.set_defaults(func=cmd_probe_stream)
+
+    p_watch = sub.add_parser(
+        "watch-monitor",
+        help="poll the read-only LAN monitor once and classify stuck/unreachable runs",
+    )
+    p_watch.add_argument(
+        "--url",
+        default="http://127.0.0.1:8765",
+        help="monitor base URL, for example http://192.168.1.53:8765",
+    )
+    p_watch.add_argument(
+        "--token",
+        default=None,
+        help="monitor bearer token; defaults to the packaged private-repo token",
+    )
+    p_watch.add_argument("--timeout", type=float, default=10.0)
+    p_watch.add_argument("--stale-seconds", type=float, default=300.0)
+    p_watch.add_argument("--json", action="store_true", help="print structured JSON")
+    p_watch.set_defaults(func=cmd_watch_monitor)
     return parser
 
 
