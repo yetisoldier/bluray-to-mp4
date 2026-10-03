@@ -59,6 +59,14 @@ jobs:
           if (-not (Test-Path "packaging\tools\realesrgan-ncnn-vulkan.exe")) {
             Write-Error "Real-ESRGAN executable was not staged"; exit 1
           }
+          $modelsTarget = "$env:TEMP\realesrgan-model-wheel"
+          python -m pip install --target $modelsTarget realesrgan-ncnn-py==2.0.0
+          $modelsDir = Get-ChildItem $modelsTarget -Recurse -Directory |
+            Where-Object { $_.FullName -like "*realesrgan_ncnn_py*\models" } |
+            Select-Object -First 1
+          if (-not $modelsDir) { Write-Error "Real-ESRGAN model wheel did not contain models"; exit 1 }
+          New-Item -ItemType Directory -Force -Path "packaging\tools\models" | Out-Null
+          Copy-Item "$($modelsDir.FullName)\*" "packaging\tools\models\" -Recurse -Force
           foreach ($model in @(
             "models\realesrgan-x4plus.param",
             "models\realesrgan-x4plus.bin",
