@@ -2,6 +2,31 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.21] - 2026-10-03
+
+### Added
+
+- **Reliable LAN monitor watcher.** Added `bluray-to-mp4 watch-monitor`, a
+  stdlib-only watcher that reports `OK`, `STUCK`, `STALLED`, or `UNREACHABLE`
+  with evidence from the remote monitor endpoint. This replaces the flaky
+  JavaScript `fetch`-based checks used during validation.
+
+### Changed
+
+- `/status` and `/health` now include stage start time, last progress-change
+  time, and a structured health verdict so stale `100%` states are detectable
+  instead of looking healthy forever.
+
+### Fixed
+
+- `python -m bluray_to_mp4 watch-monitor ...` now routes through the CLI entry
+  point instead of trying to launch the desktop UI first.
+
+### Validated
+
+- Full local test suite: 201 passed, 1 skipped.
+- Windows packaged exe smoke test passed in GitHub Actions.
+
 ## [0.2.20] - 2026-10-03
 
 ### Fixed
