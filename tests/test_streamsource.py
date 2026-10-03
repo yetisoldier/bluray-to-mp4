@@ -1,9 +1,14 @@
-"""Stream-server lifecycle + probe-stream CLI tests (v0.2.17 step 1).
+"""Stream-server lifecycle + probe-stream CLI tests (v0.2.17 steps 1+4).
 
 All offline: `runner` fakes the makemkvcon spawn, `_port_free`/`_http_ok`
 are monkeypatched at the socket/HTTP seams, and the CLI verdicts stub
 the server + URL probe. No test needs makemkvcon, ffmpeg, a drive, or
 a real socket.
+
+probe.4: start_stream_server walks an ordered argument-variant matrix
+(A/B/C/D); a variant that exits before ready is recorded as a
+StreamAttempt and the next shape is tried, and stderr is drained into
+its own ring buffer (probe.3 discarded it with DEVNULL).
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from bluray_to_mp4.makemkv import (
     scan_disc,
 )
 from bluray_to_mp4.streamsource import (
+    StreamAttempt,
     StreamServer,
     StreamServerError,
     probe_title_url,
@@ -37,8 +43,15 @@ from tests.fixtures import MOVIE_DISC_OUTPUT, fake_runner
 class _FakeProc:
     """Popen stand-in: running until terminate()/kill(), or preset rc."""
 
-    def __init__(self, lines=(), *, rc=None, ignore_terminate=False):
+    def __init__(self, lines=(), *, rc=None, ignore_terminate=False,
+                 stderr=None, stderr_lines=()):
         self.stdout = io.StringIO("".join(l + "\n" for l in lines))
+        # probe.4: None = no stderr pipe (the DEVNULL fallback shape);
+        # stderr_lines builds a fake stderr pipe for the drain tests.
+        self.stderr = (
+            io.StringIO("".join(l + "\n" for l in stderr_lines))
+            if stderr is None and stderr_lines else stderr
+        )
         self.rc = rc                       # None = still running
         self.ignore_terminate = ignore_terminate
         self.terminated = 0
@@ -73,7 +86,10 @@ class _FakeServer:
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.disc_index = 0
+        self.variant = "A"               # probe.4: which argv shape won
+        self.attempts = []               # probe.4: variants that died first
         self.stdout_tail = deque()
+        self.stderr_tail = deque()       # probe.4: captured stderr tail
         self.stop_calls = 0
         self.stopped = False
 
@@ -95,12 +111,15 @@ def _live_before():
 
 
 # --------------------------------------------------------------------------
-# start_stream_server: argument shape per usage.txt (design §1.3)
+# start_stream_server: argument shape per usage.txt (design §1.3, probe.4 A)
 # --------------------------------------------------------------------------
 
 def test_start_args_match_usage_txt_stream_form(monkeypatch):
-    """Robot mode + stream command + loopback bind + --cache=128 +
-    -stdout messages + disc parameter, options before the command."""
+    """Variant A (attempt 1 of the probe.4 matrix) is the pinned argv
+    shape: robot mode + stream command + --cache=128 + loopback bind
+    + -stdout messages, options before the command, NO disc parameter.
+    Pinned so a silent flag change (e.g. --upnp sneaking in) fails
+    loudly instead of shipping unnoticed."""
     _ready_seams(monkeypatch)
     calls = []
 
@@ -118,8 +137,127 @@ def test_start_args_match_usage_txt_stream_form(monkeypatch):
         assert server.port == 51000
         assert server.base_url == "http://127.0.0.1:51000"
         assert server.disc_index == 0
+        assert server.variant == "A"     # won on the first matrix try
+        assert server.attempts == []     # nothing died before it
     finally:
         server.stop()
+
+
+# --------------------------------------------------------------------------
+# probe.4: argument-variant matrix (A dies -> B -> C -> D)
+# --------------------------------------------------------------------------
+
+def test_matrix_all_die_carries_four_attempt_records(monkeypatch):
+    """probe.4: A dies -> B tried -> C -> D -> all die: the raised
+    StreamServerError carries 4 StreamAttempt records (name, argv,
+    exit code, drained tails), and every dead child was reaped."""
+    _ready_seams(monkeypatch)
+    procs = []
+
+    def runner(binary, args):
+        proc = _FakeProc(
+            rc=4294967294,  # Eric's probe.3 hardware exit code (= -2)
+            lines=['MSG:1005,0,1,"MakeMKV started","%1 started","MakeMKV"'],
+            stderr_lines=["Error: failed to start the stream server"],
+        )
+        procs.append(proc)
+        return proc
+
+    before = _live_before()
+    with pytest.raises(StreamServerError) as exc:
+        streamsource.start_stream_server(0, runner=runner)
+    records = exc.value.attempts
+    assert [r.name for r in records] == ["A", "B", "C", "D"]
+    assert len(procs) == 4                    # every variant spawned a child
+    assert all(r.exit_code == 4294967294 for r in records)
+    # The argv shapes are pinned: A robot+bind, B official example,
+    # C bare defaults, D the original probe.1 robot+disc form.
+    assert records[0].args == [
+        "-r", "stream", "--cache=128", "--bindip=127.0.0.1",
+        "--bindport=51000", "--messages=-stdout"]
+    assert records[1].args == [
+        "stream", "--upnp=1", "--cache=128", "--bindip=127.0.0.1",
+        "--bindport=51000", "--messages=-stdout"]
+    assert records[2].args == ["stream", "--messages=-stdout"]
+    assert records[3].args == [
+        "-r", "stream", "--cache=128", "--bindip=127.0.0.1",
+        "--bindport=51000", "--messages=-stdout", "disc:0"]
+    # Drained tails rode along on every record.
+    assert "MakeMKV started" in records[0].stdout_tail
+    assert records[0].stderr_tail == "Error: failed to start the stream server"
+    # Message summarizes the matrix; nothing leaked into the live list.
+    assert "A, B, C, D" in str(exc.value)
+    assert streamsource._LIVE_SERVERS == before
+
+
+def test_matrix_a_dies_b_ready_uses_variant_b(monkeypatch):
+    """probe.4: A exits before ready -> B answers HTTP 2xx -> the
+    server carries variant 'B' (and A's failure record), stays usable,
+    and B's child is reaped on stop."""
+    _ready_seams(monkeypatch)
+    calls = []
+    procs = []
+
+    def runner(binary, args):
+        calls.append(list(args))
+        # First spawn (A) is born dead; every later one stays running.
+        proc = _FakeProc(rc=-2 if not procs else None)
+        procs.append(proc)
+        return proc
+
+    server = streamsource.start_stream_server(0, runner=runner)
+    try:
+        assert server.variant == "B"
+        assert [r.name for r in server.attempts] == ["A"]
+        assert server.attempts[0].exit_code == -2
+        # The winning B spawn used the official example shape.
+        assert calls[1] == [
+            "stream", "--upnp=1", "--cache=128", "--bindip=127.0.0.1",
+            "--bindport=51000", "--messages=-stdout"]
+        # Usable as today: URL building works on the ready server.
+        assert probe_title_url(server, 7) == "http://127.0.0.1:51000/title7.ts"
+        assert procs[1].terminated == 0   # B's child lives while in use
+    finally:
+        server.stop()
+    assert procs[0].terminated == 0      # A died on its own: no terminate
+    assert procs[1].terminated == 1      # B reaped by stop(): no leak
+
+
+def test_matrix_typed_error_propagates_without_next_variant(monkeypatch):
+    """An argv shape cannot fix a beta key or a dead drive: the typed
+    error propagates immediately instead of burning the matrix."""
+    _ready_seams(monkeypatch)
+    calls = []
+
+    def runner(binary, args):
+        calls.append(list(args))
+        return _FakeProc(rc=1, lines=[
+            'MSG:5055,0,0,"Evaluation period has expired","expired"'])
+
+    with pytest.raises(BetaKeyExpiredError):
+        streamsource.start_stream_server(0, runner=runner)
+    assert len(calls) == 1              # variant A only: no B/C/D tries
+
+
+def test_matrix_live_process_timeout_propagates_without_retry(monkeypatch):
+    """A variant that stays ALIVE but never answers is a hang, not an
+    argv problem: the not-ready timeout propagates without spawning
+    the next shapes on top of it."""
+    _ready_seams(monkeypatch, http=lambda url, timeout=2.0: False)
+    monkeypatch.setattr(streamsource, "READY_TIMEOUT", 0.05)
+    calls = []
+
+    def runner(binary, args):
+        calls.append(list(args))
+        return _FakeProc()              # stays running, never answers
+
+    before = _live_before()
+    with pytest.raises(StreamServerError) as exc:
+        streamsource.start_stream_server(0, runner=runner)
+    assert "not ready" in str(exc.value)
+    assert len(calls) == 1
+    assert exc.value.attempts == []      # died-before-ready records only
+    assert streamsource._LIVE_SERVERS == before
 
 
 def test_start_binds_loopback_only_by_default(monkeypatch):
@@ -305,6 +443,50 @@ def test_stdout_tail_is_a_bounded_ring_buffer(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# probe.4: stderr capture (probe.3 discarded it with DEVNULL)
+# --------------------------------------------------------------------------
+
+def test_stderr_drain_fills_stderr_tail(monkeypatch):
+    """The second drain thread consumes the stderr pipe: the real
+    makemkvcon error line for an instant-exit failure may only exist
+    there (probe.3's report showed only DRV inventory lines)."""
+    _ready_seams(monkeypatch)
+    server = streamsource.start_stream_server(0, runner=lambda b, a: _FakeProc(
+        stderr_lines=["Error: failed to start the stream server"]))
+    try:
+        server._drain_err.join(timeout=1.0)
+        assert list(server.stderr_tail) == \
+            ["Error: failed to start the stream server"]
+    finally:
+        server.stop()
+
+
+def test_stderr_tail_bounded_to_char_budget(monkeypatch):
+    """The stderr ring keeps the NEWEST ~2000 chars: a chatty stderr
+    can never deadlock the child on a full pipe."""
+    _ready_seams(monkeypatch)
+    lines = [f"err {i} " + "x" * 50 for i in range(100)]
+    server = streamsource.start_stream_server(0, runner=lambda b, a: _FakeProc(
+        stderr_lines=lines))
+    try:
+        server._drain_err.join(timeout=1.0)
+        total = sum(len(l) for l in server.stderr_tail)
+        assert total <= streamsource.STDERR_TAIL_CHARS
+        assert list(server.stderr_tail)[-1] == lines[-1]  # newest kept
+    finally:
+        server.stop()
+
+
+def test_tail_excerpt_default_limit_is_2000_chars():
+    """probe.4: the excerpt default grew ~300 -> ~2000 chars so the
+    real error line cannot scroll past the embedded report context."""
+    tail = deque(["x" * 1000, "y" * 1000, "z" * 1000])
+    excerpt = streamsource._tail_excerpt(tail)
+    assert len(excerpt) == 2000
+    assert excerpt.startswith("y") and excerpt.endswith("z")
+
+
+# --------------------------------------------------------------------------
 # Title URL shape (the one function that knows it; probe verifies it live)
 # --------------------------------------------------------------------------
 
@@ -439,6 +621,74 @@ def test_cli_probe_stream_red_when_server_misbehaves(monkeypatch, capsys):
     assert rc == 1
     assert "Verdict: RED" in captured.out
     assert "error:" in captured.err
+
+
+def test_cli_probe_stream_red_prints_attempt_matrix_and_stderr(monkeypatch, capsys):
+    """probe.4: a total server failure prints the whole try matrix -
+    'Attempt A'..'Attempt D' argv summaries, exit codes, and the drained
+    stdout ('out:')/stderr ('err:') tails - before the RED verdict."""
+    records = [
+        StreamAttempt("A", [
+            "-r", "stream", "--cache=128", "--bindip=127.0.0.1",
+            "--bindport=51000", "--messages=-stdout"],
+            4294967294,
+            'DRV:0,2,999,12,"BD-RE ASUS BW-16D1HT"',
+            "Fatal: invalid arguments"),
+        StreamAttempt("B", [
+            "stream", "--upnp=1", "--cache=128", "--bindip=127.0.0.1",
+            "--bindport=51000", "--messages=-stdout"],
+            4294967294, "", "Fatal: invalid arguments"),
+        StreamAttempt("C", ["stream", "--messages=-stdout"],
+            4294967294, "", "Error: cannot open server port"),
+        StreamAttempt("D", [
+            "-r", "stream", "--cache=128", "--bindip=127.0.0.1",
+            "--bindport=51000", "--messages=-stdout", "disc:0"],
+            4294967294, "DRV:0,2,999,12", "Fatal: invalid arguments"),
+    ]
+
+    def broken_start(index):
+        raise StreamServerError(
+            "all 4 stream server argument variants (A, B, C, D) exited "
+            "before becoming ready", attempts=records)
+
+    monkeypatch.setattr(cli, "scan_disc", lambda index: _cli_disc())
+    monkeypatch.setattr(streamsource, "start_stream_server", broken_start)
+    args = cli.build_parser().parse_args(["probe-stream", "0"])
+    rc = args.func(args)
+    captured = capsys.readouterr()
+    assert rc == 1
+    # probe.4 build stamp identifies the report (probe.3 rule).
+    assert cli.PROBE_ID == "probe.4"
+    assert f"probe-stream {cli.PROBE_ID}" in captured.out
+    # Every attempt line: argv summary -> exit code, then out:/err: tails.
+    for name in ("A", "B", "C", "D"):
+        assert f"Attempt {name}:" in captured.out
+        assert f"-> exit 4294967294" in captured.out
+    assert "out:" in captured.out
+    assert "err:" in captured.out
+    assert "Fatal: invalid arguments" in captured.out
+    assert "DRV:0,2,999,12" in captured.out
+    assert "Verdict: RED" in captured.out
+
+
+def test_cli_probe_stream_green_notes_ready_variant(monkeypatch, capsys):
+    """probe.4: the GREEN path notes which argument variant went
+    ready, plus the attempts that died before it."""
+    server = _FakeServer()
+    server.variant = "B"
+    server.attempts = [StreamAttempt(
+        "A", ["-r", "stream", "--cache=128", "--bindip=127.0.0.1",
+               "--bindport=51000", "--messages=-stdout"],
+        -2, "DRV:0,2,999,12", "Fatal: invalid arguments")]
+
+    rc, out, err = _run_cli(
+        monkeypatch, capsys, server,
+        lambda url, timeout, ffprobe_bin="ffprobe", ffmpeg_bin="ffmpeg": _green_probe())
+    assert rc == 0
+    assert "Verdict: GREEN" in out
+    assert "Stream server ready via variant B" in out
+    assert "Attempt A:" in out        # A's failure is still reported
+    assert server.stop_calls == 1
 
 
 def test_cli_probe_stream_operational_error_exit_2(monkeypatch, capsys):

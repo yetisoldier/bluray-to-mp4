@@ -16,6 +16,16 @@ failure, death-before-ready, readiness timeout, caller cancel, and an
 atexit belt-and-suspenders handler - so the server can never leak past
 the app that started it.
 
+probe.4 (Eric, real-hardware run 2026-10-02 19:46): probe.3 STILL
+exited with code 4294967294 (= -2) before the HTTP port answered, and
+the report had two blind spots - the ~300-char stdout excerpt let the
+real error line scroll away, and stderr was discarded outright. Now a
+second drain thread captures stderr, both tails keep ~2000 chars, and
+start_stream_server walks an ordered argument-variant matrix (A: robot
++ explicit bind, B: the official usage.txt example, C: bare defaults,
+D: robot + disc), recording every variant that dies so the probe
+report shows exactly which argv shape makemkvcon accepts.
+
 Standard library only, fully testable offline: `runner` replaces the
 spawn (tests assert the exact argument shape), `_port_free`/`_http_ok`
 are the socket seams, and no test needs makemkvcon or a real drive.
@@ -46,6 +56,7 @@ from .makemkv import (
 
 __all__ = [
     "StreamServerError",
+    "StreamAttempt",
     "StreamServer",
     "start_stream_server",
     "stop_stream_server",
@@ -62,6 +73,15 @@ READY_POLL_INTERVAL = 0.5   # §1.4: 500 ms between polls
 HTTP_POLL_TIMEOUT = 2.0     # per-attempt urlopen timeout
 STOP_TIMEOUT = 10.0        # terminate -> wait(10) -> kill budget
 
+# probe.4: the two probe.3 report blind spots are closed - stderr gets
+# its own drain thread and char-bounded buffer, and tail excerpts keep
+# ~2000 chars instead of ~300 (the real error line scrolled past).
+STDERR_TAIL_CHARS = 2000    # stderr ring budget in characters
+TAIL_EXCERPT_CHARS = 2000   # _tail_excerpt default (stdout + stderr)
+ATTEMPT_TAIL_CHARS = 400    # per-variant StreamAttempt excerpts
+# probe.4 argument-variant matrix, tried in order until one is ready.
+DEFAULT_ATTEMPTS = ["A", "B", "C", "D"]
+
 # The stream server has NO authentication (§1.3); loopback-only binding
 # IS the security model. Never 0.0.0.0, never the LAN.
 _LOOPBACK_BINDS = {"127.0.0.1", "localhost", "::1"}
@@ -76,7 +96,34 @@ class StreamServerError(MakeMkvError):
     Subclasses MakeMkvError so existing generic handlers still catch
     it, while the CLI can single it out for the RED verdict (server
     misbehaves) versus the operational exit code (makemkvcon missing).
+
+    probe.4: `.attempts` carries one StreamAttempt per argument variant
+    that exited before ready (empty for every other failure mode), so
+    the probe report can print the whole try matrix.
     """
+
+    def __init__(self, message: str, *,
+                 attempts: "list[StreamAttempt] | None" = None) -> None:
+        super().__init__(message)
+        self.attempts: "list[StreamAttempt]" = list(attempts or [])
+
+
+@dataclass
+class StreamAttempt:
+    """One probe.4 argument-variant try: the argv shape and how it died.
+
+    Recorded only when the spawned makemkvcon EXITED before its HTTP
+    port answered - the case where the argv shape itself is the prime
+    suspect. exit_code is makemkvcon's own code (4294967294 = -2 in
+    Eric's probe.3 run); the tails are ~400-char excerpts of the fully
+    drained stdout/stderr ring buffers.
+    """
+
+    name: str                # 'A' | 'B' | 'C' | 'D'
+    args: list[str]          # argv after the makemkvcon binary
+    exit_code: int | None    # None only if the process never exited
+    stdout_tail: str = ""   # last ~400 chars of drained stdout
+    stderr_tail: str = ""   # last ~400 chars of drained stderr
 
 
 @dataclass
@@ -87,20 +134,31 @@ class StreamServer:
     port: int
     base_url: str        # http://127.0.0.1:<port>
     disc_index: int
+    # probe.4: which argument variant produced this ready server, plus
+    # the recorded failures of the variants tried (and lost) before it.
+    variant: str = "A"
+    attempts: list[StreamAttempt] = field(
+        default_factory=list, repr=False, compare=False)
     # §7.1: daemon reader thread keeps this at the last 50 robot lines;
     # a chatty makemkvcon can never deadlock on a full pipe, and error
     # messages get real context instead of "(no output)".
     stdout_tail: deque[str] = field(
         default_factory=lambda: deque(maxlen=TAIL_LINES))
+    # probe.4: stderr is captured too (second drain thread), bounded to
+    # the newest ~2000 CHARS - probe.3 discarded stderr entirely and the
+    # real makemkvcon error line may live only there.
+    stderr_tail: deque[str] = field(default_factory=deque)
     stopped: bool = field(default=False, init=False, repr=False, compare=False)
     _drain: threading.Thread | None = field(
+        default=None, init=False, repr=False, compare=False)
+    _drain_err: threading.Thread | None = field(
         default=None, init=False, repr=False, compare=False)
 
     def stop(self, timeout: float = STOP_TIMEOUT) -> None:
         """Terminate, wait(timeout), then kill on expiry. Idempotent.
 
-        Safe to call twice and safe on an already-exited process; the
-        drain thread is joined so stdout_tail is final afterwards.
+        Safe to call twice and safe on an already-exited process; both
+        drain threads are joined so the tails are final afterwards.
         """
         if self.stopped:
             return
@@ -117,16 +175,20 @@ class StreamServer:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-        # Reap the reader thread before closing the pipe so the ring
-        # buffer is final (the process is dead: its stdout is at EOF).
-        if self._drain is not None and self._drain.is_alive():
-            self._drain.join(timeout=2.0)
-        if proc is not None and proc.stdout is not None:
-            try:
-                proc.stdout.close()
-            except OSError:
-                pass
+        # Reap BOTH reader threads (probe.4: stdout + stderr) before
+        # closing the pipes so both ring buffers are final.
+        for drain in (self._drain, self._drain_err):
+            if drain is not None and drain.is_alive():
+                drain.join(timeout=2.0)
+        if proc is not None:
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
         self._drain = None
+        self._drain_err = None
 
 
 def _drain_stdout(server: "StreamServer") -> None:
@@ -138,23 +200,71 @@ def _drain_stdout(server: "StreamServer") -> None:
         pass  # pipe closed underneath us by stop(): nothing left to read
 
 
+def _drain_stderr(server: "StreamServer") -> None:
+    """Reader-thread body: consume stderr into the char-bounded buffer.
+
+    probe.3 discarded stderr (DEVNULL); the makemkvcon error line for
+    the instant-exit failures may only exist there. The buffer keeps
+    the newest ~STDERR_TAIL_CHARS characters (at least one line), so a
+    chatty stderr still can never deadlock on a full pipe.
+    """
+    try:
+        stream = server.proc.stderr
+        if stream is None:
+            return  # spawn fell back to stderr=DEVNULL: nothing to read
+        for raw in stream:
+            server.stderr_tail.append(raw.rstrip("\r\n"))
+            _trim_chars(server.stderr_tail, STDERR_TAIL_CHARS)
+    except (ValueError, OSError):
+        pass  # pipe closed underneath us by stop(): nothing left to read
+
+
+def _trim_chars(tail: deque[str], max_chars: int) -> None:
+    """Drop oldest lines until the buffer fits max_chars (keep >= 1 line)."""
+    total = sum(len(line) for line in tail)
+    while len(tail) > 1 and total > max_chars:
+        total -= len(tail.popleft())
+
+
 def _default_runner(binary: str, args: list[str]) -> subprocess.Popen:
-    """Spawn makemkvcon with a drained stdout pipe (make_runner style)."""
+    """Spawn makemkvcon with drained stdout AND stderr pipes (probe.4).
+
+    stderr was DEVNULL through probe.3 - the real makemkvcon error line
+    for the instant-exit failures may only exist there. If capturing
+    both pipes ever fails at the OS level (fd exhaustion and friends),
+    stdout PIPE is the priority: retry with stderr silenced rather
+    than losing the robot stdout stream.
+    """
     binary = resolve_makemkvcon(binary)
+    argv = [binary, *args]
+    not_found = (
+        "makemkvcon not found on PATH. Install MakeMKV from "
+        "https://www.makemkv.com/download/ and restart the app."
+    )
     try:
         return subprocess.Popen(
-            [binary, *args],
+            argv,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
         )
-    except (FileNotFoundError, PermissionError, OSError) as exc:
-        raise MakeMkvError(
-            "makemkvcon not found on PATH. Install MakeMKV from "
-            "https://www.makemkv.com/download/ and restart the app."
-        ) from exc
+    except (FileNotFoundError, PermissionError) as exc:
+        raise MakeMkvError(not_found) from exc
+    except OSError:
+        # Both-PIPE spawn failed: stdout PIPE is the priority (above).
+        try:
+            return subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise MakeMkvError(not_found) from exc
 
 
 def _port_free(bind_ip: str, port: int) -> bool:
@@ -186,7 +296,8 @@ def _http_ok(url: str, timeout: float = HTTP_POLL_TIMEOUT) -> bool:
         return False
 
 
-def _tail_excerpt(tail: deque[str], limit: int = 300) -> str:
+def _tail_excerpt(tail: deque[str], limit: int = TAIL_EXCERPT_CHARS) -> str:
+    """Join the tail lines, keeping the LAST `limit` chars (probe.4: 2000)."""
     text = " | ".join(tail)
     return text[-limit:] if len(text) > limit else text
 
@@ -249,6 +360,45 @@ def _wait_ready(server: "StreamServer", timeout: float) -> None:
         time.sleep(READY_POLL_INTERVAL)
 
 
+def _variant_argv(
+    name: str, disc_index: int, bind_ip: str, port: int
+) -> tuple[list[str], int, str]:
+    """(args, port, base_url) for one probe.4 argument-variant try.
+
+    A: robot mode + explicit loopback bind - the probe.3 shape that
+       still exits with code 4294967294 (= -2) on Eric's hardware.
+    B: the official usage.txt stream example - no -r, --upnp=1.
+    C: bare `stream --messages=-stdout` - makemkvcon's own defaults
+       (all addresses, port 51000). A diagnostic long shot, never a
+       shape to ship: the server has no authentication.
+    D: the original probe.1 shape - robot mode plus an explicit disc
+       parameter. usage.txt documents no disc parameter for stream and
+       removing it did NOT fix the exit, so D reproduces the original
+       evidence inside the same report.
+    """
+    if name == "A":
+        args = ["-r", "stream", "--cache=128",
+                f"--bindip={bind_ip}", f"--bindport={port}",
+                "--messages=-stdout"]
+        return args, port, f"http://{bind_ip}:{port}"
+    if name == "B":
+        args = ["stream", "--upnp=1", "--cache=128",
+                f"--bindip={bind_ip}", f"--bindport={port}",
+                "--messages=-stdout"]
+        return args, port, f"http://{bind_ip}:{port}"
+    if name == "C":
+        # Bare form: makemkvcon binds its own defaults (all addresses,
+        # port 51000 per usage.txt).
+        return (["stream", "--messages=-stdout"], DEFAULT_PORT_START,
+                f"http://{bind_ip}:{DEFAULT_PORT_START}")
+    if name == "D":
+        args = ["-r", "stream", "--cache=128",
+                f"--bindip={bind_ip}", f"--bindport={port}",
+                "--messages=-stdout", f"disc:{disc_index}"]
+        return args, port, f"http://{bind_ip}:{port}"
+    raise StreamServerError(f"unknown stream server argument variant {name!r}")
+
+
 def start_stream_server(
     disc_index: int,
     *,
@@ -257,16 +407,25 @@ def start_stream_server(
     port_start: int = DEFAULT_PORT_START,
     port_end: int = DEFAULT_PORT_END,
     runner: Callable[[str, list[str]], subprocess.Popen] | None = None,
+    attempts: list[str] | None = None,
 ) -> StreamServer:
     """Start a READY `makemkvcon stream` server for one disc (§1.3).
 
-    Spawns `makemkvcon -r stream --cache=128 --bindip=<ip>
-    --bindport=<port> --messages=-stdout disc:<index>` (robot mode so
-    MSG lines stay parseable by parse_line; one server serves every
-    title), polls the index URL until it answers (§1.4), and returns a
-    ready StreamServer. Every failure path - non-loopback bind, no free
-    port, spawn failure, death-before-ready, readiness timeout - stops
-    the child before raising: the server can never leak.
+    probe.4: instead of betting the run on one argv shape, this walks
+    the ordered argument-variant matrix (DEFAULT_ATTEMPTS: A, B, C, D -
+    see _variant_argv). Each variant spawns its shape and polls its
+    index URL; a variant that EXITS before ready is stopped, recorded
+    as a StreamAttempt, and replaced by the next shape. The first
+    variant to answer HTTP 2xx wins, and its StreamServer carries
+    .variant plus the failed tries in .attempts. If every variant
+    dies, the raised StreamServerError carries the whole attempt list
+    on .attempts. Failures an argv shape cannot fix still propagate
+    immediately: beta-key expiry, disc-open, spawn errors, and a live
+    process that never answers (readiness timeout).
+
+    Every failure path - non-loopback bind, no free port, spawn
+    failure, death-before-ready, readiness timeout - stops the child
+    before raising: the server can never leak.
 
     runner, when given, replaces the spawn seam (tests assert the
     argument shape); _port_free/_http_ok are the other test seams.
@@ -288,44 +447,74 @@ def start_stream_server(
             "makemkvcon stream server may be running - end it in Task "
             "Manager"
         )
-    # Real-disc probe run 1 (Eric, 2026-10-02 19:30): the official
-    # usage.txt stream example takes NO disc parameter - passing disc:N
-    # made makemkvcon exit instantly with code 4294967294 (invalid
-    # args). The stream server serves whatever disc is in the drive;
-    # the disc_index is used only for scan-side title selection.
-    args = [
-        "-r",
-        "stream",
-        "--cache=128",
-        f"--bindip={bind_ip}",
-        f"--bindport={port}",
-        "--messages=-stdout",
-    ]
+    names = list(attempts) if attempts is not None else list(DEFAULT_ATTEMPTS)
+    if not names:
+        raise StreamServerError("no stream server argument variants to try")
     spawn = runner or _default_runner
-    proc = spawn(binary, args)
-    server = StreamServer(
-        proc=proc,
-        port=port,
-        base_url=f"http://{bind_ip}:{port}",
-        disc_index=disc_index,
-    )
-    _LIVE_SERVERS.append(server)
-    drain = threading.Thread(
-        target=_drain_stdout, args=(server,), daemon=True,
-        name=f"b2m-stream-drain-{port}",
-    )
-    server._drain = drain
-    drain.start()
-    try:
-        _wait_ready(server, READY_TIMEOUT)
-    except BaseException:
-        # The hard rule: no exit path leaves the child running.
+    records: list[StreamAttempt] = []
+    for name in names:
+        args, variant_port, base_url = _variant_argv(
+            name, disc_index, bind_ip, port)
+        proc = spawn(binary, args)
+        server = StreamServer(
+            proc=proc,
+            port=variant_port,
+            base_url=base_url,
+            disc_index=disc_index,
+            variant=name,
+            attempts=list(records),  # the variants that died before this one
+        )
+        _LIVE_SERVERS.append(server)
+        drain = threading.Thread(
+            target=_drain_stdout, args=(server,), daemon=True,
+            name=f"b2m-stream-drain-{variant_port}",
+        )
+        drain_err = threading.Thread(
+            target=_drain_stderr, args=(server,), daemon=True,
+            name=f"b2m-stream-drain-err-{variant_port}",
+        )
+        server._drain = drain
+        server._drain_err = drain_err
+        drain.start()
+        drain_err.start()
         try:
-            server.stop()
-        except Exception:
-            pass
-        raise
-    return server
+            _wait_ready(server, READY_TIMEOUT)
+        except BaseException as exc:
+            # The hard rule: no exit path leaves the child running.
+            # The exit code is captured BEFORE stop() (terminate()
+            # would overwrite it); the tails AFTER (stop() joins both
+            # drain threads, so the ring buffers are final).
+            exit_code = server.proc.poll()
+            try:
+                server.stop()
+            except Exception:
+                pass
+            if exit_code is not None and isinstance(exc, StreamServerError):
+                # This argv shape died before ready: record it and let
+                # the next variant try. Typed failures (beta key, disc
+                # open) and a live-but-silent process propagate.
+                records.append(StreamAttempt(
+                    name=name,
+                    args=list(args),
+                    exit_code=exit_code,
+                    stdout_tail=_tail_excerpt(
+                        server.stdout_tail, ATTEMPT_TAIL_CHARS),
+                    stderr_tail=_tail_excerpt(
+                        server.stderr_tail, ATTEMPT_TAIL_CHARS),
+                ))
+                continue
+            raise
+        return server
+    last = records[-1]
+    raise StreamServerError(
+        f"all {len(records)} stream server argument variants "
+        f"({', '.join(rec.name for rec in records)}) exited before "
+        f"becoming ready; last attempt {last.name} exited with code "
+        f"{last.exit_code}"
+        + (f"; last output: {last.stderr_tail or last.stdout_tail}"
+           if (last.stderr_tail or last.stdout_tail) else ""),
+        attempts=records,
+    )
 
 
 def stop_stream_server(server: "StreamServer", *, timeout: float = STOP_TIMEOUT) -> None:

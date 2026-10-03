@@ -229,7 +229,23 @@ def cmd_run(args) -> int:
 # A diagnostic must identify itself (Eric, 2026-10-02 probe.3 rule):
 # two RED runs were byte-identical and we could not tell which build
 # produced them. The probe prints its build stamp as the first line.
-PROBE_ID = "probe.3"
+PROBE_ID = "probe.4"
+
+
+def _print_stream_attempts(attempts) -> None:
+    """probe.4: the argument-variant matrix, one block per dead variant.
+
+    probe.3's report had two blind spots: the ~300-char stdout excerpt
+    let the real error line scroll past, and stderr was discarded. Each
+    StreamAttempt carries its argv shape, exit code, and ~400-char
+    stdout ('out:') and stderr ('err:') tails - printed here BEFORE the
+    verdict so the report shows exactly which shape makemkvcon accepts.
+    """
+    for att in attempts:
+        print(f"Attempt {att.name}: {' '.join(att.args)} "
+              f"-> exit {att.exit_code}")
+        print(f"  out: {_excerpt(att.stdout_tail, 400) or '(none)'}")
+        print(f"  err: {_excerpt(att.stderr_tail, 400) or '(none)'}")
 
 
 def cmd_probe_stream(args) -> int:
@@ -281,8 +297,11 @@ def cmd_probe_stream(args) -> int:
             server = start_stream_server(args.index)
         except StreamServerError as exc:
             # Server misbehaves: RED, not an operational error - the
-            # lifecycle machinery is the thing under test here.
+            # lifecycle machinery is the thing under test here. probe.4:
+            # every argument variant that exited before ready is printed
+            # with its argv shape and drained stdout/stderr tails.
             print()
+            _print_stream_attempts(exc.attempts)
             print(f"error: {exc}", file=sys.stderr)
             print("Verdict: RED - the stream server misbehaved "
                   "(failed to start or become ready); attach this "
@@ -293,6 +312,10 @@ def cmd_probe_stream(args) -> int:
             # probe never got to test the server - operational, exit 2.
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        # probe.4: variants that died before the winning shape, then
+        # which argument variant actually went ready.
+        _print_stream_attempts(server.attempts)
+        print(f"Stream server ready via variant {server.variant}")
         url = probe_title_url(server, title.tid)
         probe = _probe_url(url, args.timeout)
 
@@ -342,6 +365,11 @@ def cmd_probe_stream(args) -> int:
         tail = " | ".join(server.stdout_tail)
         if tail:
             print(f"Server stdout (tail): {_excerpt(tail)}")
+        # probe.4: stderr is captured now too - the real makemkvcon
+        # error line may live only there.
+        errtail = " | ".join(server.stderr_tail)
+        if errtail:
+            print(f"Server stderr (tail): {_excerpt(errtail)}")
     finally:
         if server is not None:
             server.stop()
