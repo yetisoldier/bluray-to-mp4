@@ -215,3 +215,17 @@ def test_lan_watcher_reports_unreachable():
     assert not result.reachable
     assert result.status == "unreachable"
     assert format_watch_result(result).startswith("UNREACHABLE:")
+
+
+def test_python_module_entry_routes_watch_monitor(monkeypatch):
+    import sys
+
+    import bluray_to_mp4.__main__ as module_main
+    import bluray_to_mp4.cli as cli
+
+    called = []
+    monkeypatch.setattr(sys, "argv", ["python -m bluray_to_mp4", "watch-monitor"])
+    monkeypatch.setattr(cli, "main", lambda: called.append(True) or 0)
+
+    assert module_main.main() == 0
+    assert called == [True]

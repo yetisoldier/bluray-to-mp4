@@ -13,7 +13,7 @@ import sys
 
 def main() -> int:
     argv = sys.argv[1:]
-    if argv and argv[0] in ("drives", "scan", "run", "probe-stream"):
+    if argv and argv[0] in ("drives", "scan", "run", "probe-stream", "watch-monitor"):
         from .cli import main as cli_main
         return cli_main()
     if argv and argv[0] == "--status":
@@ -28,7 +28,7 @@ def main() -> int:
         print(
             "The desktop UI needs PySide6. Install it with:\n"
             "    pip install PySide6\n"
-            "Or use the CLI: bluray-to-mp4 drives|scan|run\n"
+            "Or use the CLI: bluray-to-mp4 drives|scan|run|watch-monitor\n"
             f"({exc})",
             file=sys.stderr,
         )
