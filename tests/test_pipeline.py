@@ -1119,3 +1119,95 @@ def test_pipeline_untagged_sub_embeds_und(tmp_path, monkeypatch):
         mkv_runner=fake_runner(_movie_rip_script(outdir)),
     )
     assert events[1][3] == "und"
+
+
+# ---------------------------------------------------------------------
+# v0.2.18: Review-page size target (GB/hour). The spin's value flows
+# through run_pipeline's target_gb_per_hour kwarg into BOTH EncodePlan
+# construction sites; None (or a value equal to the media-type default)
+# keeps the built-in behavior byte-identical.
+
+def _b_v_kbps(args) -> int:
+    """Video bitrate number from an ffmpeg arg list ('3863k' -> 3863)."""
+    return int(args[args.index("-b:v") + 1].rstrip("k"))
+
+
+def test_gbph_override_wins_in_dry_run(tmp_path):
+    """target_gb_per_hour=3.0 -> the dry-run encode args carry the
+    3.0-derived video bitrate (computed via the same estimator the
+    encoder uses, pinned here in-test)."""
+    from bluray_to_mp4.encode import estimate_video_bitrate_kbps
+
+    result = _movie_run(tmp_path / "out", target_gb_per_hour=3.0)
+    args = result.jobs[0].encode_args
+    assert _b_v_kbps(args) == estimate_video_bitrate_kbps(
+        target_gb_per_hour=3.0, audio_channels=6)
+    # Bigger target -> bigger bitrate than the 2.0-default run.
+    default_run = _movie_run(tmp_path / "default")
+    assert _b_v_kbps(args) > _b_v_kbps(default_run.jobs[0].encode_args)
+
+
+def test_gbph_default_normalizes_to_none(tmp_path):
+    """A value equal to the disc type's default collapses to None: the
+    dry-run args are byte-identical to a no-kwarg run (regression guard
+    for dry-run stability on untouched runs). Same outdir on both runs:
+    encode_args embed the rip/output paths, so only a shared outdir
+    makes 'byte-identical' a meaningful comparison."""
+    plain = _movie_run(tmp_path / "out")
+    defaulted = _movie_run(tmp_path / "out", target_gb_per_hour=2.0)
+    assert (plain.jobs[0].encode_args
+            == defaulted.jobs[0].encode_args)
+
+
+def test_gbph_none_keeps_media_type_default(tmp_path):
+    """No kwarg -> existing behavior unchanged: each disc type's
+    built-in constant drives the bitrate, and a DVD-default kwarg is
+    likewise a no-op on a DVD scan (companion to the encode tests)."""
+    from bluray_to_mp4.encode import (
+        BLURAY_GB_PER_HOUR,
+        DVD_GB_PER_HOUR,
+        estimate_video_bitrate_kbps,
+    )
+
+    bluray = _movie_run(tmp_path / "bluray")
+    assert _b_v_kbps(bluray.jobs[0].encode_args) == (
+        estimate_video_bitrate_kbps(
+            target_gb_per_hour=BLURAY_GB_PER_HOUR, audio_channels=6))
+
+    dvd_plain = run_pipeline(
+        0, str(tmp_path / "dvd"), encoder="x265", dry_run=True,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines()),
+    )
+    assert _b_v_kbps(dvd_plain.jobs[0].encode_args) == (
+        estimate_video_bitrate_kbps(
+            target_gb_per_hour=DVD_GB_PER_HOUR, audio_channels=6))
+    dvd_defaulted = run_pipeline(
+        0, str(tmp_path / "dvd"), encoder="x265", dry_run=True,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines()),
+        target_gb_per_hour=DVD_GB_PER_HOUR,
+    )
+    assert (dvd_plain.jobs[0].encode_args
+            == dvd_defaulted.jobs[0].encode_args)
+
+
+def test_gbph_override_reaches_real_run_encode_args(tmp_path, monkeypatch):
+    """The real-run EncodePlan rebuild (after rip/probe) honors the
+    same override, so real-run and dry-run arg text agree on the
+    bitrate numbers."""
+    _stub_probe(monkeypatch, width=3840)
+    captured = []
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        captured.append(args)
+
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+        target_gb_per_hour=3.0,
+    )
+    assert result.jobs and all(j.completed for j in result.jobs)
+    dry = _movie_run(tmp_path / "dry", target_gb_per_hour=3.0)
+    assert _b_v_kbps(captured[0]) == _b_v_kbps(dry.jobs[0].encode_args)

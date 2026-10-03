@@ -17,7 +17,12 @@ import time
 from dataclasses import dataclass, field
 
 from .binaries import resolve_ffmpeg
-from .encode import EncodePlan, build_encode_args
+from .encode import (
+    BLURAY_GB_PER_HOUR,
+    DVD_GB_PER_HOUR,
+    EncodePlan,
+    build_encode_args,
+)
 from .ffprobe import (
     ProbedStream,
     first_video_width,
@@ -283,6 +288,16 @@ def execute_encode(
         raise EncodeCancelled("cancelled by user")
 
 
+def _resolve_gbph(value: float | None, media_type: str | None) -> float | None:
+    """v0.2.18: Review-page size target resolution. An explicit value
+    wins; None or a value equal to the disc type's default collapses
+    to None, which EncodePlan already maps to its built-in media-type
+    constant - so untouched runs stay byte-identical in dry-run output
+    and EncodePlan reprs."""
+    default = DVD_GB_PER_HOUR if media_type == "dvd" else BLURAY_GB_PER_HOUR
+    return None if value is None or abs(value - default) < 1e-9 else value
+
+
 def run_pipeline(
     index: int,
     outdir: str,
@@ -298,6 +313,7 @@ def run_pipeline(
     year: int | None = None,
     title_overrides: dict[int, str] | None = None,
     stream_overrides: dict[int, dict[str, int | None]] | None = None,  # v0.2.15
+    target_gb_per_hour: float | None = None,  # v0.2.18
     cancel: "Callable[[], bool] | None" = None,
     tmdb_key: str = "",
     tmdb_fetcher=None,
@@ -326,6 +342,10 @@ def run_pipeline(
     (invalid ones keep the recommendation + a warning note), an explicit
     subtitle None means "no subtitles for this title" and disables the
     rip-time first-stream fallback for it.
+
+    target_gb_per_hour (v0.2.18, Review-page size target): explicit value
+    wins over the media-type default; None (or a value equal to the
+    disc's default) leaves EncodePlan on its built-in default.
 
     on_progress update tuples, one per progress line from each stage:
       ("rip", tid, frac)                 - MakeMKV PRGV progress, no ETA
@@ -459,6 +479,8 @@ def run_pipeline(
                 media_type=disc.media_type or "bluray",
                 encoder=result.encoder,
                 audio_sid=_audio_ordinal(title, sel.audio_sid),
+                target_gb_per_hour=_resolve_gbph(
+                    target_gb_per_hour, disc.media_type),
             )
         )
         result.jobs.append(job)
@@ -684,6 +706,8 @@ def run_pipeline(
                         encoder=result.encoder,
                         audio_sid=nth_ordinal(streams, audio),
                         deinterlace=deinterlace,
+                        target_gb_per_hour=_resolve_gbph(
+                            target_gb_per_hour, disc.media_type),
                     )
                 )
                 execute_encode(

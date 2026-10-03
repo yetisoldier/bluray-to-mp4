@@ -13,11 +13,13 @@ import webbrowser
 
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -41,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..deps import check_all, missing_required
+from ..encode import BLURAY_GB_PER_HOUR, DVD_GB_PER_HOUR
 from ..makemkv import MakeMkvError
 from ..models import Disc
 from ..monitor import lan_ip, start_server, stop_server
@@ -634,6 +637,32 @@ class MainWindow(QMainWindow):
         self.check_subs = QCheckBox("OCR to .srt")
         self.check_subs.setChecked(True)
         row.addWidget(self.check_subs, 1, 3)
+        # v0.2.18 (design 1.3): size target on the encoder row - one
+        # control per run, the same mental slot as the encoder combo.
+        # QDoubleSpinBox over a QSlider (design 1.2, deliberate): exact
+        # 0.25 steps, typed input, a truthful numeric readout, and no
+        # tick math; theme.py already styles the shared spin chrome.
+        row.addWidget(QLabel("Size target:"), 1, 4)
+        self.spin_gbph = QDoubleSpinBox()
+        self.spin_gbph.setRange(0.5, 4.0)
+        self.spin_gbph.setDecimals(2)
+        self.spin_gbph.setSingleStep(0.25)
+        self.spin_gbph.setCorrectionMode(
+            QAbstractSpinBox.CorrectionMode.CorrectToNearestValue)
+        self.spin_gbph.setSuffix(" GB/hour")
+        self.spin_gbph.setValue(BLURAY_GB_PER_HOUR)
+        self.btn_gbph_reset = QPushButton("Reset")
+        self.btn_gbph_reset.setObjectName("ghostBtn")
+        self.btn_gbph_reset.clicked.connect(self._reset_gbph)
+        # v0.2.18 (design 1.4): live projected-size feedback, refreshed
+        # on every spin change and every preview/rescan refresh.
+        self.label_gbph_projection = QLabel("")
+        self.label_gbph_projection.setObjectName("muted")
+        self.spin_gbph.valueChanged.connect(
+            lambda *_: self._update_gbph_projection())
+        row.addWidget(self.spin_gbph, 1, 5)
+        row.addWidget(self.btn_gbph_reset, 1, 6)
+        row.addWidget(self.label_gbph_projection, 2, 4, 1, 3)
         row.addWidget(QLabel("TMDB key:"), 2, 0)
         self.edit_tmdb_key = QLineEdit()
         self.edit_tmdb_key.setPlaceholderText(
@@ -749,9 +778,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(muted("Recently completed outputs (newest first)."))
         card = card_frame()
         cl = QVBoxLayout(card)
-        self.history_table = QTableWidget(0, 6)
+        self.history_table = QTableWidget(0, 7)
         self.history_table.setHorizontalHeaderLabels(
-            ["Output", "Type", "Duration", "Size", "GB/hr", "Notes"])
+            ["Output", "Type", "Duration", "Size", "GB/hr",
+             "Target GB/hr", "Notes"])
         self.history_table.horizontalHeader().setStretchLastSection(True)
         cl.addWidget(self.history_table)
         btn_row = QHBoxLayout()
@@ -792,12 +822,19 @@ class MainWindow(QMainWindow):
                 size_text = f"{size_bytes / 1e6:.0f} MB"
             gbph = rec.gb_per_hour if (size_bytes and rec.duration_seconds) else 0.0
             gb_text = f"{gbph:.1f}" if gbph else "-"
+            # v0.2.18 (design 6): the run's Target GB/hr beside the
+            # achieved rate - target vs actual, the pair Eric checks
+            # by hand every run. Pre-slider records (0.0) render as an
+            # empty cell.
+            target = getattr(rec, "target_gb_per_hour", 0.0)
+            target_text = f"{target:.2f}" if target else ""
             self.history_table.setItem(row, 0, QTableWidgetItem(name))
             self.history_table.setItem(row, 1, QTableWidgetItem(rec.kind))
             self.history_table.setItem(row, 2, QTableWidgetItem(duration))
             self.history_table.setItem(row, 3, QTableWidgetItem(size_text))
             self.history_table.setItem(row, 4, QTableWidgetItem(gb_text))
-            self.history_table.setItem(row, 5, QTableWidgetItem(warnings))
+            self.history_table.setItem(row, 5, QTableWidgetItem(target_text))
+            self.history_table.setItem(row, 6, QTableWidgetItem(warnings))
         self.history_table.resizeColumnsToContents()
 
     # ------------------------------------------------------------------
@@ -856,6 +893,9 @@ class MainWindow(QMainWindow):
                 (title.title_name if title else f"Title {tid}") or f"Title {tid}"))
             self.outputs_table.setItem(row, 1, QTableWidgetItem(fname))
         self.outputs_table.resizeColumnsToContents()
+        # v0.2.18 (design 5): rescans and episode edits land in the
+        # projection too - the label reads from the same naming pass.
+        self._update_gbph_projection(outputs)
 
     def _plan_output_names(self) -> list[tuple[int, str]]:
         """(tid, output filename) pairs - the one naming pass shared by
@@ -889,6 +929,70 @@ class MainWindow(QMainWindow):
         if not main:
             return []
         return [(main.tid, movie_output_name(name, year=year))]
+
+    # ------------------------------------------------------------------
+    # v0.2.18: GB/hour size target (design 1-5)
+
+    def _gbph_default_for(self, media_type: str | None) -> float:
+        """This disc type's built-in size budget (encode.py constants)."""
+        return DVD_GB_PER_HOUR if media_type == "dvd" else BLURAY_GB_PER_HOUR
+
+    def _gbph_saved_or_default(self, media_type: str | None) -> float:
+        """Effective spin default: the per-type value persisted in
+        settings.extras (design 4) when present, else the encode.py
+        constant. A hand-edited config.json must never produce an
+        out-of-range spin: clamp into [0.5, 4.0] and snap to the 0.25
+        step on read."""
+        default = self._gbph_default_for(media_type)
+        saved = self.settings.extras.get(f"gbph_{media_type or 'bluray'}")
+        if saved is None:
+            return default
+        try:
+            value = float(saved)
+        except (TypeError, ValueError):
+            return default
+        value = round(value / 0.25) * 0.25
+        value = min(4.0, max(0.5, value))
+        return round(value, 2)
+
+    def _reset_gbph(self) -> None:
+        """Reset restores the disc type's built-in default (2.0 Blu-ray,
+        1.0 DVD) and doubles as the discoverable answer to "what was the
+        normal value?" (design 1.3)."""
+        media_type = self.disc.media_type if self.disc else None
+        self.spin_gbph.setValue(self._gbph_default_for(media_type))
+
+    def _update_gbph_projection(self, outputs=None) -> None:
+        """Live projected-size feedback (design 1.4/5): total budget is
+        gbph * hours by definition (container slack and audio are inside
+        the gbph budget), from the same _plan_output_names() pass
+        _start_run uses, so the number the user reads on Review is the
+        number the run will target."""
+        self._set_text(
+            self.label_gbph_projection, self._gbph_projection_text(outputs))
+
+    def _gbph_projection_text(self, outputs=None) -> str:
+        if self.disc is None or self.guess is None:
+            return ""
+        if outputs is None:
+            outputs = self._plan_output_names()
+        durations = [
+            t.duration_seconds for t in (
+                self.disc.title(tid) for tid, _ in outputs
+            ) if t
+        ]
+        if not durations:
+            return ""
+        total_seconds = sum(durations)
+        if total_seconds <= 0:
+            return ""
+        gbph = self.spin_gbph.value()
+        total_gb = gbph * total_seconds / 3600
+        minutes = total_seconds // 60
+        if len(durations) == 1:
+            return f"{minutes} min -> about {total_gb:.1f} GB total"
+        return (f"{len(durations)} episodes, {minutes} min total -> "
+                f"about {total_gb:.1f} GB total")
 
     def _toggle_monitor(self, checked: bool) -> None:
         self.settings.monitor_enabled = checked
@@ -1004,6 +1108,12 @@ class MainWindow(QMainWindow):
             return
         self.settings.outdir = outdir
         self.settings.encoder = self.combo_encoder.currentText()
+        # v0.2.18 (design 4): persist per media type in settings.extras -
+        # each disc type remembers exactly its own value, so a DVD never
+        # inherits a remembered Blu-ray target (and vice versa).
+        self.settings.extras[
+            f"gbph_{self.disc.media_type or 'bluray'}"
+        ] = float(self.spin_gbph.value())
         self.settings.last_series_name = self.edit_series_name.text().strip()
         self.settings.tmdb_key = self.edit_tmdb_key.text().strip()
         self.settings.save()
@@ -1029,6 +1139,11 @@ class MainWindow(QMainWindow):
             },
             "year": self.spin_year.value() or None,
             "want_subtitles": self.check_subs.isChecked(),
+            # v0.2.18 (design 3): always written, read at Start time
+            # (same contract as stream_overrides, so mid-run UI edits can
+            # never race the worker); the pipeline normalizes a value
+            # equal to the media-type default back to None.
+            "target_gb_per_hour": float(self.spin_gbph.value()),
             "jobs": [],
             "tid_names": {},
         }
@@ -1324,6 +1439,12 @@ class MainWindow(QMainWindow):
         if self.settings.outdir:
             self.edit_outdir.setText(self.settings.outdir)
         self.combo_encoder.setCurrentText(self.settings.encoder)
+        # v0.2.18 (design 2.1): a fresh scan re-seeds the size-target spin
+        # from the per-type saved value (design 4), else the encode.py
+        # constant - rescanning a different disc type resets the control
+        # to that type's effective default.
+        self.spin_gbph.setValue(
+            self._gbph_saved_or_default(self.disc.media_type))
         self.edit_tmdb_key.setText(self.settings.tmdb_key or "")
         self._episode_titles = {}
         self._title_overrides = {}

@@ -115,3 +115,26 @@ def test_history_json_includes_size_and_rate(server):
     job = history["jobs"][0]
     assert job["size_bytes"] == 2_000_000_000
     assert job["gb_per_hour"] == 1.0
+
+
+def test_job_record_carries_target_gbph(server):
+    """v0.2.18: JobRecord carries the run's size target (0.0 = a
+    pre-slider record) and /history includes it, so remote check-ins
+    see the target-vs-achieved pair Eric validates by hand."""
+    _, base, state = server
+    state.job_done(JobRecord(
+        name="Movie (2019).mp4", kind="movie",
+        duration_seconds=7200, encoder="x265",
+        size_bytes=2_000_000_000, target_gb_per_hour=2.25))
+    code, history = _get(base + "/history?token=***", token="s3cret")
+    assert code == 200
+    job = history["jobs"][0]
+    assert job["target_gb_per_hour"] == 2.25
+    assert job["gb_per_hour"] == 1.0  # achieved: 2 GB across 2 h
+
+    # Pre-slider records default to 0.0 and still serialize fine.
+    state.job_done(JobRecord(name="Legacy.mp4", kind="movie",
+                             duration_seconds=3600, encoder="x265"))
+    code, history = _get(base + "/history?token=***", token="s3cret")
+    assert code == 200
+    assert history["jobs"][0]["target_gb_per_hour"] == 0.0

@@ -14,6 +14,7 @@ import traceback
 from PySide6.QtCore import QThread, Signal
 
 from ..config import Settings
+from ..encode import BLURAY_GB_PER_HOUR, DVD_GB_PER_HOUR
 from ..makemkv import find_drives, make_runner, scan_disc
 from ..models import Disc
 from ..monitor import JobRecord, state as monitor_state
@@ -136,6 +137,7 @@ class RunWorker(QThread):
                 year=self.plan.get("year"),
                 title_overrides=self.plan.get("title_overrides"),
                 stream_overrides=self.plan.get("stream_overrides"),  # v0.2.15
+                target_gb_per_hour=self.plan.get("target_gb_per_hour"),  # v0.2.18
                 tmdb_key=(self.settings.tmdb_key or "").strip(),
                 want_subtitles=bool(self.plan.get("want_subtitles", True)),
                 cancel=lambda: self._cancelled,
@@ -143,6 +145,18 @@ class RunWorker(QThread):
                 on_progress=on_progress,
             )
 
+            # v0.2.18: the run's size target for History's Target GB/hr
+            # column (target vs actual, the pair Eric checks by hand);
+            # an absent key (CLI / pre-slider plans) resolves to the
+            # disc type's built-in default so the number is always
+            # meaningful. 0.0 is reserved for pre-v0.2.18 records.
+            target_gbph = self.plan.get("target_gb_per_hour")
+            if target_gbph is None:
+                target_gbph = (
+                    DVD_GB_PER_HOUR
+                    if self.plan.get("media_type") == "dvd"
+                    else BLURAY_GB_PER_HOUR
+                )
             for job in result.jobs:
                 if job.completed:
                     # QW-6 (Bob audit): the output is on disk now - record
@@ -160,6 +174,7 @@ class RunWorker(QThread):
                         encoder=result.encoder,
                         srt=bool(job.srt_path),
                         size_bytes=size_bytes,
+                        target_gb_per_hour=float(target_gbph),
                         warnings=(
                             [] if job.srt_path
                             else ([w for w in getattr(result, "warnings", [])

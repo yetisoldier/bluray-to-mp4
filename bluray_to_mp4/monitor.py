@@ -46,6 +46,9 @@ class JobRecord:
     # History can show size + achieved GB/hour - the number Eric
     # validates by hand every run. 0 = unknown/missing.
     size_bytes: int = 0
+    # v0.2.18: the run's size target (Review-page spin); 0.0 = a
+    # pre-slider record, rendered as an empty History cell.
+    target_gb_per_hour: float = 0.0
     warnings: list[str] = field(default_factory=list)
     finished_at: float = field(default_factory=time.time)
 
@@ -172,6 +175,7 @@ class MonitorState:
                     "encoder": r.encoder,
                     "srt": r.srt,
                     "size_bytes": r.size_bytes,
+                    "target_gb_per_hour": r.target_gb_per_hour,
                     "gb_per_hour": round(r.gb_per_hour, 2),
                     "warnings": list(r.warnings),
                     "finished_at": r.finished_at,

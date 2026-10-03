@@ -955,7 +955,7 @@ def test_history_table_renders_size_and_gb_per_hour(qapp, monkeypatch):
     monkeypatch.setattr(monitor_state, "recent", [
         JobRecord(name="Movie (2019).mp4", kind="movie",
                   duration_seconds=7200, encoder="x265",
-                  size_bytes=2_000_000_000),
+                  size_bytes=2_000_000_000, target_gb_per_hour=2.25),
         JobRecord(name="Show S01E01.mp4", kind="series",
                   duration_seconds=3600, encoder="x265",
                   size_bytes=500_000_000),
@@ -966,13 +966,19 @@ def test_history_table_renders_size_and_gb_per_hour(qapp, monkeypatch):
 
     headers = [w.history_table.horizontalHeaderItem(c).text()
                for c in range(w.history_table.columnCount())]
-    assert headers == ["Output", "Type", "Duration", "Size", "GB/hr", "Notes"]
+    assert headers == ["Output", "Type", "Duration", "Size", "GB/hr",
+                      "Target GB/hr", "Notes"]
     assert w.history_table.item(0, 3).text() == "2.0 GB"
     assert w.history_table.item(0, 4).text() == "1.0"
+    # v0.2.18: the run's Target GB/hr beside the achieved rate; a
+    # pre-slider record (0.0) renders as an empty cell, never junk.
+    assert w.history_table.item(0, 5).text() == "2.25"
+    assert w.history_table.item(1, 5).text() == ""
     assert w.history_table.item(1, 3).text() == "500 MB"
     assert w.history_table.item(1, 4).text() == "0.5"
     assert w.history_table.item(2, 3).text() == "-"
     assert w.history_table.item(2, 4).text() == "-"
+    assert w.history_table.item(2, 5).text() == ""
     w.close()
 
 
@@ -1019,3 +1025,245 @@ def test_run_worker_records_output_size(qapp, monkeypatch, tmp_path):
     assert rec.size_bytes == 4096
     # Same pinned formula as the monitor unit test: bytes/1e9 per hour.
     assert abs(rec.gb_per_hour - (4096 / 1e9 / 2.0)) < 1e-12
+
+
+def test_run_worker_records_target_gbph(qapp, monkeypatch, tmp_path):
+    """v0.2.18: the plan's size target lands on the JobRecord so
+    History can show target vs actual; an absent key (CLI / pre-slider
+    plan) resolves to the media type's built-in default."""
+    from bluray_to_mp4.monitor import MonitorState
+    from bluray_to_mp4.ui import workers as workers_mod
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    class _Job:
+        def __init__(self, name):
+            self.output_name = name
+            self.completed = True
+            self.srt_path = None
+            self.duration_seconds = 3600
+
+    class _Result:
+        is_series = False
+        encoder = "x265"
+        jobs = [_Job("movie.mp4")]
+        errors = []
+        warnings = []
+
+    monkeypatch.setattr(workers_mod, "monitor_state", MonitorState())
+    monkeypatch.setattr(workers_mod, "run_pipeline",
+                        lambda *a, **k: _Result())
+
+    base_plan = {
+        "disc_name": "Disc", "media_type": "bluray", "is_series": False,
+        "encoder": "x265", "outdir": str(tmp_path),
+        "jobs": [{"tid": 0, "output_name": "movie.mp4",
+                  "duration_seconds": 3600}],
+        "tid_names": {},
+    }
+
+    # Explicit Review-page value: recorded verbatim.
+    worker = RunWorker(0, dict(base_plan, target_gb_per_hour=2.75),
+                       Settings())
+    worker.start()
+    _pump(qapp, worker)
+    assert workers_mod.monitor_state.recent[0].target_gb_per_hour == 2.75
+
+    # Absent key, Blu-ray plan: resolved to the 2.0 default.
+    monkeypatch.setattr(workers_mod, "monitor_state", MonitorState())
+    worker2 = RunWorker(0, dict(base_plan), Settings())
+    worker2.start()
+    _pump(qapp, worker2)
+    assert workers_mod.monitor_state.recent[0].target_gb_per_hour == 2.0
+
+    # Absent key, DVD plan: resolved to the 1.0 default.
+    monkeypatch.setattr(workers_mod, "monitor_state", MonitorState())
+    worker3 = RunWorker(0, dict(base_plan, media_type="dvd"), Settings())
+    worker3.start()
+    _pump(qapp, worker3)
+    assert workers_mod.monitor_state.recent[0].target_gb_per_hour == 1.0
+
+
+# ----------------------------------------------------------------------
+# v0.2.18: GB/hour size target (Review spin, per-type persistence,
+# live projection, History Target GB/hr).
+
+# DVD pressing of the movie fixture: same content, DRV disc-type code 1.
+_DVD_MOVIE_OUTPUT = MOVIE_DISC_OUTPUT.replace(
+    "DRV:0,2,999,12,", "DRV:0,2,999,1,")
+
+
+def _dvd_window(qapp, monkeypatch):
+    """DVD-variant movie window with the Review page filled."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    disc = scan_disc(0, runner=fake_runner(_DVD_MOVIE_OUTPUT.splitlines()))
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+    return w, disc
+
+
+def test_gbph_spin_defaults_by_media_type(qapp, monkeypatch):
+    """Design 2.1: a fresh scan seeds the spin from the type default -
+    2.00 GB/hour for the Blu-ray fixture, 1.00 for a DVD."""
+    w, _ = _movie_window(qapp, monkeypatch)
+    assert w.spin_gbph.value() == 2.00
+    assert w.spin_gbph.suffix() == " GB/hour"
+    assert w.spin_gbph.decimals() == 2
+    w.close()
+
+    dw, _ = _dvd_window(qapp, monkeypatch)
+    assert dw.spin_gbph.value() == 1.00
+    dw.close()
+
+
+def test_gbph_spin_step_and_range(qapp, monkeypatch):
+    """Design 2.2: the step is exactly 0.25 (Eric's 250 MB increments)
+    and the value clamps at the 0.50/4.00 range bounds."""
+    w, _ = _movie_window(qapp, monkeypatch)
+    assert w.spin_gbph.singleStep() == 0.25
+    assert (w.spin_gbph.minimum(), w.spin_gbph.maximum()) == (0.5, 4.0)
+    w.spin_gbph.stepUp()
+    assert w.spin_gbph.value() == 2.25
+    w.spin_gbph.setValue(0.1)   # below the floor: clamps to 0.50
+    assert w.spin_gbph.value() == 0.5
+    w.spin_gbph.stepDown()
+    assert w.spin_gbph.value() == 0.5   # the floor holds
+    w.spin_gbph.setValue(9.0)   # above the ceiling: clamps to 4.00
+    assert w.spin_gbph.value() == 4.0
+    w.close()
+
+
+def test_gbph_reset_button_restores_default(qapp, monkeypatch):
+    """Design 1.3: Reset restores the disc type's built-in default and
+    doubles as the discoverable answer to 'what was the normal value?'."""
+    w, _ = _movie_window(qapp, monkeypatch)
+    w.spin_gbph.setValue(3.5)
+    w.btn_gbph_reset.click()
+    assert w.spin_gbph.value() == 2.0
+    w.close()
+
+    dw, _ = _dvd_window(qapp, monkeypatch)
+    dw.spin_gbph.setValue(2.0)
+    dw.btn_gbph_reset.click()
+    assert dw.spin_gbph.value() == 1.0
+    dw.close()
+
+
+def test_gbph_projection_label_movie(qapp, monkeypatch):
+    """Design 1.4/5: with the main feature selected, the muted label
+    shows the projected MP4 size at the current GB/hour (fixture main
+    feature 2:06:30 at 2.0 GB/hour -> 4.2 GB total)."""
+    w, _ = _movie_window(qapp, monkeypatch)
+    assert w.label_gbph_projection.text() == "126 min -> about 4.2 GB total"
+    w.close()
+
+
+def test_gbph_projection_label_series(qapp, monkeypatch):
+    """Series format: the sum over the planned episodes (fixture: four
+    episodes, 201 min total at 2.0 GB/hour -> about 6.7 GB)."""
+    w = _series_window(qapp, monkeypatch)
+    assert w.label_gbph_projection.text() == (
+        "4 episodes, 201 min total -> about 6.7 GB total")
+    w.close()
+
+
+def test_gbph_projection_label_updates_on_change(qapp, monkeypatch):
+    """The projection re-renders live on every spin change."""
+    w, _ = _movie_window(qapp, monkeypatch)
+    w.spin_gbph.setValue(2.25)
+    assert w.label_gbph_projection.text() == "126 min -> about 4.7 GB total"
+    w.spin_gbph.setValue(4.0)
+    assert w.label_gbph_projection.text() == "126 min -> about 8.4 GB total"
+    w.close()
+
+
+def test_start_run_writes_gbph_into_plan(qapp, monkeypatch, tmp_path):
+    """Design 3 step 1: _start_run reads the spin at Start time into
+    plan['target_gb_per_hour'] (same read-at-Start contract as
+    stream_overrides; always written, pipeline normalizes)."""
+    import bluray_to_mp4.ui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "RunWorker", _RecordingRunWorker)
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w, _ = _movie_window(qapp, monkeypatch)
+    w.spin_gbph.setValue(2.75)
+    w.edit_outdir.setText(str(tmp_path))
+    w._start_run()
+    assert w.run_worker.plan["target_gb_per_hour"] == 2.75
+    w.close()
+
+
+def test_gbph_persists_per_media_type(qapp, monkeypatch, tmp_path):
+    """Design 4: Start persists the value per media type in
+    settings.extras; the other type's key is never touched (a DVD never
+    inherits a remembered Blu-ray target)."""
+    import bluray_to_mp4.ui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "RunWorker", _RecordingRunWorker)
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w, _ = _movie_window(qapp, monkeypatch)
+    w.spin_gbph.setValue(2.25)
+    w.edit_outdir.setText(str(tmp_path))
+    w._start_run()
+    assert w.settings.extras["gbph_bluray"] == 2.25
+    assert "gbph_dvd" not in w.settings.extras
+    w.close()
+
+
+def test_gbph_rescan_uses_saved_per_type_value(qapp, monkeypatch):
+    """Design 2.1 + 4: a saved per-type value seeds the spin on a
+    fresh scan; the other type stays at its built-in default."""
+    from bluray_to_mp4.encode import BLURAY_GB_PER_HOUR
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    disc = scan_disc(0, runner=fake_runner(_DVD_MOVIE_OUTPUT.splitlines()))
+    s = Settings()
+    s.extras["gbph_dvd"] = 1.25
+    w = MainWindow(s)
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+    assert w.spin_gbph.value() == 1.25   # saved DVD value wins
+
+    # Rescan a Blu-ray: no saved bluray value -> built-in default.
+    bd = scan_disc(0, runner=fake_runner(MOVIE_DISC_OUTPUT.splitlines()))
+    w.disc = bd
+    w.guess = detect_series(bd)
+    w._fill_review_page()
+    assert w.spin_gbph.value() == BLURAY_GB_PER_HOUR
+    w.close()
+
+
+def test_gbph_saved_value_clamped_on_read(qapp, monkeypatch):
+    """Design 4 validation: a hand-edited config.json value is
+    clamped into [0.5, 4.0] and snapped to the 0.25 step on read."""
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    def _filled_window(extras_value):
+        disc = scan_disc(
+            0, runner=fake_runner(_DVD_MOVIE_OUTPUT.splitlines()))
+        s = Settings()
+        s.extras["gbph_dvd"] = extras_value
+        w = MainWindow(s)
+        w.show()
+        _pump(qapp, w.scan_worker)
+        w.disc = disc
+        w.guess = detect_series(disc)
+        w._fill_review_page()
+        return w
+
+    w = _filled_window(9.0)   # out of range: clamps to the 4.00 ceiling
+    assert w.spin_gbph.value() == 4.0
+    w.close()
+
+    w2 = _filled_window(1.13)  # not a step multiple: snaps to 1.25
+    assert w2.spin_gbph.value() == 1.25
+    w2.close()
