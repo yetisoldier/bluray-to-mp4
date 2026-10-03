@@ -129,7 +129,10 @@ class RunWorker(QThread):
 
             def on_stage(msg: str) -> None:
                 self.stage.emit(msg)
-                monitor_state.update(stage=msg)
+                job_name = None
+                if msg.lower().startswith("upscaling "):
+                    job_name = msg.removeprefix("Upscaling ").removesuffix(" ...")
+                monitor_state.update(stage=msg, current_job=job_name)
 
             def on_progress(update) -> None:
                 kind, tid, frac = update[:3]

@@ -90,14 +90,19 @@ class EtaProgressBar(QWidget):
         layout.addWidget(self.eta_label)
         self._busy = False
 
-    def set_busy(self, busy: bool) -> None:
+    def set_busy(self, busy: bool, text: str = "estimating ...") -> None:
         self._busy = busy
         if busy:
             self.bar.setRange(0, 0)  # 0..0 = Qt indeterminate pulse
-            self.eta_label.setText("estimating ...")
+            self.eta_label.setText(text)
         else:
             self.bar.setRange(0, 1000)
-            if self.eta_label.text() == "estimating ...":
+            if self.eta_label.text() in (
+                "estimating ...",
+                "starting ...",
+                "queue active ...",
+                "upscaling ...",
+            ):
                 self.eta_label.setText("")
 
     def set_value(self, fraction: float, eta_seconds: float | None = None):

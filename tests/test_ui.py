@@ -594,6 +594,47 @@ def test_eta_progress_bar_busy_mode(qapp):
     bar.reset()
     assert bar.eta_label.text() == ""
 
+def test_dvd_upscale_stage_is_visibly_active_and_forecasted(qapp, monkeypatch):
+    """Regression for validation screenshot: during Real-ESRGAN startup
+    the UI must not look empty or claim only the short encode time remains."""
+    w = _series_window(qapp, monkeypatch)
+    plan = {
+        "disc_name": "Disc",
+        "media_type": "dvd",
+        "is_series": False,
+        "encoder": "nvenc",
+        "outdir": "/tmp/x",
+        "want_subtitles": True,
+        "dvd_upscale_mode": "720p",
+        "jobs": [
+            {
+                "tid": 0,
+                "output_name": "MAMMA_MIA (2018).mp4",
+                "duration_seconds": 6600,
+            },
+        ],
+        "tid_names": {0: "MAMMA_MIA (2018).mp4"},
+    }
+    w.run_worker = _RecordingRunWorker(0, plan, Settings())
+    w._current_job_index = 0
+    w._stage_now = "rip"
+    w.stage_bar.reset()
+    w.overall_bar.reset()
+
+    w._run_stage("Upscaling MAMMA_MIA (2018).mp4 (720p) ...")
+
+    assert w.progress_current.text() == "Upscaling MAMMA_MIA (2018).mp4 (720p)"
+    assert w.statusBar().currentMessage() == "Upscaling MAMMA_MIA (2018).mp4 (720p)"
+    assert (w.stage_bar.bar.minimum(), w.stage_bar.bar.maximum()) == (0, 0)
+    assert w.stage_bar.eta_label.text() == "upscaling ..."
+    assert (w.overall_bar.bar.minimum(), w.overall_bar.bar.maximum()) == (0, 0)
+    assert w.overall_bar.eta_label.text() == "queue active ..."
+    secs = w._forecast_total_seconds()
+    assert secs is not None
+    assert secs > 5 * 60 * 60
+    w.close()
+
+
 def test_total_remaining_forecast_includes_all_steps(qapp, monkeypatch):
     """Eric's validation-day request: the Remaining area must estimate the
     WHOLE run (all steps, all jobs), swapping in each stage's live ETA as

@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._tick_elapsed)
 
-        self.setWindowTitle("bluray-to-mp4")
+        self.setWindowTitle("Ripper")
         self.setMinimumSize(980, 700)
         self.resize(1080, 760)
         self.setStyleSheet("")  # theme.py applies the real stylesheet
@@ -127,7 +127,7 @@ class MainWindow(QMainWindow):
         nav_layout.setSpacing(0)
 
         brand_row = QHBoxLayout()
-        brand = QLabel("bluray-to-mp4")
+        brand = QLabel("Ripper")
         brand.setObjectName("brand")
         accent = QLabel("•")
         accent.setObjectName("brandAccent")
@@ -136,7 +136,7 @@ class MainWindow(QMainWindow):
         brand_row.addStretch()
         nav_layout.addLayout(brand_row)
 
-        brand_sub = QLabel("Local disc → MP4")
+        brand_sub = QLabel("Disc to MP4")
         brand_sub.setObjectName("brandSub")
         nav_layout.addWidget(brand_sub)
 
@@ -255,8 +255,9 @@ class MainWindow(QMainWindow):
 
         QMessageBox.about(
             self,
-            "About bluray-to-mp4",
-            f"bluray-to-mp4 v{bluray_to_mp4.__version__}\n\n"
+            "About Ripper",
+            f"Ripper v{bluray_to_mp4.__version__}\n"
+            "Package: bluray-to-mp4\n\n"
             "Local disc-to-MP4 ripper with recommendations and monitoring.\n"
             "ffmpeg/ffprobe and Subtitle Edit are bundled; only MakeMKV is a\n"
             "separate install.\n\n"
@@ -711,14 +712,15 @@ class MainWindow(QMainWindow):
 
         # Top card: current job + progress
         card = card_frame()
+        card.setObjectName("runCard")
         cl = QVBoxLayout(card)
-        cl.setSpacing(10)
+        cl.setSpacing(12)
         cl.addWidget(section("Current"))
         self.progress_current = QLabel("Ripping disc (decryption can take a few minutes) ...")
-        self.progress_current.setObjectName("h1")
+        self.progress_current.setObjectName("runTitle")
         cl.addWidget(self.progress_current)
         self.progress_stage = QLabel("")
-        self.progress_stage.setObjectName("muted")
+        self.progress_stage.setObjectName("runSub")
         self.progress_stage.setWordWrap(True)
         cl.addWidget(self.progress_stage)
 
@@ -729,24 +731,30 @@ class MainWindow(QMainWindow):
         self.activity_dots = ActivityDots()
         time_row.addWidget(self.activity_dots)
         self.time_elapsed = QLabel("Elapsed 0:00")
-        self.time_elapsed.setObjectName("muted")
+        self.time_elapsed.setObjectName("metricText")
         time_row.addWidget(self.time_elapsed)
         self.time_remaining = QLabel("")
-        self.time_remaining.setObjectName("muted")
+        self.time_remaining.setObjectName("metricText")
         time_row.addWidget(self.time_remaining)
         time_row.addStretch()
         cl.addLayout(time_row)
 
         self.overall_row = card_frame()
+        self.overall_row.setObjectName("progressPanel")
         overall_layout = QVBoxLayout(self.overall_row)
         overall_layout.setSpacing(6)
-        overall_layout.addWidget(QLabel("Overall (queue)"))
+        overall_label = QLabel("Overall queue")
+        overall_label.setObjectName("progressLabel")
+        overall_layout.addWidget(overall_label)
         self.overall_bar = EtaProgressBar()
         overall_layout.addWidget(self.overall_bar)
         self.stage_row = card_frame()
+        self.stage_row.setObjectName("progressPanel")
         stage_layout = QVBoxLayout(self.stage_row)
         stage_layout.setSpacing(6)
-        stage_layout.addWidget(QLabel("Current stage"))
+        stage_label = QLabel("Current stage")
+        stage_label.setObjectName("progressLabel")
+        stage_layout.addWidget(stage_label)
         self.stage_bar = EtaProgressBar()
         stage_layout.addWidget(self.stage_bar)
         cl.addWidget(self.overall_row)
@@ -1198,7 +1206,8 @@ class MainWindow(QMainWindow):
         self._run_started_at = time.time()
         self._elapsed_timer.start()
         self.activity_dots.start()
-        self.stage_bar.set_busy(True)
+        self.stage_bar.set_busy(True, "starting ...")
+        self.overall_bar.set_busy(True, "queue active ...")
         self.time_elapsed.setText("Elapsed 0:00")
         self._stage_now = "scan"
         self._stage_eta = None
@@ -1252,17 +1261,34 @@ class MainWindow(QMainWindow):
         encoder = (plan.get("encoder") or
                    getattr(self.settings, "encoder", "auto"))
         want_subs = bool(plan.get("want_subtitles", True))
+        upscale_mode = str(plan.get("dvd_upscale_mode") or "off").lower()
+        wants_upscale = upscale_mode != "off"
         nvenc = encoder in ("auto", "nvenc")
         cur = self._current_job_index
         if cur is None:
             cur = 0
         live = self._stage_eta if self._stage_eta is not None else 0.0
         total = live
+
+        # Real-ESRGAN on DVD live action is deliberately slow and often
+        # reports no granular ETA until a full chunk completes. Use a
+        # conservative 0.3x realtime forecast so the UI gives an
+        # hours-scale estimate instead of "estimating" forever.
+        def upscale_seconds(duration: float) -> float:
+            return duration / 0.3
+
         for i, j in enumerate(jobs):
             d = float(j.get("duration_seconds") or 0)
             if i == cur:
                 # Current job: swap live ETA in for the current stage;
                 # forecast the stages still ahead of it.
+                if (
+                    wants_upscale
+                    and self._stage_now not in ("encode", "ocr")
+                    and (self._stage_now != "upscale" or self._stage_eta is None)
+                    and d > 0
+                ):
+                    total += upscale_seconds(d)
                 if self._stage_now not in ("encode", "ocr") and d > 0:
                     total += d / (6.0 if nvenc else 1.5)   # encode ahead
                 if self._stage_now != "ocr" and want_subs and d > 0:
@@ -1275,6 +1301,8 @@ class MainWindow(QMainWindow):
                 continue
             if i > cur:
                 total += 5 * 60 + d / 40.0                   # rip
+                if wants_upscale:
+                    total += upscale_seconds(d)
                 total += d / (6.0 if nvenc else 1.5)         # encode
                 if want_subs:
                     total += d / 20.0                       # OCR
@@ -1328,10 +1356,14 @@ class MainWindow(QMainWindow):
     def _run_stage(self, msg: str) -> None:
         self.progress_stage.setText(msg)
         self.log_text.setText(msg)
+        self.statusBar().showMessage(msg.removesuffix(" ..."))
         low = msg.lower()
         prev = getattr(self, "_stage_now", "scan")
         if "ocr subtitles" in low:
             self._stage_now = "ocr"
+        elif low.startswith("upscaling"):
+            self._stage_now = "upscale"
+            self.progress_current.setText(msg.removesuffix(" ..."))
         elif low.startswith("encoding"):
             self._stage_now = "encode"
         elif low.startswith("ripping") or "reusing existing rip" in low:
@@ -1340,6 +1372,12 @@ class MainWindow(QMainWindow):
             self._stage_now = "verify"
         if self._stage_now != prev:
             self._stage_eta = None  # new stage: forecast until live ETA
+            self.stage_bar.set_busy(
+                True,
+                "upscaling ..." if self._stage_now == "upscale" else "estimating ...",
+            )
+            if self.overall_bar.bar.value() == 0:
+                self.overall_bar.set_busy(True, "queue active ...")
         self._forecast_total()
 
     def _run_progress(self, job_name: str, tid: int, frac: float, eta: float | None) -> None:

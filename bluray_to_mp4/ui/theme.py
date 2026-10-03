@@ -7,6 +7,8 @@ palette. Widget-specific variants are selected by objectName conventions:
   objectName="primaryBtn"  - filled accent call-to-action
   objectName="ghostBtn"    - borderless secondary button
   objectName="card"        - QFrame/QGroupBox panel with border + radius
+  objectName="runCard"     - Encode page's active-operation panel
+  objectName="progressPanel" - compact progress lane inside runCard
   objectName="navBar"      - the left navigation column
   objectName="muted"       - secondary text
   objectName="statusPill"  - header status chip (monitor on/off)
@@ -27,32 +29,40 @@ _PALETTES = {
         panel="#161A22",
         card="#1B212C",
         card_border="#2A3140",
+        card_border_strong="#394457",
         text="#E9ECF2",
         text_muted="#9AA3B4",
         accent="#6366F1",
         accent_hover="#7C7FF6",
+        accent_soft="#222A55",
+        accent_2="#22D3EE",
         accent_text="#FFFFFF",
         ok="#34D399",
         warn="#FBBF24",
         err="#F87171",
         input_bg="#10141B",
         row_alt="#161B25",
+        progress_bg="#0B0F16",
     ),
     "light": dict(
         bg="#F6F7FA",
         panel="#FFFFFF",
         card="#FFFFFF",
         card_border="#DDE1EA",
+        card_border_strong="#C7CEDB",
         text="#191D27",
         text_muted="#5B6472",
         accent="#4F46E5",
         accent_hover="#6366F1",
+        accent_soft="#EEF2FF",
+        accent_2="#0891B2",
         accent_text="#FFFFFF",
         ok="#059669",
         warn="#B45309",
         err="#DC2626",
         input_bg="#FFFFFF",
         row_alt="#F2F4F9",
+        progress_bg="#EEF1F7",
     ),
 }
 
@@ -82,8 +92,8 @@ QFrame#navBar {{
   border-right: 1px solid {p['card_border']};
 }}
 QLabel#brand {{
-  font-size: 17px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 800;
   color: {p['text']};
 }}
 QLabel#brandAccent {{ color: {p['accent']}; font-size: 17px; }}
@@ -98,9 +108,9 @@ QListWidget#navList {{
   font-size: 13px;
 }}
 QListWidget#navList::item {{
-  padding: 9px 12px;
+  padding: 10px 12px;
   margin: 2px 8px;
-  border-radius: 7px;
+  border-radius: 8px;
   color: {p['text_muted']};
 }}
 QListWidget#navList::item:hover {{
@@ -113,24 +123,58 @@ QListWidget#navList::item:selected {{
   font-weight: 600;
 }}
 QLabel#statusPill {{
-  padding: 4px 10px;
-  border-radius: 10px;
+  padding: 5px 11px;
+  border-radius: 8px;
   background: {p['row_alt']};
+  border: 1px solid {p['card_border']};
   color: {p['text_muted']};
   font-size: 11px;
 }}
 
 /* ---------- content ---------- */
-QLabel#h1 {{ font-size: 22px; font-weight: 700; }}
-QLabel#h2 {{ font-size: 15px; font-weight: 600; }}
+QLabel#h1 {{ font-size: 22px; font-weight: 750; }}
+QLabel#h2 {{ font-size: 15px; font-weight: 650; }}
 QLabel#muted, QLabel {{ color: {p['text']}; }}
 QLabel#muted {{ color: {p['text_muted']}; }}
+QLabel#runTitle {{ font-size: 23px; font-weight: 800; color: {p['text']}; }}
+QLabel#runSub {{ color: {p['text_muted']}; font-size: 12px; }}
+QLabel#metricText {{
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: {p['row_alt']};
+  border: 1px solid {p['card_border']};
+  color: {p['text_muted']};
+}}
+QLabel#activityDots {{
+  color: {p['accent_2']};
+  font-weight: 800;
+}}
+QLabel#progressLabel {{
+  color: {p['text_muted']};
+  font-size: 11px;
+  font-weight: 700;
+}}
 
 QGroupBox#card, QFrame#card {{
   background: {p['card']};
   border: 1px solid {p['card_border']};
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 14px;
+  margin-top: 2px;
+}}
+QFrame#runCard {{
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                              stop:0 {p['card']}, stop:1 {p['panel']});
+  border: 1px solid {p['card_border_strong']};
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 2px;
+}}
+QFrame#progressPanel {{
+  background: {p['input_bg']};
+  border: 1px solid {p['card_border']};
+  border-radius: 8px;
+  padding: 10px;
   margin-top: 2px;
 }}
 QGroupBox#card {{
@@ -185,17 +229,17 @@ QPushButton#dangerBtn {{
 }}
 QPushButton#dangerBtn:hover {{ background: {p['err']}; color: {p['accent_text']}; }}
 
-QLineEdit, QComboBox, QSpinBox {{
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
   background: {p['input_bg']};
   border: 1px solid {p['card_border']};
   border-radius: 7px;
   padding: 6px 10px;
   min-height: 18px;
 }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
   border-color: {p['accent']};
 }}
-QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
   color: {p['text_muted']};
   background: {p['card']};
 }}
@@ -239,16 +283,17 @@ QHeaderView::section {{
 
 /* ---------- progress ---------- */
 QProgressBar {{
-  background: {p['input_bg']};
+  background: {p['progress_bg']};
   border: 1px solid {p['card_border']};
   border-radius: 8px;
-  height: 14px;
+  height: 16px;
   text-align: center;
   color: {p['text_muted']};
   font-size: 11px;
 }}
 QProgressBar::chunk {{
-  background: {p['accent']};
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                              stop:0 {p['accent']}, stop:1 {p['accent_2']});
   border-radius: 7px;
 }}
 

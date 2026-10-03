@@ -190,6 +190,26 @@ def test_classifier_marks_no_initial_progress_as_stalled():
     assert any("no progress" in reason for reason in health["reasons"])
 
 
+def test_classifier_allows_initial_upscale_chunk_to_run_longer():
+    from bluray_to_mp4.monitor import classify_snapshot
+
+    snap = {
+        "busy": True,
+        "stage": "Upscaling MAMMA_MIA (2018).mp4 (720p) ...",
+        "current_job": "MAMMA_MIA (2018).mp4 (720p)",
+        "jobs_done": 0,
+        "jobs_total": 1,
+        "progress": 0.0,
+        "updated_at": 500.0,
+        "progress_updated_at": 100.0,
+        "stage_started_at": 100.0,
+        "last_error": None,
+    }
+    health = classify_snapshot(snap, now=1100.0, stale_seconds=300.0)
+    assert health["status"] == "running"
+    assert health["ok"]
+
+
 def test_lan_watcher_uses_monitor_health(server):
     from bluray_to_mp4.monitor_client import check_monitor, format_watch_result
 

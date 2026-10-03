@@ -33,6 +33,7 @@ __all__ = [
 
 _history_lock = threading.Lock()
 DEFAULT_STALE_SECONDS = 300.0
+UPSCALE_INITIAL_STALE_SECONDS = 1800.0
 
 
 def _now() -> float:
@@ -61,6 +62,12 @@ def classify_snapshot(snapshot: dict, *, now: float | None = None,
     jobs_done = int(snapshot.get("jobs_done") or 0)
     jobs_total = int(snapshot.get("jobs_total") or 0)
     stage = snapshot.get("stage") or "unknown"
+    initial_upscale_stage = (
+        stage.lower().startswith("upscaling") and progress <= 0.001
+    )
+    stale_limit = (
+        UPSCALE_INITIAL_STALE_SECONDS if initial_upscale_stage else stale_seconds
+    )
 
     status = "idle"
     reasons: list[str] = []
@@ -69,7 +76,7 @@ def classify_snapshot(snapshot: dict, *, now: float | None = None,
         reasons.append(str(snapshot["last_error"]))
     elif busy:
         status = "running"
-        if update_age is not None and update_age >= stale_seconds:
+        if update_age is not None and update_age >= stale_limit:
             status = "stuck"
             reasons.append(f"no monitor update for {int(update_age)}s")
         if progress_age is not None and progress_age >= stale_seconds:
@@ -81,7 +88,7 @@ def classify_snapshot(snapshot: dict, *, now: float | None = None,
             elif (
                 progress <= 0.001
                 and stage_age is not None
-                and stage_age >= stale_seconds
+                and stage_age >= stale_limit
             ):
                 status = "stalled"
                 reasons.append(
