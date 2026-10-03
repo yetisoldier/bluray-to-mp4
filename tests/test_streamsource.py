@@ -113,7 +113,7 @@ def test_start_args_match_usage_txt_stream_form(monkeypatch):
         assert calls == [(
             "makemkvcon",
             ["-r", "stream", "--cache=128", "--bindip=127.0.0.1",
-             "--bindport=51000", "--messages=-stdout", "disc:0"],
+             "--bindport=51000", "--messages=-stdout"],
         )]
         assert server.port == 51000
         assert server.base_url == "http://127.0.0.1:51000"

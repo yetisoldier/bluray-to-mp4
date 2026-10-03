@@ -288,6 +288,11 @@ def start_stream_server(
             "makemkvcon stream server may be running - end it in Task "
             "Manager"
         )
+    # Real-disc probe run 1 (Eric, 2026-10-02 19:30): the official
+    # usage.txt stream example takes NO disc parameter - passing disc:N
+    # made makemkvcon exit instantly with code 4294967294 (invalid
+    # args). The stream server serves whatever disc is in the drive;
+    # the disc_index is used only for scan-side title selection.
     args = [
         "-r",
         "stream",
@@ -295,7 +300,6 @@ def start_stream_server(
         f"--bindip={bind_ip}",
         f"--bindport={port}",
         "--messages=-stdout",
-        f"disc:{disc_index}",
     ]
     spawn = runner or _default_runner
     proc = spawn(binary, args)
