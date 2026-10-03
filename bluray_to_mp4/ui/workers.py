@@ -22,6 +22,22 @@ from ..pipeline import run_pipeline
 from ..series import detect_series
 
 
+def _job_warnings(result, job) -> list[str]:
+    """Warnings that belong to this completed output.
+
+    OCR/mux warnings are job-prefixed by the pipeline. If subtitles were
+    requested but no sidecar exists, synthesize a visible warning so both
+    live status and History stay honest after a killed OCR child.
+    """
+    if job.srt_path:
+        return []
+    warnings = [
+        w for w in getattr(result, "warnings", [])
+        if w.startswith(job.output_name)
+    ]
+    return warnings or ["subtitle missing (unknown reason)"]
+
+
 class ScanWorker(QThread):
     """Scan one disc (or list drives) and emit the result."""
 
@@ -157,8 +173,11 @@ class RunWorker(QThread):
                     if self.plan.get("media_type") == "dvd"
                     else BLURAY_GB_PER_HOUR
                 )
+            monitor_warnings: list[str] = []
             for job in result.jobs:
                 if job.completed:
+                    warnings = _job_warnings(result, job)
+                    monitor_warnings.extend(warnings)
                     # QW-6 (Bob audit): the output is on disk now - record
                     # its size so History can show size + achieved GB/hour
                     # (the number Eric validates by hand every run).
@@ -175,13 +194,10 @@ class RunWorker(QThread):
                         srt=bool(job.srt_path),
                         size_bytes=size_bytes,
                         target_gb_per_hour=float(target_gbph),
-                        warnings=(
-                            [] if job.srt_path
-                            else ([w for w in getattr(result, "warnings", [])
-                                   if w.startswith(job.output_name)]
-                                  or ["subtitle missing (unknown reason)"])
-                        ),
+                        warnings=warnings,
                     ))
+            for warning in monitor_warnings:
+                monitor_state.update(warning=warning)
             # C6: per-job failures surface as a partial result - the
             # completed outputs keep their records, and the monitor
             # records which outputs failed (never a generic success).

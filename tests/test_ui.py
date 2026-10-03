@@ -1083,6 +1083,51 @@ def test_run_worker_records_target_gbph(qapp, monkeypatch, tmp_path):
     assert workers_mod.monitor_state.recent[0].target_gb_per_hour == 1.0
 
 
+def test_run_worker_surfaces_subtitle_warning_to_monitor(qapp, monkeypatch, tmp_path):
+    """Run-12 honesty: a completed MP4 with failed/missing OCR must not
+    leave /status clean. The same warning lands in History and the live
+    monitor warnings list."""
+    from bluray_to_mp4.monitor import MonitorState
+    from bluray_to_mp4.ui import workers as workers_mod
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    class _Job:
+        output_name = "movie.mp4"
+        completed = True
+        srt_path = None
+        duration_seconds = 3600
+
+    class _Result:
+        is_series = False
+        encoder = "x265"
+        jobs = [_Job()]
+        errors = []
+        warnings = [
+            "movie.mp4: subtitle OCR failed (seconv exited with code 1); "
+            "MP4 was produced without subtitles."
+        ]
+
+    monkeypatch.setattr(workers_mod, "monitor_state", MonitorState())
+    monkeypatch.setattr(workers_mod, "run_pipeline",
+                        lambda *a, **k: _Result())
+    (tmp_path / "movie.mp4").write_bytes(b"x")
+    plan = {
+        "disc_name": "Disc", "media_type": "dvd", "is_series": False,
+        "encoder": "x265", "outdir": str(tmp_path),
+        "jobs": [{"tid": 0, "output_name": "movie.mp4",
+                  "duration_seconds": 3600}],
+        "tid_names": {},
+    }
+
+    worker = RunWorker(0, plan, Settings())
+    worker.start()
+    _pump(qapp, worker)
+
+    state = workers_mod.monitor_state
+    assert state.recent[0].warnings == _Result.warnings
+    assert state.snapshot()["warnings"] == _Result.warnings
+
+
 # ----------------------------------------------------------------------
 # v0.2.18: GB/hour size target (Review spin, per-type persistence,
 # live projection, History Target GB/hr).

@@ -113,6 +113,7 @@ def test_bundled_tools_beat_path_when_frozen(tmp_path, monkeypatch):
     se_dir = tools / "SubtitleEdit"
     se_dir.mkdir()
     (se_dir / "SubtitleEdit.exe").write_text("fake bundled se")
+    (se_dir / "seconv.exe").write_text("fake bundled seconv")
 
     monkeypatch.setattr(
         sys, "frozen", True, raising=False)
@@ -130,8 +131,9 @@ def test_bundled_tools_beat_path_when_frozen(tmp_path, monkeypatch):
 
     se = binaries.find_program(
         "SubtitleEdit", search_dirs=binaries._subtitle_edit_dirs(),
-        exe_names=["SubtitleEdit.exe", "SubtitleEdit"])
+        exe_names=["seconv.exe", "seconv", "SubtitleEdit.exe", "SubtitleEdit"])
     assert se is not None and "SubtitleEdit" in se
+    assert se.endswith("seconv.exe")
 
 
 def test_nvenc_check_distinguishes_build_vs_driver(monkeypatch, tmp_path):

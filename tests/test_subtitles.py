@@ -74,7 +74,7 @@ def _fake_extract(mkv, index, out_path, *, binary="ffmpeg"):
 
 def _se_runner_factory(srt_text):
     def runner(cmd):
-        # SubtitleEdit /convert <in> subrip /ocrengine... /outputfolder:...
+        # seconv /convert <in> subrip /ocrengine... /outputfolder:...
         in_path = cmd[2]
         out_dir = cmd[-1].split(":", 1)[1] if ":" in cmd[-1] else "."
         out = os.path.splitext(os.path.basename(in_path))[0] + ".srt"
@@ -113,9 +113,9 @@ def test_run_subtitle_ocr_zero_cues_raises(tmp_path, monkeypatch):
 
 
 def test_se_command_flags():
-    se = SubtitleEditOcr(binary="SubtitleEdit.exe")
+    se = SubtitleEditOcr(binary="seconv.exe")
     cmd = se.command(r"C:\rip\movie.sup", r"C:\rip")
-    assert cmd[0] == "SubtitleEdit.exe"
+    assert cmd[0] == "seconv.exe"
     assert "/convert" in cmd and "subrip" in cmd
     assert any(a == "/ocrengine:tesseract" for a in cmd)
     assert any(a == "/ocrlanguage:en" for a in cmd)
@@ -133,10 +133,10 @@ def test_extract_subtitles_failure_raises(tmp_path):
 
 def test_se_not_installed_message(monkeypatch, tmp_path):
     def missing_run(cmd, **kw):
-        raise FileNotFoundError("SubtitleEdit")
+        raise FileNotFoundError("seconv")
     monkeypatch.setattr("bluray_to_mp4.subtitles.subprocess.run", missing_run)
     se = SubtitleEditOcr()
-    with pytest.raises(SubtitleOcrError, match="Subtitle Edit not found"):
+    with pytest.raises(SubtitleOcrError, match="seconv not found"):
         se.run(str(tmp_path / "in.sup"), str(tmp_path), runner=None)
 
 

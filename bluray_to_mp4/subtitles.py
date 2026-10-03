@@ -2,7 +2,7 @@
 
 Blu-ray subtitles are image-based (PGS) and MP4 cannot contain them, so
 the recommended track is extracted to .sup and OCR'd with Subtitle
-Edit's command-line converter (Tesseract engine). DVDs carry VobSub,
+Edit's headless command-line converter, seconv (Tesseract engine). DVDs carry VobSub,
 which extracts to a single-track MKV instead (v0.2.16: ffmpeg has no
 vobsub muxer; matroska is the only container that accepts a
 dvd_subtitle stream copy). The SRT output is then parsed and
@@ -80,14 +80,14 @@ def extract_subtitles(
 
 @dataclass
 class SubtitleEditOcr:
-    """OCR via the Subtitle Edit command-line converter (Tesseract)."""
+    """OCR via Subtitle Edit's headless seconv converter (Tesseract)."""
 
-    binary: str = "SubtitleEdit"
+    binary: str = "seconv"
     ocr_engine: str = "tesseract"
     language: str = "en"
 
     def command(self, in_path: str, out_dir: str) -> list[str]:
-        """SE CLI: /convert <pattern> <format> /ocrengine:<engine>.
+        """seconv CLI: /convert <pattern> <format> /ocrengine:<engine>.
 
         The converter writes <basename>.srt next to the input's name inside
         out_dir; we move/verify afterwards.
@@ -114,28 +114,28 @@ class SubtitleEditOcr:
                 )
             except FileNotFoundError as exc:
                 raise SubtitleOcrError(
-                    "Subtitle Edit not found on PATH. Install it from "
+                    "Subtitle Edit seconv not found on PATH. Install Subtitle Edit from "
                     "https://github.com/SubtitleEdit/subtitleedit/releases "
-                    "(and Tesseract via the UB Mannheim build), then retry. "
+                    "with seconv.exe (and Tesseract via the UB Mannheim build), then retry. "
                     f"Details: {exc}"
                 ) from exc
             if proc.returncode != 0:
                 raise SubtitleOcrError(
-                    f"Subtitle Edit exited with code {proc.returncode}: "
+                    f"Subtitle Edit seconv exited with code {proc.returncode}: "
                     f"{proc.stderr.strip()[:300]}"
                 )
         else:
             proc = runner(cmd)
             if proc.returncode != 0:
                 raise SubtitleOcrError(
-                    f"Subtitle Edit exited with code {proc.returncode}"
+                    f"Subtitle Edit seconv exited with code {proc.returncode}"
                 )
 
         expected = os.path.splitext(os.path.basename(in_path))[0] + ".srt"
         produced = os.path.join(out_dir, expected)
         if not os.path.exists(produced):
             raise SubtitleOcrError(
-                f"Subtitle Edit produced no SRT (expected {produced}). "
+                f"Subtitle Edit seconv produced no SRT (expected {produced}). "
                 "Check the Tesseract installation."
             )
         return produced

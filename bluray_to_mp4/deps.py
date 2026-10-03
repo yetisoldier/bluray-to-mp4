@@ -252,16 +252,16 @@ def check_nvenc(settings: "Settings | None" = None) -> DependencyCheck:
 
 
 def check_subtitle_edit() -> DependencyCheck:
-    """Subtitle Edit CLI (SubtitleEdit.exe) for PGS->SRT OCR.
+    """Subtitle Edit headless seconv CLI for PGS/VobSub -> SRT OCR.
 
     Bundled with the app since v0.2.2 (packaging/tools/SubtitleEdit), so
     the packaged build should always find it next to the exe.
     """
     found = find_program(
-        "SubtitleEdit",
+        "seconv",
         env_var="B2M_SUBTITLE_EDIT",
         search_dirs=binaries._subtitle_edit_dirs(),
-        exe_names=["SubtitleEdit.exe", "SubtitleEdit"],
+        exe_names=["seconv.exe", "seconv", "SubtitleEdit.exe", "SubtitleEdit"],
     )
     if found:
         return DependencyCheck(

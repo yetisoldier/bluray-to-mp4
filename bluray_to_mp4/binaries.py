@@ -164,15 +164,15 @@ def resolve_ffprobe(binary: str = "ffprobe") -> str:
     return found or binary
 
 
-def resolve_subtitle_edit(binary: str = "SubtitleEdit") -> str:
-    if binary not in ("SubtitleEdit", "SubtitleEdit.exe") and (
+def resolve_subtitle_edit(binary: str = "seconv") -> str:
+    if binary not in ("SubtitleEdit", "SubtitleEdit.exe", "seconv", "seconv.exe") and (
         os.path.isfile(binary) or shutil.which(binary)
     ):
         return binary
     found = find_program(
-        "SubtitleEdit",
+        binary,
         env_var="B2M_SUBTITLE_EDIT",
         search_dirs=_subtitle_edit_dirs(),
-        exe_names=["SubtitleEdit.exe", "SubtitleEdit"],
+        exe_names=["seconv.exe", "seconv", "SubtitleEdit.exe", "SubtitleEdit"],
     )
     return found or binary
