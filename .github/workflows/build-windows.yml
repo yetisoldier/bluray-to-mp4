@@ -169,8 +169,9 @@ jobs:
           # Eric request 2026-10-02 - the zip filename must carry the
           # build number so fresh extractions are identifiable on disk.
           $ver = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          Compress-Archive -Path dist\bluray-to-mp4 -DestinationPath "bluray-to-mp4-$ver-windows-x64.zip"
           Set-Content -Path version.txt -Value $ver
+          Copy-Item version.txt dist\bluray-to-mp4\version.txt
+          Compress-Archive -Path dist\bluray-to-mp4 -DestinationPath "bluray-to-mp4-$ver-windows-x64.zip"
           Write-Host "Packaged bluray-to-mp4-$ver-windows-x64.zip"
 
 
