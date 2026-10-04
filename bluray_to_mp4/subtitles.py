@@ -348,9 +348,20 @@ class SubtitleEditOcr:
         settings_path = os.path.join(out_dir, SE_CONV_SETTINGS_NAME)
         if not os.path.exists(settings_path):
             write_ocr_settings(settings_path)
+        # v0.2.29 (Karen's validation): purge a stale raw SRT BEFORE
+        # pass 1 - a killed prior OCR in this workdir leaves one
+        # behind, and a seconv pass-1 that exits 0 without writing
+        # would otherwise ship that stale file (a different title's
+        # subtitles) under a success path. Symmetric with the
+        # fixed_srt cleanup before pass 2 below.
+        raw_srt = os.path.join(out_dir, "b2m_ocr_raw.srt")
+        if os.path.exists(raw_srt):
+            try:
+                os.remove(raw_srt)  # stale from a killed run
+            except OSError:
+                pass
         self._run_one(cmd, runner=runner)
 
-        raw_srt = os.path.join(out_dir, "b2m_ocr_raw.srt")
         if not os.path.exists(raw_srt):
             raise SubtitleOcrError(
                 f"Subtitle Edit seconv produced no SRT (expected {raw_srt}). "
@@ -455,10 +466,25 @@ def run_subtitle_ocr(
     with open(outcome.srt_path, encoding="utf-8-sig") as fh:
         raw = fh.read()
 
+    fixed_parse_failed = False
     try:
         cues = parse_srt(raw)
     except SrtError as exc:
-        raise SubtitleOcrError(f"OCR output was not valid SRT: {exc}") from exc
+        if outcome.srt_path == outcome.raw_srt_path:
+            # The shipping SRT IS the raw OCR - there is no distinct
+            # fixed file to fall back from, so the fail-closed
+            # contract stands.
+            raise SubtitleOcrError(f"OCR output was not valid SRT: {exc}") from exc
+        # v0.2.29 (Karen's validation): pass 2 exited 0 but its file
+        # does not parse - a truncated partial write. The raw OCR is
+        # still good, so fail open to it instead of raising and losing
+        # the subtitles to broken post-processing.
+        try:
+            cues = parse_srt(raw_text)
+        except SrtError:
+            raise SubtitleOcrError(f"OCR output was not valid SRT: {exc}") from exc
+        raw = raw_text
+        fixed_parse_failed = True
     cues = normalize_cues(cues)
     notes: list[str] = []
     if not cues:
@@ -470,8 +496,15 @@ def run_subtitle_ocr(
     # auto-fix pass's changed-cue count is ALWAYS named when it ran -
     # including 0, which proves the pass executed - and unknown glyphs
     # best-guessed above zero get the spot-check wording (the run-12
-    # defect was the silence, not the guessing).
-    if outcome.fix_applied:
+    # defect was the silence, not the guessing). A fixed file that
+    # failed to parse is named too: the raw OCR shipped instead.
+    if fixed_parse_failed:
+        notes.append(
+            "Unattended OCR auto-fix output was not valid SRT (likely a "
+            "truncated write); the raw OCR shipped without glyph "
+            "corrections - spot-check spelling."
+        )
+    elif outcome.fix_applied:
         auto_resolved = _count_auto_resolved_cues(raw_text, raw)
         notes.append(
             f"Unattended OCR auto-resolved {auto_resolved} of "

@@ -2,6 +2,60 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.29] - 2026-10-04
+
+### Fixed
+
+Karen's independent validation of v0.2.28 (run a429efb0, verdict
+PASS with findings) surfaced four minor defects; each ships with a
+regression test.
+
+- **Stale raw OCR SRT could ship under a success path.** A killed
+  prior OCR in the same workdir leaves `b2m_ocr_raw.srt` behind; a
+  seconv pass-1 that exits 0 without writing then passed the
+  "raw SRT exists" check and shipped that stale file - potentially
+  a different title's subtitles - as a clean success. The wrapper
+  now deletes a stale `b2m_ocr_raw.srt` before pass 1, symmetric
+  with the fixed-SRT cleanup that already runs before pass 2.
+
+- **A truncated auto-fix SRT no longer loses the raw OCR.** If
+  pass-2's "fixed" file exists but does not parse (a partial write
+  from a killed run), the OCR stage previously raised and the
+  pipeline's fail-open shipped the MP4 with NO subtitles at all.
+  It now falls back to the raw SRT instead and records an honest
+  note that the shipped sidecar skipped glyph corrections.
+
+- **Monitor port walk could crash startup above 65535.** A
+  configured port near the top of the range (>= 65526 with the
+  default 10-port fallback) made the walk offer candidates above
+  65535; binding there raises OverflowError, which is not an
+  OSError and escaped both the walk's handler and the UI's
+  `except OSError`. The walk is clamped to 65535 and the first
+  real bind error surfaces instead.
+
+- **The upscale duration gate could pass with an unknown rip
+  duration.** When the rip could not be probed AND no title
+  duration was available (rip duration effectively <= 0), the
+  gate's 5-second tolerance floor would accept ANY mezzanine. The
+  gate now refuses an unknown rip duration exactly like an
+  unprobeable mezzanine, so the existing fail-open encodes the
+  original rip with a warning.
+
+### Docs
+
+- **CHANGELOG [0.2.28] zip-growth bullet corrected:** the release
+  zip grows ~31 MB (351,615,113 B - 320,608,925 B = 31,006,188 B),
+  while the bundled fp16 model is 33.4 MB (33,434,888 B) - the
+  old "~34 MB" bullet conflated the two.
+
+- **README honest-validation block refreshed to the 2026-10-04
+  state:** runs 12-13 happened (OCR required babysitting -
+  root-caused and replaced with headless seconv + Tesseract in
+  v0.2.27; the audio-desync root cause is fixed via the real-fps
+  probe and mezzanine duration gate), x2plus is the live-action
+  profile since v0.2.28, and the remaining field-unverified item
+  is Windows-native OCR end-to-end.
+
 ## [0.2.28] - 2026-10-04
 
 ### Changed
@@ -27,7 +81,8 @@ All notable changes to bluray-to-mp4. Dates are America/Chicago.
   geometry are unchanged. The anime profile keeps
   `realesr-animevideov3` at native 2x, as since v0.2.26.
 
-- **The release zip grows ~34 MB** (the bundled fp16 model is
+- **The release zip grows ~31 MB** (measured delta: 351,615,113 B -
+  320,608,925 B = 31,006,188 B; the bundled fp16 model is 33.4 MB,
   33,434,888 B). x2plus is a 23-block RRDBNet versus animevideov3's
   compact VGG-style video net, so the live-action profile is slower
   per frame (a ~7.5–8× per-frame ratio was measured on the

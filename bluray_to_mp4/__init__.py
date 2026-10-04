@@ -5,4 +5,4 @@ novice-friendly track recommendations, TV-series episode naming, and
 PGS-to-SRT subtitle handling.
 """
 
-__version__ = "0.2.28"
+__version__ = "0.2.29"

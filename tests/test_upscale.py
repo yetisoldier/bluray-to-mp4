@@ -467,3 +467,26 @@ def test_duration_gate_rejects_unprobeable_mezzanine():
 
     with pytest.raises(UpscaleError, match="could not be probed"):
         verify_mezzanine_duration("mezz.mkv", 7590.0, probe_duration=broken)
+
+
+def test_duration_gate_rejects_unknown_rip_duration():
+    """v0.2.29 (Karen's validation): an unknown rip duration (probe
+    failed AND no title duration - effectively <= 0) must NOT pass
+    the gate. With rip=0 the 5-second tolerance floor would accept
+    any mezzanine, so the gate refuses it exactly like an
+    unprobeable mezzanine and the existing fail-open encodes the
+    original rip with a warning."""
+    from bluray_to_mp4.upscale import verify_mezzanine_duration
+
+    def probe(path, *, binary="ffprobe"):
+        return 7590.0
+
+    # Zero: probe failed and no title duration available.
+    with pytest.raises(UpscaleError, match="rip duration unknown"):
+        verify_mezzanine_duration("mezz.mkv", 0.0, probe_duration=probe)
+    # None (falsy title duration) - same refusal, via `or 0`.
+    with pytest.raises(UpscaleError, match="rip duration unknown"):
+        verify_mezzanine_duration("mezz.mkv", None, probe_duration=probe)
+    # Negative garbage is equally unknown.
+    with pytest.raises(UpscaleError, match="rip duration unknown"):
+        verify_mezzanine_duration("mezz.mkv", -1.0, probe_duration=probe)

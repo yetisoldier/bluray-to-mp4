@@ -328,7 +328,11 @@ def verify_mezzanine_duration(
     Raises UpscaleError naming both durations when they differ by more
     than max(5 seconds, 2%) - the pipeline's existing fail-open path
     then encodes the ORIGINAL rip with an honest warning instead of a
-    silently desynced upscale. probe_duration is injected (a
+    silently desynced upscale. An unknown rip duration (probe failed
+    and no title duration - effectively <= 0) must NOT pass the gate
+    either (v0.2.29, Karen's validation): with rip=0 the tolerance
+    floor would accept any mezzanine, so the gate refuses it exactly
+    like an unprobeable mezzanine. probe_duration is injected (a
     probe_duration_seconds-shaped callable) so the gate is testable
     without ffprobe.
     """
@@ -340,6 +344,12 @@ def verify_mezzanine_duration(
             f"({exc}); refusing to encode a possibly desynced upscale"
         ) from exc
     rip = float(rip_duration_seconds or 0)
+    if rip <= 0:
+        raise UpscaleError(
+            "rip duration unknown (the rip could not be probed and no "
+            "title duration is available); refusing to encode a "
+            "possibly desynced upscale"
+        )
     tolerance = max(
         _MEZZANINE_DURATION_TOLERANCE_SECONDS,
         _MEZZANINE_DURATION_TOLERANCE_FRACTION * rip,

@@ -69,18 +69,22 @@ everything still works offline.
 **Done.** The History page records each output with its size and achieved
 GB/hour, so every run self-grades against the size target.
 
-### Honest validation status (2026-10-02)
+### Honest validation status (2026-10-04)
 
 - **Validated on real discs** (10-run validation day, v0.2.6 through
   v0.2.16): Blu-ray scan/rip/encode chain, PGS extraction and OCR to SRT,
   DVD video encode at the SD budget, live progress and ETAs, LAN monitoring
   during runs, rip reuse.
-- **Shipped, pending Eric's v0.2.16 test run:** DVD VobSub subtitle OCR
-  end-to-end, and embedded mov_text subtitles inside the MP4. The PGS
-  subtitle path shipped in v0.2.16 before its own real-disc test.
-- **Never run on real media yet:** series disc end-to-end, interlaced DVD
-  through the deinterlace path, x265 software encode (every validation run
-  used NVENC).
+- **Runs 12 and 13 happened (2026-10-04):** OCR still required babysitting
+  (the packaged app bundled SE's GUI, which has no unattended mode) -
+  root-caused and replaced with the bundled headless seconv + Tesseract
+  in v0.2.27. The run-13 progressive audio desync was root-caused too
+  (hardcoded 29.97 fps stamp on a 23.976 rip) and is fixed by the real-fps
+  probe plus the mezzanine duration gate (v0.2.27). Since v0.2.28 the
+  live-action 720p profile runs the bundled, verified RealESRGAN_x2plus.
+- **Remaining field-unverified item:** Windows-native OCR end-to-end
+  (seconv + bundled Tesseract have not yet run on a real disc in the
+  packaged app; scheduled for tonight's run).
 
 ## Rip reuse and resilience
 

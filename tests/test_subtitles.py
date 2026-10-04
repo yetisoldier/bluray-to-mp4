@@ -440,6 +440,58 @@ def test_run_subtitle_ocr_hard_failure_still_fail_open(tmp_path, monkeypatch):
         )
 
 
+def test_run_removes_stale_raw_srt_before_pass1(tmp_path):
+    """v0.2.29 (Karen's validation): a stale b2m_ocr_raw.srt from a
+    killed prior OCR in the same workdir is purged BEFORE pass 1 - a
+    seconv pass-1 that exits 0 without writing must raise, never ship
+    the stale file (a different title's subtitles) under a success
+    path. Symmetric with the fixed_srt cleanup before pass 2."""
+    se = SubtitleEditOcr(binary="seconv.exe")
+    stale = tmp_path / "b2m_ocr_raw.srt"
+    stale.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nstale from another title\n",
+        encoding="utf-8",
+    )
+
+    def runner(cmd):
+        # Pass 1 exits 0 but writes NOTHING (the Karen-found shape).
+        if any(a.startswith("/ocrengine:") for a in cmd):
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return _se_runner_factory("")(cmd)
+
+    with pytest.raises(SubtitleOcrError, match="produced no SRT"):
+        se.run(str(tmp_path / "in.sup"), str(tmp_path), runner=runner)
+    # The stale file was removed before pass 1 - not shipped.
+    assert not stale.exists()
+
+
+def test_run_subtitle_ocr_unparsable_fixed_falls_back_to_raw(
+    tmp_path, monkeypatch
+):
+    """v0.2.29 (Karen's validation): pass 2 exiting 0 with a truncated
+    partial write (unparsable 'fixed' SRT) must NOT lose the good raw
+    OCR - fail open to it with an honest note, never raise."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+    raw_srt = "1\n00:00:01,000 --> 00:00:03,000\nl will sh0w it\n"
+    # A truncated timing line: parse_srt raises SrtError on it.
+    broken_fixed = "1\n00:00:01,000 --> 00:0"
+
+    result = run_subtitle_ocr(
+        str(tmp_path / "movie_t00.mkv"), 2,
+        str(tmp_path / "Movie.mp4"),
+        workdir=str(tmp_path),
+        se_runner=_se_runner_factory(raw_srt, fixed_text=broken_fixed),
+    )
+    assert result.cue_count == 1
+    with open(result.srt_path, encoding="utf-8-sig") as fh:
+        assert "l will sh0w it" in fh.read()  # raw text shipped
+    assert any(
+        "auto-fix output was not valid SRT" in n for n in result.notes
+    )
+    assert not any("auto-resolved" in n for n in result.notes)
+    assert not any("auto-fix pass failed" in n for n in result.notes)
+
+
 def test_se_gui_binary_refused():
     """The SE 5.x GUI has no unattended mode (run 12's wizard): both a
     direct GUI path and a resolved GUI name must be refused before any

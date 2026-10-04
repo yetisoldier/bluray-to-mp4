@@ -268,6 +268,40 @@ def test_start_server_with_fallback_tries_nearby_port(monkeypatch):
     assert calls == [8765, 8766]
 
 
+def test_start_server_with_fallback_clamps_walk_at_65535(monkeypatch):
+    """v0.2.29 (Karen's validation): the port walk must never offer a
+    candidate above 65535 - binding there raises OverflowError, which
+    is NOT an OSError, so it would escape both this handler and the
+    UI's except OSError and crash startup for a configured port near
+    the top of the range. Instead the walk stops at 65535 and the
+    first (real) bind error surfaces."""
+    import bluray_to_mp4.monitor as mon
+
+    calls = []
+
+    def fake_start_server(**kwargs):
+        calls.append(kwargs["port"])
+        raise OSError(10013, "forbidden")  # every candidate is taken
+
+    monkeypatch.setattr(mon, "active_server", None)
+    monkeypatch.setattr(mon, "start_server", fake_start_server)
+
+    # Port 65530 + 10 attempts would walk to 65540 without the clamp.
+    with pytest.raises(OSError, match="forbidden"):
+        start_server_with_fallback(
+            host="127.0.0.1", port=65530, token="s3cret",
+            fallback_attempts=10)
+    assert calls == [65530, 65531, 65532, 65533, 65534, 65535]
+
+    calls.clear()
+    # At the boundary itself, 65535 is still tried (it is legal).
+    with pytest.raises(OSError, match="forbidden"):
+        start_server_with_fallback(
+            host="127.0.0.1", port=65535, token="s3cret",
+            fallback_attempts=3)
+    assert calls == [65535]
+
+
 def test_python_module_entry_routes_watch_monitor(monkeypatch):
     import sys
 

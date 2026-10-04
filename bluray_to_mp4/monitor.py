@@ -435,7 +435,11 @@ def start_server_with_fallback(
 
     first_error: OSError | None = None
     attempts = max(0, int(fallback_attempts))
-    for candidate in range(port, port + attempts + 1):
+    # v0.2.29 (Karen's validation): clamp the walk to 65535 - binding
+    # above that raises OverflowError, which is NOT an OSError, so it
+    # would escape both this handler and the UI's except OSError and
+    # crash startup for a configured port near the top of the range.
+    for candidate in range(port, min(port + attempts + 1, 65536)):
         try:
             server, base = start_server(
                 host=host,
