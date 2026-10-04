@@ -2,6 +2,15 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## Unreleased
+
+### Fixed
+
+- **LAN monitor falls forward when Windows reserves the configured port.**
+  If the preferred monitor port raises a bind error such as WinError
+  10013, startup now tries nearby ports and persists the successful port
+  so later launches do not repeat the failure.
+
 ## [0.2.25] - 2026-10-03
 
 ### Fixed

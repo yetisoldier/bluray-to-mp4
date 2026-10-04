@@ -29,6 +29,7 @@ __all__ = [
     "classify_snapshot",
     "state",
     "start_server",
+    "start_server_with_fallback",
 ]
 
 _history_lock = threading.Lock()
@@ -410,6 +411,44 @@ def start_server(
     base = f"http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}"
     active_server = server
     return server, base
+
+
+def start_server_with_fallback(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    token: str = "",
+    monitor_state: MonitorState | None = None,
+    fallback_attempts: int = 10,
+) -> tuple[MonitorServer, str, int]:
+    """Start the monitor, moving to a nearby port if the preferred one fails.
+
+    Windows can reserve individual ports for Hyper-V, WSL, VPN clients, or
+    system services. When that happens, binding even 127.0.0.1 can raise
+    WinError 10013. Keep the monitor available by trying the next few ports;
+    callers can persist the returned port so the next launch is clean.
+    """
+    if active_server is not None:
+        server, base = start_server(
+            host=host, port=port, token=token, monitor_state=monitor_state)
+        return server, base, server.server_address[1]
+
+    first_error: OSError | None = None
+    attempts = max(0, int(fallback_attempts))
+    for candidate in range(port, port + attempts + 1):
+        try:
+            server, base = start_server(
+                host=host,
+                port=candidate,
+                token=token,
+                monitor_state=monitor_state,
+            )
+            return server, base, server.server_address[1]
+        except OSError as exc:
+            if first_error is None:
+                first_error = exc
+    assert first_error is not None
+    raise first_error
 
 
 def stop_server() -> bool:

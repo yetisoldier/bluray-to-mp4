@@ -46,7 +46,7 @@ from ..deps import check_all, missing_required
 from ..encode import BLURAY_GB_PER_HOUR, DVD_GB_PER_HOUR
 from ..makemkv import MakeMkvError
 from ..models import Disc
-from ..monitor import lan_ip, start_server, stop_server
+from ..monitor import lan_ip, start_server_with_fallback, stop_server
 from ..naming import movie_output_name
 from ..recommend import (
     classify_sub_label,
@@ -1027,16 +1027,18 @@ class MainWindow(QMainWindow):
         self.settings.monitor_enabled = checked
         try:
             if checked:
-                start_server(
+                _, _, actual_port = start_server_with_fallback(
                     host=self.settings.monitor_host,
                     port=self.settings.monitor_port,
                     token=self.settings.monitor_token,
                 )
+                if actual_port != self.settings.monitor_port:
+                    self.settings.monitor_port = actual_port
                 ip = lan_ip()
                 self.monitor_pill.setText(
-                    f"Monitor on: {ip}:{self.settings.monitor_port}")
+                    f"Monitor on: {ip}:{actual_port}")
                 self.tmdb_status.setText(
-                    f"Monitoring on: http://{ip}:{self.settings.monitor_port} (read-only)")
+                    f"Monitoring on: http://{ip}:{actual_port} (read-only)")
             else:
                 stop_server()
                 self.monitor_pill.setText("Monitor off")

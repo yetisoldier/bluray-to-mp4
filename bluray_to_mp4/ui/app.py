@@ -12,7 +12,7 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
 
     from ..config import load_settings
-    from ..monitor import start_server
+    from ..monitor import start_server_with_fallback
     from .main_window import MainWindow
 
     app = QApplication(sys.argv)
@@ -24,16 +24,19 @@ def main() -> int:
     settings = load_settings()
     if settings.monitor_enabled:
         try:
-            start_server(
+            _, _, actual_port = start_server_with_fallback(
                 host=settings.monitor_host,
                 port=settings.monitor_port,
                 token=settings.monitor_token,
             )
+            if actual_port != settings.monitor_port:
+                settings.monitor_port = actual_port
+                settings.save()
             # DR7: console shows the monitor URL on startup (BUILD.md promise).
             from ..monitor import lan_ip
             host = lan_ip() if settings.monitor_host == "0.0.0.0" else settings.monitor_host
             print(
-                f"[monitor] http://{host}:{settings.monitor_port}/status "
+                f"[monitor] http://{host}:{actual_port}/status "
                 f"(Bearer: {settings.monitor_token})",
                 flush=True,
             )

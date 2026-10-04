@@ -6,7 +6,12 @@ import urllib.request
 
 import pytest
 
-from bluray_to_mp4.monitor import JobRecord, MonitorState, start_server
+from bluray_to_mp4.monitor import (
+    JobRecord,
+    MonitorState,
+    start_server,
+    start_server_with_fallback,
+)
 
 
 def _get(url: str, token: str | None = None):
@@ -235,6 +240,32 @@ def test_lan_watcher_reports_unreachable():
     assert not result.reachable
     assert result.status == "unreachable"
     assert format_watch_result(result).startswith("UNREACHABLE:")
+
+
+def test_start_server_with_fallback_tries_nearby_port(monkeypatch):
+    import bluray_to_mp4.monitor as mon
+
+    calls = []
+
+    class DummyServer:
+        server_address = ("127.0.0.1", 8766)
+
+    def fake_start_server(**kwargs):
+        calls.append(kwargs["port"])
+        if kwargs["port"] == 8765:
+            raise OSError(10013, "forbidden")
+        return DummyServer(), "http://127.0.0.1:8766"
+
+    monkeypatch.setattr(mon, "active_server", None)
+    monkeypatch.setattr(mon, "start_server", fake_start_server)
+
+    server, base, port = start_server_with_fallback(
+        host="127.0.0.1", port=8765, token="s3cret", fallback_attempts=1)
+
+    assert isinstance(server, DummyServer)
+    assert base == "http://127.0.0.1:8766"
+    assert port == 8766
+    assert calls == [8765, 8766]
 
 
 def test_python_module_entry_routes_watch_monitor(monkeypatch):
