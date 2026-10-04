@@ -16,7 +16,7 @@ def png_header(width: int, height: int) -> bytes:
     )
 
 
-def test_upscale_uses_x4plus_native_scale_forced_tile_and_downsample(monkeypatch, tmp_path):
+def test_upscale_uses_2x_model_forced_tile_and_direct_segment(monkeypatch, tmp_path):
     calls = []
 
     # Resolve to a distinct path so the "binary not found" guard in
@@ -69,20 +69,19 @@ def test_upscale_uses_x4plus_native_scale_forced_tile_and_downsample(monkeypatch
     )
 
     esrgan_cmd = next(cmd for label, cmd in calls if label.startswith("Real-ESRGAN"))
-    assert esrgan_cmd[esrgan_cmd.index("-n") + 1] == "realesrgan-x4plus"
-    assert esrgan_cmd[esrgan_cmd.index("-s") + 1] == "4"
+    assert esrgan_cmd[esrgan_cmd.index("-n") + 1] == "realesr-animevideov3"
+    assert esrgan_cmd[esrgan_cmd.index("-s") + 1] == "2"
     # 640x360 frames force a single tile: extent 640 + 64 margin = 704.
     assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "704"
 
     segment_cmd = next(
         cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
     )
-    assert segment_cmd[segment_cmd.index("-vf") + 1] == (
-        "scale=-2:720:flags=lanczos,setsar=1"
-    )
+    # 2x lands directly at 1280x720; the segment pass only stamps SAR.
+    assert segment_cmd[segment_cmd.index("-vf") + 1] == "setsar=1"
 
 
-def test_probe_geometry_does_not_change_x4plus_fix(monkeypatch, tmp_path):
+def test_probe_geometry_does_not_change_2x_engine_path(monkeypatch, tmp_path):
     calls = []
 
     monkeypatch.setattr(
@@ -136,9 +135,7 @@ def test_probe_geometry_does_not_change_x4plus_fix(monkeypatch, tmp_path):
     segment_cmd = next(
         cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
     )
-    assert segment_cmd[segment_cmd.index("-vf") + 1] == (
-        "scale=-2:720:flags=lanczos,setsar=1"
-    )
+    assert segment_cmd[segment_cmd.index("-vf") + 1] == "setsar=1"
 
 
 @pytest.mark.parametrize(
@@ -186,7 +183,7 @@ def test_tile_size_covers_frame_without_forcing_2048(monkeypatch, tmp_path, requ
         )
     )
 
-    assert seen[0][seen[0].index("-s") + 1] == "4"
+    assert seen[0][seen[0].index("-s") + 1] == "2"
     assert seen[0][seen[0].index("-t") + 1] == expected
 
 

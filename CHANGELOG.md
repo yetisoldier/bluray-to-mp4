@@ -2,7 +2,7 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
-## Unreleased
+## [0.2.26] - 2026-10-03
 
 ### Fixed
 
@@ -19,7 +19,19 @@ All notable changes to bluray-to-mp4. Dates are America/Chicago.
   `-t` from the measured input frame extent plus a 64px safety margin
   (rounded up to a 64px multiple; explicit `tile_size` honored as a
   floor), forcing a single tile per frame so the Vulkan driver cannot
-  split frames.
+  split frames. Covered by a regression test that fails on `-t 0`.
+
+### Changed
+
+- **DVD 720p upscale now runs realesr-animevideov3 at native 2x.** The
+  live-action 720p profile previously ran realesrgan-x4plus at 4x and
+  lanczos-downsampled the mezzanine to 720p. realesrgan-x4plus
+  corrupts this frame path at `-s 2` (the v0.2.25 lesson), so the
+  profile now uses the bundled true-2x video model realesr-animevideov3
+  at native 2x: a 640x360 square-pixel extraction lands directly at
+  1280x720 with no 4x round trip and no downsample - roughly 4-8x
+  faster on the 3090 Ti. The 720p and 720p (anime) profiles now share
+  the same engine path.
 
 ## [0.2.25] - 2026-10-03
 

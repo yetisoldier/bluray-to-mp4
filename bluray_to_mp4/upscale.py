@@ -58,7 +58,7 @@ class UpscalePlan:
 
 def model_name_for_mode(mode: str) -> str:
     if mode == "720p":
-        return "realesrgan-x4plus"
+        return "realesr-animevideov3"
     if mode == "720p_anime":
         return "realesr-animevideov3"
     raise UpscaleError(f"unknown DVD upscale mode: {mode}")
@@ -66,9 +66,12 @@ def model_name_for_mode(mode: str) -> str:
 
 def realesrgan_scale_for_mode(mode: str) -> int:
     if mode == "720p":
-        # realesrgan-x4plus corrupts this DVD frame path when asked for -s 2.
-        # Run the model at its native 4x scale, then downsample the mezzanine.
-        return 4
+        # realesrgan-x4plus corrupts this frame path at -s 2 (the v0.2.25
+        # lesson), so the live-action profile now uses the bundled true-2x
+        # video model realesr-animevideov3 at native 2x: a 640x360
+        # square-pixel extraction lands directly at 1280x720 with no 4x
+        # round trip and no downsample.
+        return 2
     if mode == "720p_anime":
         return 2
     raise UpscaleError(f"unknown DVD upscale mode: {mode}")
