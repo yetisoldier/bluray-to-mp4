@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -230,10 +230,18 @@ jobs:
           if ($proc.ExitCode -ne 0) { throw "exe exited with $($proc.ExitCode)" }
           Get-Content smoke-out.txt
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-x64
-          path: |
-            bluray-to-mp4-*-windows-x64.zip
-            version.txt
-          retention-days: 30
+      - name: Publish v0.2.30 release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = (Get-Content version.txt -Raw).Trim()
+          $tag = "v$ver"
+          $zip = "bluray-to-mp4-$ver-windows-x64.zip"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag $zip --title $tag --notes "Signed Windows x64 build."
+          } else {
+            gh release upload $tag $zip --clobber
+          }
+          if ($LASTEXITCODE -ne 0) { throw "release upload failed" }
