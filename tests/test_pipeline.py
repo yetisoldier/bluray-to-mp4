@@ -10,6 +10,7 @@ from bluray_to_mp4.cli import build_parser
 from bluray_to_mp4.ffprobe import (
     FfprobeError,
     ProbedStream,
+    first_video_stream,
     first_video_width,
     is_interlaced,
     nth_of_type,
@@ -112,7 +113,9 @@ def test_series_season_and_start_episode(tmp_path):
 def test_parse_probe_and_interlace_detection():
     text = (
         '{"streams":['
-        '{"index":0,"codec_type":"video","codec_name":"h264","field_order":"tt"},'
+        '{"index":0,"codec_type":"video","codec_name":"h264","field_order":"tt",'
+        '"width":720,"height":480,"sample_aspect_ratio":"32:27",'
+        '"display_aspect_ratio":"16:9"},'
         '{"index":1,"codec_type":"audio","codec_name":"truehd","channels":8,'
         '"tags":{"language":"eng"}},'
         '{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",'
@@ -122,6 +125,12 @@ def test_parse_probe_and_interlace_detection():
     streams = parse_probe(text)
     assert len(streams) == 3
     assert is_interlaced(streams)
+    video = first_video_stream(streams)
+    assert video is not None
+    assert video.width == 720
+    assert video.height == 480
+    assert video.sample_aspect_ratio == "32:27"
+    assert video.display_aspect_ratio == "16:9"
     audio = nth_of_type(streams, "audio", 0)
     assert audio.channels == 8 and audio.lang == "eng"
     sub = nth_of_type(streams, "subtitle", 0)
@@ -158,15 +167,21 @@ _RIP_LINES = [
 ]
 
 
-def _stub_probe(monkeypatch, *, width=3840, subtitle_count=0,
-                sub_codec="hdmv_pgs_subtitle", sub_lang=""):
+def _stub_probe(monkeypatch, *, width=3840, height=2160,
+                sample_aspect_ratio="1:1", display_aspect_ratio="16:9",
+                subtitle_count=0, sub_codec="hdmv_pgs_subtitle",
+                sub_lang=""):
     """Stub probe_streams: a video stream of the given width (the movie
     fixture's scan says 3840x2160, so 3840 keeps reuse tests reusing),
     one audio stream, and optional N subtitle streams. v0.2.16: the
     stubbed subtitle streams carry a codec name and language so the
     VobSub/PGS branch and the mov_text embed tag can be tested."""
     streams = [
-        ProbedStream(0, "video", "h264", width=width),
+        ProbedStream(
+            0, "video", "h264", width=width, height=height,
+            sample_aspect_ratio=sample_aspect_ratio,
+            display_aspect_ratio=display_aspect_ratio,
+        ),
         ProbedStream(1, "audio", "ac3", channels=6),
     ]
     streams += [
@@ -1223,7 +1238,11 @@ def test_dvd_upscale_ignored_for_bluray_dry_run(tmp_path):
 def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     """The real stage returns a video-only mezzanine; final encode maps
     video from it and audio from the original DVD rip."""
-    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_probe(
+        monkeypatch, width=720, height=480,
+        sample_aspect_ratio="32:27", display_aspect_ratio="16:9",
+        subtitle_count=0,
+    )
     captures = {"upscale": [], "encode": [], "progress": []}
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
@@ -1248,6 +1267,10 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     assert result.jobs and result.jobs[0].completed
     plan = captures["upscale"][0]
     assert plan.mode == "720p"
+    assert plan.source_width == 720
+    assert plan.source_height == 480
+    assert plan.sample_aspect_ratio == "32:27"
+    assert plan.display_aspect_ratio == "16:9"
     assert plan.output_path.replace("\\", "/").endswith(
         ".upscale/title_00_720p.mkv")
     args = captures["encode"][0]

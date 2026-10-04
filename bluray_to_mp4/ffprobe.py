@@ -23,6 +23,7 @@ __all__ = [
     "nth_of_type",
     "is_interlaced",
     "first_video_width",
+    "first_video_stream",
 ]
 
 INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
@@ -41,6 +42,9 @@ class ProbedStream:
     lang: str = ""
     field_order: str = ""
     width: int = 0  # v0.2.15: video width in pixels (0 = not reported)
+    height: int = 0
+    sample_aspect_ratio: str = ""
+    display_aspect_ratio: str = ""
 
 
 def parse_probe(text: str) -> list[ProbedStream]:
@@ -60,6 +64,9 @@ def parse_probe(text: str) -> list[ProbedStream]:
                 lang=(s.get("tags") or {}).get("language", ""),
                 field_order=s.get("field_order", ""),
                 width=int(s.get("width") or 0),
+                height=int(s.get("height") or 0),
+                sample_aspect_ratio=s.get("sample_aspect_ratio", ""),
+                display_aspect_ratio=s.get("display_aspect_ratio", ""),
             )
         )
     return streams
@@ -132,6 +139,14 @@ def is_interlaced(streams: list[ProbedStream]) -> bool:
     return False
 
 
+def first_video_stream(streams: list[ProbedStream]) -> ProbedStream | None:
+    """First video stream, or None when absent."""
+    for s in streams:
+        if s.codec_type == "video":
+            return s
+    return None
+
+
 def first_video_width(streams: list[ProbedStream]) -> int | None:
     """Width of the first video stream, or None when absent/unparsed.
 
@@ -139,7 +154,5 @@ def first_video_width(streams: list[ProbedStream]) -> int | None:
     existing leftover .mkv must be the same master the current disc's
     scan describes, and width is the discriminator.
     """
-    for s in streams:
-        if s.codec_type == "video":
-            return s.width or None
-    return None
+    video = first_video_stream(streams)
+    return video.width if video and video.width else None

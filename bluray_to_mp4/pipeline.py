@@ -28,6 +28,7 @@ DVD_UPSCALE_GB_PER_HOUR = 1.5
 DVD_UPSCALE_MODES = {"off", "720p", "720p_anime"}
 from .ffprobe import (
     ProbedStream,
+    first_video_stream,
     first_video_width,
     is_interlaced,
     nth_of_type,
@@ -701,6 +702,7 @@ def run_pipeline(
                         f"expected an audio stream in {job.input_path}; rip may be corrupt"
                     )
                 deinterlace = is_interlaced(streams) if force_deinterlace is None else force_deinterlace
+                video_stream = first_video_stream(streams)
 
                 sub_ord = (
                     _subtitle_ordinal(title, job.selection.subtitle_sid)
@@ -749,6 +751,16 @@ def run_pipeline(
                                 mode=job.upscale_mode,
                                 duration_seconds=title.duration_seconds,
                                 deinterlace=deinterlace,
+                                source_width=video_stream.width if video_stream else 0,
+                                source_height=video_stream.height if video_stream else 0,
+                                display_aspect_ratio=(
+                                    video_stream.display_aspect_ratio
+                                    if video_stream else ""
+                                ),
+                                sample_aspect_ratio=(
+                                    video_stream.sample_aspect_ratio
+                                    if video_stream else ""
+                                ),
                             ),
                             on_progress=lambda frac, eta, detail=None: on_progress(
                                 ("upscale", job.tid, frac, eta, detail)
