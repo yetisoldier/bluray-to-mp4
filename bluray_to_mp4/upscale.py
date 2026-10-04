@@ -388,7 +388,13 @@ def run_dvd_upscale(
 
             input_frames = _count_pngs(in_dir)
             input_size = _png_size(in_dir / "frame_00000001.png")
-            tile_size = "0"
+            # Auto tiling (-t 0) lets the Vulkan driver split frames into a
+            # tile grid, which reintroduced the v0.2.23 seam-line artifact in
+            # v0.2.25. Force a single tile from the measured frame extent
+            # plus a 64px safety margin (explicit tile_size honored as a
+            # floor).
+            frame_extent = max(input_size) if input_size else 0
+            tile_size = _tile_size_arg(plan.tile_size, frame_extent)
             esrgan_cmd = [
                 binary,
                 "-i",

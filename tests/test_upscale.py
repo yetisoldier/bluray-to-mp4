@@ -16,7 +16,7 @@ def png_header(width: int, height: int) -> bytes:
     )
 
 
-def test_upscale_uses_x4plus_native_scale_auto_tile_and_downsample(monkeypatch, tmp_path):
+def test_upscale_uses_x4plus_native_scale_forced_tile_and_downsample(monkeypatch, tmp_path):
     calls = []
 
     # Resolve to a distinct path so the "binary not found" guard in
@@ -71,7 +71,8 @@ def test_upscale_uses_x4plus_native_scale_auto_tile_and_downsample(monkeypatch, 
     esrgan_cmd = next(cmd for label, cmd in calls if label.startswith("Real-ESRGAN"))
     assert esrgan_cmd[esrgan_cmd.index("-n") + 1] == "realesrgan-x4plus"
     assert esrgan_cmd[esrgan_cmd.index("-s") + 1] == "4"
-    assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "0"
+    # 640x360 frames force a single tile: extent 640 + 64 margin = 704.
+    assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "704"
 
     segment_cmd = next(
         cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
@@ -140,8 +141,11 @@ def test_probe_geometry_does_not_change_x4plus_fix(monkeypatch, tmp_path):
     )
 
 
-@pytest.mark.parametrize("requested", [0, 512, 1024, 4096])
-def test_tile_size_uses_realesrgan_auto_tiling(monkeypatch, tmp_path, requested):
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [(0, "704"), (512, "704"), (1024, "1024"), (4096, "4096")],
+)
+def test_tile_size_covers_frame_without_forcing_2048(monkeypatch, tmp_path, requested, expected):
     seen = []
 
     monkeypatch.setattr(
@@ -183,7 +187,57 @@ def test_tile_size_uses_realesrgan_auto_tiling(monkeypatch, tmp_path, requested)
     )
 
     assert seen[0][seen[0].index("-s") + 1] == "4"
-    assert seen[0][seen[0].index("-t") + 1] == "0"
+    assert seen[0][seen[0].index("-t") + 1] == expected
+
+
+def test_tile_argument_never_uses_auto_tiling(monkeypatch, tmp_path):
+    """The command must never request -t 0.
+
+    Auto tiling let the Vulkan driver split frames into a tile grid, which
+    reintroduced the v0.2.23 seam-line artifact in v0.2.25.
+    """
+    seen = []
+
+    monkeypatch.setattr(
+        upscale_mod,
+        "resolve_realesrgan_ncnn",
+        lambda binary: str(tmp_path / "realesrgan-ncnn-vulkan-stub"),
+    )
+    monkeypatch.setattr(upscale_mod, "resolve_ffmpeg", lambda binary: binary)
+    monkeypatch.setattr(
+        upscale_mod,
+        "resolve_realesrgan_models",
+        lambda binary, models_path=None: str(tmp_path),
+    )
+
+    def fake_run(cmd, *, label, cancel=None):
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+        elif label.startswith("Real-ESRGAN"):
+            seen.append(cmd)
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+
+    run_dvd_upscale(
+        UpscalePlan(
+            input_path=str(tmp_path / "input.mkv"),
+            output_path=str(tmp_path / "out.mkv"),
+            workdir=str(tmp_path / "work"),
+            mode="720p",
+            duration_seconds=1,
+        )
+    )
+
+    tile = seen[0][seen[0].index("-t") + 1]
+    assert tile != "0"
+    assert int(tile) >= 640 + 64
 
 
 def test_anime_profile_keeps_anime_model_at_2x(monkeypatch, tmp_path):
@@ -229,7 +283,7 @@ def test_anime_profile_keeps_anime_model_at_2x(monkeypatch, tmp_path):
     esrgan_cmd = next(cmd for label, cmd in calls if label.startswith("Real-ESRGAN"))
     assert esrgan_cmd[esrgan_cmd.index("-n") + 1] == "realesr-animevideov3"
     assert esrgan_cmd[esrgan_cmd.index("-s") + 1] == "2"
-    assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "0"
+    assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "704"
 
     segment_cmd = next(
         cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")

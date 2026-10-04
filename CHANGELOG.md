@@ -11,6 +11,16 @@ All notable changes to bluray-to-mp4. Dates are America/Chicago.
   10013, startup now tries nearby ports and persists the successful port
   so later launches do not repeat the failure.
 
+- **DVD AI upscale restores forced single-tile sizing.** v0.2.25
+  replaced v0.2.24's extent-derived tile argument with hardcoded `-t 0`
+  (model/driver auto tiling), which reintroduced the v0.2.23 tile-seam
+  artifact on Eric's 3090 Ti: a faint full-width horizontal seam near
+  the bottom of every frame. The Real-ESRGAN chunk command now derives
+  `-t` from the measured input frame extent plus a 64px safety margin
+  (rounded up to a 64px multiple; explicit `tile_size` honored as a
+  floor), forcing a single tile per frame so the Vulkan driver cannot
+  split frames.
+
 ## [0.2.25] - 2026-10-03
 
 ### Fixed
