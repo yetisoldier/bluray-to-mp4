@@ -91,9 +91,16 @@ jobs:
           if (-not $modelsDir) { Write-Error "Real-ESRGAN model wheel did not contain models"; exit 1 }
           New-Item -ItemType Directory -Force -Path "packaging\tools\models" | Out-Null
           Copy-Item "$($modelsDir.FullName)\*" "packaging\tools\models\" -Recurse -Force
+          # v0.2.28: realesrgan-x2plus is our own verified conversion - it is
+          # NOT in the pip wheel, so it ships in-repo at packaging/tools/models/
+          # (the only tracked files under the otherwise-ignored packaging/tools/).
+          # The wheel copy above cannot clobber it (the wheel has no such names);
+          # it must survive as the live-action 720p profile's model.
           foreach ($model in @(
             "models\realesrgan-x4plus.param",
             "models\realesrgan-x4plus.bin",
+            "models\realesrgan-x2plus.param",
+            "models\realesrgan-x2plus.bin",
             "models\realesr-animevideov3-x2.param",
             "models\realesr-animevideov3-x2.bin"
           )) {
@@ -141,6 +148,8 @@ jobs:
           foreach ($model in @(
             "models\realesrgan-x4plus.param",
             "models\realesrgan-x4plus.bin",
+            "models\realesrgan-x2plus.param",
+            "models\realesrgan-x2plus.bin",
             "models\realesr-animevideov3-x2.param",
             "models\realesr-animevideov3-x2.bin"
           )) {

@@ -115,6 +115,8 @@ def test_bundled_tools_beat_path_when_frozen(tmp_path, monkeypatch):
     for name in (
         "realesrgan-x4plus.param",
         "realesrgan-x4plus.bin",
+        "realesrgan-x2plus.param",
+        "realesrgan-x2plus.bin",
         "realesr-animevideov3-x2.param",
         "realesr-animevideov3-x2.bin",
     ):

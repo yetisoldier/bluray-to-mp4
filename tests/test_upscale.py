@@ -69,9 +69,14 @@ def test_upscale_uses_2x_model_forced_tile_and_direct_segment(monkeypatch, tmp_p
     )
 
     esrgan_cmd = next(cmd for label, cmd in calls if label.startswith("Real-ESRGAN"))
-    assert esrgan_cmd[esrgan_cmd.index("-n") + 1] == "realesr-animevideov3"
+    # v0.2.28: the live-action profile runs the bundled native-2x
+    # realesrgan-x2plus (NOT x4plus-at--s 2, which corrupted frames in
+    # v0.2.25 - x2plus is a true scale-2 net, so -s 2 is its native mode).
+    assert esrgan_cmd[esrgan_cmd.index("-n") + 1] == "realesrgan-x2plus"
     assert esrgan_cmd[esrgan_cmd.index("-s") + 1] == "2"
-    # 640x360 frames force a single tile: extent 640 + 64 margin = 704.
+    # 640x360 frames force a single tile: extent 640 + 64 margin = 704
+    # (the forced single tile must hold for x2plus exactly as it did for
+    # animevideov3 - auto tiling reintroduces the v0.2.23 seam).
     assert esrgan_cmd[esrgan_cmd.index("-t") + 1] == "704"
 
     segment_cmd = next(
@@ -79,6 +84,50 @@ def test_upscale_uses_2x_model_forced_tile_and_direct_segment(monkeypatch, tmp_p
     )
     # 2x lands directly at 1280x720; the segment pass only stamps SAR.
     assert segment_cmd[segment_cmd.index("-vf") + 1] == "setsar=1"
+
+
+# ---------------------------------------------------------------------
+# v0.2.28 profile mapping: live-action 720p -> realesrgan-x2plus (the
+# bundled verified conversion of the official RealESRGAN_x2plus weights,
+# a TRUE native-2x net); anime keeps realesr-animevideov3.
+
+def test_live_action_profile_maps_to_native_2x_x2plus():
+    """720p runs realesrgan-x2plus at -s 2. That pairing is the model's
+    native mode (a genuine scale-2 RRDBNet) - categorically different
+    from v0.2.25's realesrgan-x4plus at -s 2, which corrupted frames
+    because a 4x net cannot be run at 2x."""
+    assert upscale_mod.model_name_for_mode("720p") == "realesrgan-x2plus"
+    assert upscale_mod.realesrgan_scale_for_mode("720p") == 2
+
+
+def test_anime_profile_maps_to_animevideov3_at_2x():
+    """The anime profile is unchanged since v0.2.26: realesr-animevideov3
+    at its native 2x."""
+    assert upscale_mod.model_name_for_mode("720p_anime") == "realesr-animevideov3"
+    assert upscale_mod.realesrgan_scale_for_mode("720p_anime") == 2
+
+
+def test_unknown_upscale_mode_is_rejected():
+    for fn in (upscale_mod.model_name_for_mode, upscale_mod.realesrgan_scale_for_mode):
+        with pytest.raises(UpscaleError, match="unknown DVD upscale mode"):
+            fn("1080p")
+
+
+def test_models_resolver_requires_bundled_x2plus(tmp_path):
+    """v0.2.28: a models folder missing realesrgan-x2plus must fail at
+    resolve time with the file named - loudly, never at Real-ESRGAN
+    runtime mid-disc."""
+    models = tmp_path / "models"
+    models.mkdir()
+    for name in (
+        "realesrgan-x4plus.param",
+        "realesrgan-x4plus.bin",
+        "realesr-animevideov3-x2.param",
+        "realesr-animevideov3-x2.bin",
+    ):
+        (models / name).write_text("fake model")
+    with pytest.raises(UpscaleError, match="realesrgan-x2plus"):
+        upscale_mod.resolve_realesrgan_models("realesrgan-ncnn-vulkan", str(models))
 
 
 def test_probe_geometry_does_not_change_2x_engine_path(monkeypatch, tmp_path):

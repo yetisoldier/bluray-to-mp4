@@ -1,0 +1,4 @@
+# Model weights must round-trip byte-identical on every platform:
+# no line-ending conversion, no diff/merge machinery.
+*.param binary
+*.bin binary

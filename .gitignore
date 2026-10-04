@@ -9,5 +9,11 @@ build/
 *.log
 bluray-to-mp4-*.zip
 validation_outputs/
-packaging/tools/
+packaging/tools/*
+!packaging/tools/models/
+packaging/tools/models/*
+# v0.2.28: realesrgan-x2plus is our own conversion (not in any pip
+# wheel), so it ships in-repo; CI stages the rest of packaging/tools/.
+!packaging/tools/models/realesrgan-x2plus.param
+!packaging/tools/models/realesrgan-x2plus.bin
 packaging/app_icon.ico

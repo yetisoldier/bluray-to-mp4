@@ -68,7 +68,13 @@ class UpscalePlan:
 
 def model_name_for_mode(mode: str) -> str:
     if mode == "720p":
-        return "realesr-animevideov3"
+        # v0.2.28: live-action profile now runs RealESRGAN_x2plus - a TRUE
+        # native-2x RRDBNet (official general-purpose weights via the
+        # official conversion chain, bundled as realesrgan-x2plus). This is
+        # NOT the v0.2.25 x4plus-at--s 2 corruption case: x4plus is a native
+        # 4x net and running it at -s 2 corrupts frames; x2plus IS a scale-2
+        # net, so -s 2 is its native mode.
+        return "realesrgan-x2plus"
     if mode == "720p_anime":
         return "realesr-animevideov3"
     raise UpscaleError(f"unknown DVD upscale mode: {mode}")
@@ -76,13 +82,14 @@ def model_name_for_mode(mode: str) -> str:
 
 def realesrgan_scale_for_mode(mode: str) -> int:
     if mode == "720p":
-        # realesrgan-x4plus corrupts this frame path at -s 2 (the v0.2.25
-        # lesson), so the live-action profile now uses the bundled true-2x
-        # video model realesr-animevideov3 at native 2x: a 640x360
-        # square-pixel extraction lands directly at 1280x720 with no 4x
-        # round trip and no downsample.
+        # realesrgan-x2plus is a true native-2x model: -s 2 is its native
+        # mode (NOT the v0.2.25 x4plus-at--s 2 corruption, where a native
+        # 4x net was misrun at 2x). A 640x360 square-pixel extraction lands
+        # directly at 1280x720 with no 4x round trip and no downsample.
         return 2
     if mode == "720p_anime":
+        # realesr-animevideov3 -s 2 is likewise native 2x for the anime
+        # profile (unchanged since v0.2.26).
         return 2
     raise UpscaleError(f"unknown DVD upscale mode: {mode}")
 
@@ -100,6 +107,8 @@ def resolve_realesrgan_models(binary: str, models_path: str | None = None) -> st
     required = [
         "realesrgan-x4plus.param",
         "realesrgan-x4plus.bin",
+        "realesrgan-x2plus.param",
+        "realesrgan-x2plus.bin",
         "realesr-animevideov3-x2.param",
         "realesr-animevideov3-x2.bin",
     ]

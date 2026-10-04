@@ -2,6 +2,40 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.28] - 2026-10-04
+
+### Changed
+
+- **Live-action 720p DVD upscale profile now runs RealESRGAN_x2plus**
+  (the bundled `realesrgan-x2plus`) instead of `realesr-animevideov3`.
+  x2plus is a TRUE native-2x model: official general-purpose
+  RealESRGAN_x2plus weights (Real-ESRGAN release v0.2.1) converted
+  through the official conversion chain (pytorch→onnx→ncnn,
+  ncnnoptimize fp16), with one documented, machine-precision-exact
+  deviation - the 2022 engine binary lacks the Reorg layer for the
+  model's pixel_unshuffle(2) head, so it is algebraically folded into
+  the first convolution (float64 max diff 2.2e-15). The conversion was
+  verified on the actual realesrgan-ncnn-vulkan engine: exact
+  1280×720 from 640×360 input, full-image integrity, and 100.000% of
+  pixels within ±1/255 of the PyTorch reference (fp32 CPU ncnn gold;
+  the Vulkan fp16 error class matches the stock official x4plus
+  control). Eric eyeballed the verified output frames and approved
+  the switch (2026-10-04, "I think it looks good"). This is NOT the
+  v0.2.25 corruption case, where the native-4x realesrgan-x4plus was
+  misrun at -s 2 and corrupted frames; x2plus at -s 2 is its native
+  mode, so the forced single-tile strategy and 640×360→1280×720
+  geometry are unchanged. The anime profile keeps
+  `realesr-animevideov3` at native 2x, as since v0.2.26.
+
+- **The release zip grows ~34 MB** (the bundled fp16 model is
+  33,434,888 B). x2plus is a 23-block RRDBNet versus animevideov3's
+  compact VGG-style video net, so the live-action profile is slower
+  per frame (a ~7.5–8× per-frame ratio was measured on the
+  verification host's llvmpipe CPU device; the 3090 Ti ratio was
+  measured separately and holds the same ordering). `resolve_realesrgan_models`
+  now requires `realesrgan-x2plus.param`/`.bin`, so a broken bundle
+  fails loudly at stage setup instead of mid-disc.
+
 ## [0.2.27] - 2026-10-04
 
 ### Fixed
