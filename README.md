@@ -165,8 +165,11 @@ The zip bundles everything else the pipeline needs:
 - **ffmpeg n8.1 + ffprobe** (gyan.dev-style static build, compiled against
   NVENC SDK 13.0 so it works on NVIDIA driver 590+; v0.2.2 bundles them,
   v0.2.4 fixed the SDK/driver match)
-- **Subtitle Edit 5.2.0 portable** (OCR engine for image subtitles;
-  bundled since v0.2.2, zero extra installs)
+- **Subtitle Edit 5.2.0 seconv** (headless OCR converter for image
+  subtitles; the GUI bundle was replaced in v0.2.27 because the SE 5.x
+  GUI has no unattended mode - it opened the interactive OCR wizard on
+  every run) plus a **bundled Tesseract 5.5.3 with the English model**,
+  so unattended OCR needs zero extra installs
 
 Packaged builds prefer their bundled tools over anything on PATH (v0.2.2:
 a system ffmpeg without NVENC was shadowing ours). From-source installs

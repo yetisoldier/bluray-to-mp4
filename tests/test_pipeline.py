@@ -14,8 +14,10 @@ from bluray_to_mp4.ffprobe import (
     first_video_width,
     is_interlaced,
     nth_of_type,
+    parse_frame_rate,
     parse_probe,
     probe_duration_seconds,
+    video_frame_rate,
 )
 from bluray_to_mp4.makemkv import _CancelState, make_runner
 from bluray_to_mp4.pipeline import EncodeCancelled, execute_encode, run_pipeline
@@ -141,6 +143,50 @@ def test_parse_probe_and_interlace_detection():
     assert nth_of_type(progressive, "video", 0) is not None
 
 
+# ---------------------------------------------------------------------
+# v0.2.27: real-fps probe (run 13 desync fix). ffprobe's r_frame_rate
+# (avg_frame_rate fallback) feeds UpscalePlan.fps so extraction, chunk
+# timing, and mezzanine reassembly share the rip's true clock; an
+# unparsable rate falls back to 30000/1001 with an honest warning.
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("24000/1001", "24000/1001"),   # 23.976 film DVD (pulldown stripped)
+        ("23.976", "23.976"),           # plain-number producer
+        ("25/1", "25/1"),                # PAL
+        ("29.97", "29.97"),              # plain NTSC
+        ("30000/1001", "30000/1001"),   # NTSC ratio form
+    ],
+)
+def test_parse_frame_rate_accepts_real_shapes(value, expected):
+    assert parse_frame_rate(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", "0/0", "0/1", "N/A", "garbage", "12/0", "-25", "0"],
+)
+def test_parse_frame_rate_rejects_unusable(value):
+    """Absent/unparsable/zero/negative rates yield None -> the caller
+    falls back to the 30000/1001 default with an honest warning."""
+    assert parse_frame_rate(value) is None
+
+
+def test_video_frame_rate_prefers_r_then_avg():
+    """r_frame_rate wins; avg_frame_rate is the fallback; no video
+    stream (or neither rate usable) yields None."""
+    streams = [ProbedStream(0, "video", "h264", r_frame_rate="24000/1001",
+                            avg_frame_rate="25/1")]
+    assert video_frame_rate(streams) == "24000/1001"
+    streams = [ProbedStream(0, "video", "h264", r_frame_rate="0/0",
+                            avg_frame_rate="25/1")]
+    assert video_frame_rate(streams) == "25/1"
+    streams = [ProbedStream(0, "video", "h264")]
+    assert video_frame_rate(streams) is None
+    assert video_frame_rate([ProbedStream(0, "audio", "ac3")]) is None
+
+
 def test_cli_parser_smoke():
     parser = build_parser()
     args = parser.parse_args([
@@ -170,17 +216,21 @@ _RIP_LINES = [
 def _stub_probe(monkeypatch, *, width=3840, height=2160,
                 sample_aspect_ratio="1:1", display_aspect_ratio="16:9",
                 subtitle_count=0, sub_codec="hdmv_pgs_subtitle",
-                sub_lang=""):
+                sub_lang="", r_frame_rate="24000/1001", avg_frame_rate=""):
     """Stub probe_streams: a video stream of the given width (the movie
     fixture's scan says 3840x2160, so 3840 keeps reuse tests reusing),
     one audio stream, and optional N subtitle streams. v0.2.16: the
     stubbed subtitle streams carry a codec name and language so the
-    VobSub/PGS branch and the mov_text embed tag can be tested."""
+    VobSub/PGS branch and the mov_text embed tag can be tested.
+    v0.2.27: the video stream carries r_frame_rate/avg_frame_rate so
+    the real-fps probe (desync fix) can be tested; the default is a
+    film rip (23.976)."""
     streams = [
         ProbedStream(
             0, "video", "h264", width=width, height=height,
             sample_aspect_ratio=sample_aspect_ratio,
             display_aspect_ratio=display_aspect_ratio,
+            r_frame_rate=r_frame_rate, avg_frame_rate=avg_frame_rate,
         ),
         ProbedStream(1, "audio", "ac3", channels=6),
     ]
@@ -1243,6 +1293,12 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
         sample_aspect_ratio="32:27", display_aspect_ratio="16:9",
         subtitle_count=0,
     )
+    # v0.2.27: the duration gate probes both the rip and the mezzanine;
+    # a matching pair (the scan fixture says 2:06:30 = 7590s) lets the
+    # fake mezzanine through the gate.
+    monkeypatch.setattr(
+        pipeline_mod, "probe_duration_seconds",
+        lambda path, *, binary="ffprobe": 7590.0)
     captures = {"upscale": [], "encode": [], "progress": []}
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
@@ -1267,6 +1323,7 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     assert result.jobs and result.jobs[0].completed
     plan = captures["upscale"][0]
     assert plan.mode == "720p"
+    assert plan.fps == "24000/1001"  # v0.2.27: the rip's real frame clock
     assert plan.source_width == 720
     assert plan.source_height == 480
     assert plan.sample_aspect_ratio == "32:27"
@@ -1307,6 +1364,78 @@ def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):
     assert inputs == [result.jobs[0].input_path]
     assert any("DVD AI upscale failed" in w for w in result.warnings)
     assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+def test_upscale_fps_probe_failure_falls_back_with_warning(tmp_path, monkeypatch):
+    """v0.2.27: an unparsable/unreported rip frame rate must not crash
+    the run - the plan falls back to the 30000/1001 default and the
+    result carries an honest warning naming the fallback."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0, r_frame_rate="garbage",
+                avg_frame_rate="")
+    plans = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        plans.append(plan)
+        return plan.output_path
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    # The gate probes durations; the fake mezzanine matches the rip.
+    monkeypatch.setattr(
+        pipeline_mod, "probe_duration_seconds",
+        lambda path, *, binary="ffprobe": 7590.0)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert plans[0].fps == "30000/1001"  # fallback default
+    assert any("could not probe the rip's frame rate" in w for w in result.warnings)
+    assert any("29.97 fps default" in w for w in result.warnings)
+
+
+def test_upscale_duration_gate_fails_open_to_original_rip(tmp_path, monkeypatch):
+    """v0.2.27 run-13 gate: a mezzanine whose duration drifts from the
+    rip (wrong fps stamp) is refused; the pipeline encodes the ORIGINAL
+    rip with an honest warning - a desynced mezzanine never silently
+    reaches the encode."""
+    from bluray_to_mp4.upscale import UpscaleError
+
+    _stub_probe(monkeypatch, width=720, subtitle_count=0,
+                r_frame_rate="24000/1001")
+    encode_inputs = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        return plan.output_path
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        encode_inputs.append(
+            [args[i + 1] for i, arg in enumerate(args) if arg == "-i"])
+
+    def fake_probe(path, *, binary="ffprobe"):
+        # Rip is 2:06:30; the mezzanine drifted ~20% shorter (run 13).
+        return 7590.0 if not path.endswith("_720p.mkv") else 6072.0
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    monkeypatch.setattr(pipeline_mod, "probe_duration_seconds", fake_probe)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed  # the MP4 still ships
+    # Encode maps video from the ORIGINAL rip, not the drifted mezzanine.
+    assert encode_inputs[0] == [result.jobs[0].input_path]
+    assert any("DVD AI upscale failed" in w for w in result.warnings)
+    assert any("6072.0s" in w and "7590.0s" in w for w in result.warnings)
+    assert result.jobs[0].upscale_mezzanine_path is None or not any(
+        "_720p.mkv" in i for inputs in encode_inputs for i in inputs
+    )
 
 
 def test_dvd_upscale_cancel_still_propagates(tmp_path, monkeypatch):

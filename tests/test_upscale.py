@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from bluray_to_mp4 import upscale as upscale_mod
-from bluray_to_mp4.upscale import UpscalePlan, run_dvd_upscale
+from bluray_to_mp4.upscale import UpscaleError, UpscalePlan, run_dvd_upscale
 
 
 def png_header(width: int, height: int) -> bytes:
@@ -286,3 +286,135 @@ def test_anime_profile_keeps_anime_model_at_2x(monkeypatch, tmp_path):
         cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
     )
     assert segment_cmd[segment_cmd.index("-vf") + 1] == "setsar=1"
+
+
+# ---------------------------------------------------------------------
+# v0.2.27: fps desync fix (run 13). The mezzanine writer stamps every
+# reassembled chunk with plan.fps; the plan previously hard-coded
+# 29.97 while MakeMKV strips pulldown (film DVD rips are 23.976), so
+# each concatenated segment drifted ~20%. The plan now carries the
+# rip's probed frame clock, and a duration gate refuses a mezzanine
+# that drifted from the rip.
+
+def _stub_upscale_internals(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        upscale_mod,
+        "resolve_realesrgan_ncnn",
+        lambda binary: str(tmp_path / "realesrgan-ncnn-vulkan-stub"),
+    )
+    monkeypatch.setattr(upscale_mod, "resolve_ffmpeg", lambda binary: binary)
+    monkeypatch.setattr(
+        upscale_mod,
+        "resolve_realesrgan_models",
+        lambda binary, models_path=None: str(tmp_path),
+    )
+
+
+def _recording_run_process(calls):
+    def fake_run(cmd, *, label, cancel=None):
+        calls.append((label, cmd))
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+    return fake_run
+
+
+def test_mezzanine_command_carries_probed_fps(monkeypatch, tmp_path):
+    """The mezzanine segment writer stamps -framerate with the PLAN's
+    fps, so a probed 23.976 film rip reassembles on its own clock (the
+    run-13 fix) instead of the hardcoded 29.97 stamp."""
+    calls = []
+    _stub_upscale_internals(monkeypatch, tmp_path)
+    monkeypatch.setattr(upscale_mod, "_run_process", _recording_run_process(calls))
+
+    run_dvd_upscale(
+        UpscalePlan(
+            input_path=str(tmp_path / "input.mkv"),
+            output_path=str(tmp_path / "out.mkv"),
+            workdir=str(tmp_path / "work"),
+            mode="720p",
+            duration_seconds=1,
+            fps="24000/1001",
+        )
+    )
+    segment_cmd = next(
+        cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
+    )
+    assert segment_cmd[segment_cmd.index("-framerate") + 1] == "24000/1001"
+
+
+def test_mezzanine_command_default_fps_is_2997(monkeypatch, tmp_path):
+    """Source-compat pin: a plan without an explicit fps still stamps
+    the 30000/1001 default (the fallback the pipeline warns about)."""
+    calls = []
+    _stub_upscale_internals(monkeypatch, tmp_path)
+    monkeypatch.setattr(upscale_mod, "_run_process", _recording_run_process(calls))
+
+    plan = UpscalePlan(
+        input_path=str(tmp_path / "input.mkv"),
+        output_path=str(tmp_path / "out.mkv"),
+        workdir=str(tmp_path / "work"),
+        mode="720p",
+        duration_seconds=1,
+    )
+    assert plan.fps == "30000/1001"
+    run_dvd_upscale(plan)
+    segment_cmd = next(
+        cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
+    )
+    assert segment_cmd[segment_cmd.index("-framerate") + 1] == "30000/1001"
+
+
+def test_duration_gate_rejects_mismatched_mezzanine():
+    """A mezzanine 20% shorter than the rip (the run-13 drift shape)
+    is refused with an UpscaleError naming BOTH durations - the
+    pipeline then encodes the original rip with an honest warning."""
+    from bluray_to_mp4.upscale import verify_mezzanine_duration
+
+    def probe(path, *, binary="ffprobe"):
+        return 6072.0 if "mezz" in path else 7590.0
+
+    with pytest.raises(UpscaleError, match=r"6072\.0s.*7590\.0s|does not match"):
+        verify_mezzanine_duration("mezz.mkv", 7590.0, probe_duration=probe)
+
+
+def test_duration_gate_accepts_matched_mezzanine():
+    """A mezzanine within max(5s, 2%) of the rip passes the gate - VFR
+    audio padding and container rounding must never trip it."""
+    from bluray_to_mp4.upscale import verify_mezzanine_duration
+
+    verify_mezzanine_duration(
+        "mezz.mkv", 7590.0, probe_duration=lambda p, *, binary="ffprobe": 7592.0
+    )
+    # Short rip: the 5-second floor governs (2% of 60s is only 1.2s).
+    verify_mezzanine_duration(
+        "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 64.5
+    )
+
+
+def test_duration_gate_floor_boundary_rejects_beyond_5s():
+    from bluray_to_mp4.upscale import verify_mezzanine_duration
+
+    with pytest.raises(UpscaleError, match="does not match"):
+        verify_mezzanine_duration(
+            "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 65.5
+        )
+
+
+def test_duration_gate_rejects_unprobeable_mezzanine():
+    """A mezzanine ffprobe cannot read cannot be trusted - refuse it
+    (fail open to the original rip), never encode a blind guess."""
+    from bluray_to_mp4.upscale import verify_mezzanine_duration
+
+    def broken(path, *, binary="ffprobe"):
+        raise RuntimeError("ffprobe failed")
+
+    with pytest.raises(UpscaleError, match="could not be probed"):
+        verify_mezzanine_duration("mezz.mkv", 7590.0, probe_duration=broken)

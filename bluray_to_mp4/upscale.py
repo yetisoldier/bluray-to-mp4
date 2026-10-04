@@ -27,12 +27,22 @@ __all__ = [
     "UpscalePlan",
     "model_name_for_mode",
     "resolve_realesrgan_models",
+    "verify_mezzanine_duration",
     "run_dvd_upscale",
 ]
 
 
 class UpscaleError(RuntimeError):
     """The optional AI-upscale stage failed and should fail open."""
+
+
+# v0.2.27 desync gate: a mezzanine whose duration drifts from the rip
+# (chunk reassembly runs on a stamped frame clock; run 13 proved a
+# wrong stamp drifts each concatenated segment) must never reach the
+# encode. Tolerance: max(5 s, 2%) - generous to VFR audio padding and
+# container rounding, tight enough to catch a 20% fps-stamp drift.
+_MEZZANINE_DURATION_TOLERANCE_SECONDS = 5.0
+_MEZZANINE_DURATION_TOLERANCE_FRACTION = 0.02
 
 
 @dataclass(frozen=True)
@@ -296,6 +306,41 @@ def _write_concat_list(segments: list[Path]) -> str:
             path = str(segment).replace("'", "'\\''")
             fh.write(f"file '{path}'\n")
     return fh.name
+
+
+def verify_mezzanine_duration(
+    mezzanine_path: str,
+    rip_duration_seconds: float,
+    *,
+    probe_duration,
+) -> None:
+    """Sanity gate: mezzanine duration must match the rip (v0.2.27).
+
+    Raises UpscaleError naming both durations when they differ by more
+    than max(5 seconds, 2%) - the pipeline's existing fail-open path
+    then encodes the ORIGINAL rip with an honest warning instead of a
+    silently desynced upscale. probe_duration is injected (a
+    probe_duration_seconds-shaped callable) so the gate is testable
+    without ffprobe.
+    """
+    try:
+        mezz = float(probe_duration(mezzanine_path))
+    except Exception as exc:  # unprobeable mezzanine cannot be trusted
+        raise UpscaleError(
+            f"upscale mezzanine duration could not be probed "
+            f"({exc}); refusing to encode a possibly desynced upscale"
+        ) from exc
+    rip = float(rip_duration_seconds or 0)
+    tolerance = max(
+        _MEZZANINE_DURATION_TOLERANCE_SECONDS,
+        _MEZZANINE_DURATION_TOLERANCE_FRACTION * rip,
+    )
+    if abs(mezz - rip) > tolerance:
+        raise UpscaleError(
+            f"upscale mezzanine duration {mezz:.1f}s does not match the "
+            f"rip's {rip:.1f}s (off by {abs(mezz - rip):.1f}s); refusing "
+            "to encode a desynced upscale"
+        )
 
 
 def run_dvd_upscale(

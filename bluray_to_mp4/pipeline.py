@@ -34,6 +34,7 @@ from .ffprobe import (
     nth_of_type,
     probe_duration_seconds,
     probe_streams,
+    video_frame_rate,
 )
 from .makemkv import (
     EncodeCancelled,
@@ -54,7 +55,12 @@ from .subtitles import (
     run_subtitle_ocr,
 )
 from .tmdb import TmdbError, lookup_movie, season_episode_titles
-from .upscale import UpscaleError, UpscalePlan, run_dvd_upscale
+from .upscale import (
+    UpscaleError,
+    UpscalePlan,
+    run_dvd_upscale,
+    verify_mezzanine_duration,
+)
 
 if False:  # pragma: no cover - typing only
     from typing import Callable  # noqa: F401
@@ -740,6 +746,20 @@ def run_pipeline(
                 video_input_path = None
                 if job.upscale_mode != "off":
                     stage(f"Upscaling {job.output_name} ({job.upscale_mode}) ...")
+                    # v0.2.27 desync fix: the mezzanine writer stamps every
+                    # reassembled chunk with plan.fps, and the plan previously
+                    # hard-coded 29.97 (MakeMKV strips pulldown, so a film DVD
+                    # rip is 23.976 and every segment drifted ~20% - run 13).
+                    # Probe the rip's real frame clock; a failed probe falls
+                    # back to the old default with an honest warning.
+                    rip_fps = video_frame_rate(streams)
+                    if rip_fps is None:
+                        rip_fps = "30000/1001"
+                        result.warnings.append(
+                            f"{job.output_name}: could not probe the rip's "
+                            "frame rate; upscale chunks will be stamped with "
+                            "the 29.97 fps default"
+                        )
                     try:
                         video_input_path = run_dvd_upscale(
                             UpscalePlan(
@@ -751,6 +771,7 @@ def run_pipeline(
                                 mode=job.upscale_mode,
                                 duration_seconds=title.duration_seconds,
                                 deinterlace=deinterlace,
+                                fps=rip_fps,
                                 source_width=video_stream.width if video_stream else 0,
                                 source_height=video_stream.height if video_stream else 0,
                                 display_aspect_ratio=(
@@ -766,6 +787,18 @@ def run_pipeline(
                                 ("upscale", job.tid, frac, eta, detail)
                             ) if on_progress else None,
                             cancel=cancel,
+                        )
+                        # v0.2.27 sanity gate: a mezzanine whose duration
+                        # drifts from the rip (wrong fps stamp) must never
+                        # silently reach the encode - fail open to the
+                        # original rip with an honest warning instead.
+                        try:
+                            rip_duration = probe_duration_seconds(job.input_path)
+                        except Exception:
+                            rip_duration = float(title.duration_seconds or 0)
+                        verify_mezzanine_duration(
+                            video_input_path, rip_duration,
+                            probe_duration=probe_duration_seconds,
                         )
                         job.upscale_mezzanine_path = video_input_path
                     except UpscaleError as exc:

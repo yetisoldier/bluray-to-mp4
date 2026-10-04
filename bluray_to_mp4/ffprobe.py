@@ -24,6 +24,8 @@ __all__ = [
     "is_interlaced",
     "first_video_width",
     "first_video_stream",
+    "parse_frame_rate",
+    "video_frame_rate",
 ]
 
 INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
@@ -45,6 +47,8 @@ class ProbedStream:
     height: int = 0
     sample_aspect_ratio: str = ""
     display_aspect_ratio: str = ""
+    r_frame_rate: str = ""    # v0.2.27: ffprobe '24000/1001' style ("" absent)
+    avg_frame_rate: str = ""  # v0.2.27: fallback when r_frame_rate is unusable
 
 
 def parse_probe(text: str) -> list[ProbedStream]:
@@ -67,9 +71,56 @@ def parse_probe(text: str) -> list[ProbedStream]:
                 height=int(s.get("height") or 0),
                 sample_aspect_ratio=s.get("sample_aspect_ratio", ""),
                 display_aspect_ratio=s.get("display_aspect_ratio", ""),
+                r_frame_rate=s.get("r_frame_rate", ""),
+                avg_frame_rate=s.get("avg_frame_rate", ""),
             )
         )
     return streams
+
+
+def parse_frame_rate(value: str) -> str | None:
+    """Normalize a frame-rate string to an ffmpeg -framerate token.
+
+    Accepts both producers' shapes: ffprobe's ratio form
+    ('24000/1001', '25/1') and plain numbers ('23.976', '25', '29.97').
+    Returns the trimmed original text (ffmpeg parses both forms
+    natively; reformatting through float would drift precision), or
+    None for absent/unusable values ('', '0/0', 'N/A', zero or
+    negative rates, garbage) - the caller then falls back to the
+    29.97 default with an honest warning (v0.2.27).
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    if "/" in text:
+        num, _, den = text.partition("/")
+        try:
+            numerator = float(num.strip())
+            denominator = float(den.strip())
+        except ValueError:
+            return None
+        if numerator <= 0 or denominator <= 0:
+            return None
+        return text
+    try:
+        rate = float(text)
+    except ValueError:
+        return None
+    return text if rate > 0 else None
+
+
+def video_frame_rate(streams: list[ProbedStream]) -> str | None:
+    """First video stream's real frame rate (v0.2.27 desync fix).
+
+    r_frame_rate first, avg_frame_rate fallback, both normalized for
+    ffmpeg -framerate; None when no video stream or nothing parsable.
+    """
+    video = first_video_stream(streams)
+    if video is None:
+        return None
+    return parse_frame_rate(video.r_frame_rate) or parse_frame_rate(
+        video.avg_frame_rate
+    )
 
 
 def probe_streams(path: str, *, binary: str = "ffprobe") -> list[ProbedStream]:

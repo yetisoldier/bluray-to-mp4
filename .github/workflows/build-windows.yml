@@ -31,18 +31,42 @@ jobs:
           if (-not $nvenc) { Write-Error "ffmpeg bundle lacks hevc_nvenc"; exit 1 }
           Write-Host "ffmpeg bundle OK: hevc_nvenc present"
 
-      - name: Download Subtitle Edit (portable, bundled into the app)
+      - name: Download Subtitle Edit seconv + Tesseract (headless unattended OCR)
         shell: pwsh
         run: |
-          $seUrl = "https://github.com/SubtitleEdit/subtitleedit/releases/download/v5.2.0/SubtitleEdit-Windows-x64.zip"
-          $seZip = "$env:TEMP\se.zip"
-          Invoke-WebRequest -Uri $seUrl -OutFile $seZip -TimeoutSec 300
-          Expand-Archive -Path $seZip -DestinationPath "$env:TEMP\se-extract" -Force
+          # v0.2.27: seconv is SE's own headless CLI converter (same 5.2.0
+          # core as the GUI). The GUI zip bundled before v0.2.7 has no
+          # unattended mode at all - its 5.x rewrite dropped /convert, so
+          # every "headless" OCR call actually opened the interactive OCR
+          # wizard and waited for a human (Eric's 2026-10-02 zero-touch
+          # criterion, still unmet on the morning of 2026-10-04).
+          $seUrl = "https://github.com/SubtitleEdit/subtitleedit/releases/download/v5.2.0/SeConv-Windows-x64.zip"
+          $seZip = "$env:TEMP\seconv.zip"
+          Invoke-WebRequest -Uri $seUrl -OutFile $seZip -TimeoutSec 600
+          Expand-Archive -Path $seZip -DestinationPath "$env:TEMP\seconv-extract" -Force
           New-Item -ItemType Directory -Force -Path "packaging\tools\SubtitleEdit" | Out-Null
-          Copy-Item "$env:TEMP\se-extract\*" "packaging\tools\SubtitleEdit\" -Recurse -Force
-          if (-not (Test-Path "packaging\tools\SubtitleEdit\SubtitleEdit.exe")) {
-            Write-Error "SubtitleEdit.exe missing after extract"; exit 1
+          Copy-Item "$env:TEMP\seconv-extract\*" "packaging\tools\SubtitleEdit\" -Recurse -Force
+          if (-not (Test-Path "packaging\tools\SubtitleEdit\seconv.exe")) {
+            Write-Error "seconv.exe missing after extract"; exit 1
           }
+          # Tesseract: SE's own Windows build (5.5.3) plus the English model
+          # from the tessdata repo SE itself downloads from, so a fresh
+          # extraction runs unattended OCR with zero extra installs.
+          $tUrl = "https://github.com/SubtitleEdit/support-files/releases/download/tesseract553/Tesseract553.zip"
+          $tZip = "$env:TEMP\tesseract.zip"
+          Invoke-WebRequest -Uri $tUrl -OutFile $tZip -TimeoutSec 600
+          Expand-Archive -Path $tZip -DestinationPath "$env:TEMP\tesseract-extract" -Force
+          New-Item -ItemType Directory -Force -Path "packaging\tools\SubtitleEdit\Tesseract" | Out-Null
+          Copy-Item "$env:TEMP\tesseract-extract\*" "packaging\tools\SubtitleEdit\Tesseract\" -Recurse -Force
+          if (-not (Test-Path "packaging\tools\SubtitleEdit\Tesseract\tesseract.exe")) {
+            Write-Error "tesseract.exe missing after extract"; exit 1
+          }
+          New-Item -ItemType Directory -Force -Path "packaging\tools\SubtitleEdit\Tesseract\tessdata" | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tesseract-ocr/tessdata/master/eng.traineddata" -OutFile "packaging\tools\SubtitleEdit\Tesseract\tessdata\eng.traineddata" -TimeoutSec 600
+          if (-not (Test-Path "packaging\tools\SubtitleEdit\Tesseract\tessdata\eng.traineddata")) {
+            Write-Error "eng.traineddata missing after download"; exit 1
+          }
+          Write-Host "seconv + Tesseract staged for unattended OCR"
 
       - name: Download Real-ESRGAN ncnn/Vulkan (bundled DVD AI upscale)
         shell: pwsh
@@ -106,7 +130,7 @@ jobs:
       - name: Build exe
         run: pyinstaller bluray_to_mp4.spec --noconfirm
 
-      - name: Verify bundled Real-ESRGAN payload
+      - name: Verify bundled payloads (Real-ESRGAN + headless OCR)
         shell: pwsh
         run: |
           $tools = "dist\bluray-to-mp4\_internal\tools"
@@ -124,7 +148,18 @@ jobs:
               Write-Error "Real-ESRGAN model missing from PyInstaller output: $model"; exit 1
             }
           }
-          Write-Host "Bundled Real-ESRGAN payload verified in $tools"
+          # v0.2.27: the unattended OCR stack must be in the zip too -
+          # without seconv the OCR stage can only open the GUI wizard.
+          if (-not (Test-Path "$tools\SubtitleEdit\seconv.exe")) {
+            Write-Error "seconv.exe missing from PyInstaller output"; exit 1
+          }
+          if (-not (Test-Path "$tools\SubtitleEdit\Tesseract\tesseract.exe")) {
+            Write-Error "bundled tesseract.exe missing from PyInstaller output"; exit 1
+          }
+          if (-not (Test-Path "$tools\SubtitleEdit\Tesseract\tessdata\eng.traineddata")) {
+            Write-Error "bundled eng.traineddata missing from PyInstaller output"; exit 1
+          }
+          Write-Host "Bundled payloads verified in $tools"
 
       - name: Sign the exe (YetiWurks LLC)
         shell: pwsh

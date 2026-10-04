@@ -2,6 +2,49 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.27] - 2026-10-04
+
+### Fixed
+
+- **Subtitle OCR is now fully unattended** (Eric's 2026-10-02 zero-
+  interaction criterion - "end-to-end run with ZERO human
+  interaction, including OCR" - which was still unmet on the morning
+  of 2026-10-04, when Eric had to click Start OCR and hand-verify
+  glyphs). Root cause: the packaged app bundled Subtitle Edit 5.2.0's
+  GUI, whose 5.x rewrite dropped the `/convert` command-line mode -
+  so every "headless" OCR invocation actually opened the interactive
+  OCR wizard and waited for a human. The bundle now ships seconv
+  (Subtitle Edit's own headless converter, same 5.2.0 core) plus a
+  bundled Tesseract 5.5.3 with its English model, and the wrapper
+  refuses the GUI binary outright. Both PGS (Blu-ray) and VobSub
+  (DVD) OCR run as two non-interactive seconv passes: raw Tesseract
+  OCR, then a headless OCR-fix pass that auto-resolves unknown glyphs
+  with best-guess replacements using dictionaries bundled inside
+  seconv (no training, no dialogs). The run records an honest warning
+  naming the auto-resolved cue count - a silent pass was the run-12
+  defect - and a hard OCR failure still takes the existing fail-open
+  path (MP4 ships without subtitles, with a warning). The .srt
+  sidecar remains the editable truth.
+
+- **DVD AI-upscale audio/video desync from the hardcoded 29.97 fps
+  stamp** (run 13, 2026-10-04 morning: the full v0.2.26 upscaled MP4
+  progressively lost sync). Root cause: the mezzanine writer stamps
+  every reassembled chunk with `UpscalePlan.fps`, whose hardcoded
+  default was 30000/1001 - but the pipeline constructed the plan
+  without probing the rip's real frame rate, and MakeMKV strips
+  pulldown from film DVDs, so a 23.976 fps rip was reassembled at
+  29.97 and every concatenated segment drifted ~20%. The pipeline
+  now probes the rip's real frame rate (ffprobe `r_frame_rate`,
+  `avg_frame_rate` fallback) after `probe_streams` and passes it into
+  `UpscalePlan.fps`, so extraction, chunk timing, and mezzanine
+  reassembly share the rip's true clock; an unparsable rate falls
+  back to the 30000/1001 default with an honest warning. A new
+  duration sanity gate probes the finished mezzanine and - when it
+  differs from the rip by more than max(5 seconds, 2%) - raises
+  `UpscaleError` naming both durations, so the existing fail-open
+  path encodes the ORIGINAL rip with an honest warning instead of a
+  desynced mezzanine silently reaching the encode.
+
 ## [0.2.26] - 2026-10-03
 
 ### Fixed

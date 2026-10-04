@@ -67,7 +67,13 @@ OCR to SRT matches the video filename so every player and media server
 auto-loads it. Tesseract accuracy is ~95-99%, so cues are normalized
 conservatively (timestamps repaired, text never rewritten) and sparse
 output raises a review note. OCR failure downgrades to a warning: the
-MP4 still lands.
+MP4 still lands. Since v0.2.27 the OCR stage is fully unattended:
+seconv (SE's headless converter, bundled in place of the 5.x GUI -
+which has no /convert mode and could only open the OCR wizard) runs
+raw Tesseract OCR plus a headless OCR-fix pass that best-guesses
+unknown glyphs with dictionaries bundled inside seconv; the run
+always reports the auto-resolved cue count so a pass is never silent,
+and a hard OCR failure still just warns and ships the MP4.
 
 **Series detection by duration clustering.** One title at 2.2x the
 next-longest = movie; otherwise all titles >= 10 minutes are episodes
@@ -121,6 +127,35 @@ ships LAN-enabled by default (0.0.0.0:8765, baked token) since v0.1.3, with an i
   degradation; UI got a persisted key field and two fetch buttons on a
   background thread; CLI got `--tmdb-key` (plus `B2M_TMDB_KEY`).
   64 tests green. All roadmap issues now closed.
+
+- **2026-10-04 (release v0.2.27, combined)** - Two fixes in one
+  release. (1) Unattended OCR: the packaged app had been bundling
+  SE 5.2.0's GUI, whose 5.x rewrite dropped /convert - so every
+  "headless" OCR call actually opened the interactive wizard (Eric's
+  2026-10-02 zero-interaction criterion was still unmet the morning
+  of 2026-10-04). Verified against SE 5.2.0 sources and release zips:
+  the GUI zip ships no seconv.exe at all. The bundle now ships seconv
+  (the headless converter, same 5.2.0 core; empirically verified
+  headless on Linux with PGS .sup and VobSub-in-MKV fixtures, legacy
+  /convert syntax accepted) plus Tesseract 5.5.3 with the English
+  model; the wrapper speaks /ocrengine:tesseract /ocrlanguage:eng
+  (ISO 639-2 - the old 'en' value made Tesseract fail with 'Failed
+  loading language'), seeds a /settings: JSON before OCR, pins
+  /outputfilename (MKV image tracks otherwise get a .und suffix),
+  refuses the GUI binary, and runs a second FixCommonOcrErrors pass
+  that best-guesses unknown glyphs with seconv's bundled
+  dictionaries. The auto-resolved cue count is always reported (never
+  silent); a fix-pass failure ships the raw OCR with an honest note;
+  a hard OCR failure still fails open. (2) fps desync (run 13):
+  pipeline.py constructed UpscalePlan with the hardcoded 29.97
+  default while MakeMKV strips pulldown (film DVD rips are 23.976), so
+  chunk reassembly drifted every segment ~20%. The pipeline now probes
+  the rip's real frame rate (r_frame_rate, avg_frame_rate fallback,
+  unparsable -> honest-warning fallback to the old default) and a new
+  duration gate rejects a mezzanine that differs from the rip by more
+  than max(5 s, 2%) so the fail-open path encodes the original rip
+  instead of a desynced upscale. 285 tests green (255 baseline + 30
+  new). exe rebuilt and shipped.
 
 ## Pending validation
 

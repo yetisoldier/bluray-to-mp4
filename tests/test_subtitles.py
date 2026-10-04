@@ -72,14 +72,32 @@ def _fake_extract(mkv, index, out_path, *, binary="ffmpeg"):
     return out_path
 
 
-def _se_runner_factory(srt_text):
+def _se_runner_factory(srt_text, fixed_text=None):
+    """Two-pass seconv stub (v0.2.27 contract).
+
+    Pass 1 (raw OCR: cmd carries /ocrengine:) writes srt_text to the
+    /outputfilename inside /outputfolder. Pass 2 (auto-fix: cmd carries
+    /fixcommonerrorsrules:) rewrites the input SRT as fixed_text (an
+    unchanged copy when fixed_text is None, like a run with nothing to
+    guess). Both passes exit 0 - the fail-open paths get their own
+    tests with raising runners.
+    """
     def runner(cmd):
-        # seconv /convert <in> subrip /ocrengine... /outputfolder:...
-        in_path = cmd[2]
-        out_dir = cmd[-1].split(":", 1)[1] if ":" in cmd[-1] else "."
-        out = os.path.splitext(os.path.basename(in_path))[0] + ".srt"
-        with open(os.path.join(out_dir, out), "w", encoding="utf-8") as fh:
-            fh.write(srt_text)
+        out_name = next(
+            a for a in cmd if a.startswith("/outputfilename:")
+        ).split(":", 1)[1]
+        out_dir = next(
+            a for a in cmd if a.startswith("/outputfolder:")
+        ).split(":", 1)[1]
+        out = os.path.join(out_dir, out_name)
+        if any(a.startswith("/fixcommonerrorsrules:") for a in cmd):
+            with open(cmd[2], encoding="utf-8-sig") as fh:
+                raw_text = fh.read()
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(fixed_text if fixed_text is not None else raw_text)
+        else:
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(srt_text)
         return subprocess.CompletedProcess(cmd, 0, "", "")
     return runner
 
@@ -113,13 +131,33 @@ def test_run_subtitle_ocr_zero_cues_raises(tmp_path, monkeypatch):
 
 
 def test_se_command_flags():
+    """Pass-1 invocation: legacy /convert syntax, eng (ISO 639-2 -
+    Tesseract rejects 'en'), settings seed, pinned output filename,
+    overwrite for re-runs."""
     se = SubtitleEditOcr(binary="seconv.exe")
     cmd = se.command(r"C:\rip\movie.sup", r"C:\rip")
     assert cmd[0] == "seconv.exe"
     assert "/convert" in cmd and "subrip" in cmd
     assert any(a == "/ocrengine:tesseract" for a in cmd)
-    assert any(a == "/ocrlanguage:en" for a in cmd)
-    assert cmd[-1].startswith("/outputfolder:")
+    assert any(a == "/ocrlanguage:eng" for a in cmd)
+    assert any(a.startswith("/settings:") for a in cmd)
+    assert any(a == "/outputfilename:b2m_ocr_raw.srt" for a in cmd)
+    assert any(a.startswith("/outputfolder:") for a in cmd)
+    assert "/overwrite" in cmd
+
+
+def test_se_fix_command_flags():
+    """Pass-2 invocation: the headless auto-fix pass with the OCR
+    replace-list rule, language pinned to the OCR language, its own
+    output filename so the raw pass output is never clobbered."""
+    se = SubtitleEditOcr(binary="seconv.exe")
+    cmd = se.fix_command(r"C:\rip\b2m_ocr_raw.srt", r"C:\rip")
+    assert cmd[0] == "seconv.exe"
+    assert "/convert" in cmd and "subrip" in cmd
+    assert "/fixcommonerrorsrules:FixCommonOcrErrors" in cmd
+    assert "/fce-language:en" in cmd
+    assert any(a == "/outputfilename:b2m_ocr_fixed.srt" for a in cmd)
+    assert "/overwrite" in cmd
 
 
 def test_extract_subtitles_failure_raises(tmp_path):
@@ -194,7 +232,11 @@ def test_run_subtitle_ocr_vobsub_happy_path(tmp_path, monkeypatch):
     )
     assert seen["out"].endswith(".mkv")
     assert seen["out"] == os.path.join(workdir, "movie_t00.mkv")
-    assert se_inputs == [seen["out"]]  # SE got the single-track MKV
+    # Two unattended passes: pass 1 gets the single-track MKV, pass 2
+    # (auto-fix) gets pass 1's raw SRT output.
+    assert se_inputs[0] == seen["out"]
+    assert se_inputs[1].endswith("b2m_ocr_raw.srt")
+    assert len(se_inputs) == 2
     assert result.srt_path == str(tmp_path / "Movie (2019).srt")
     assert result.cue_count == 1
     assert os.path.exists(result.srt_path)
@@ -271,6 +313,154 @@ def test_run_subtitle_ocr_vobsub_zero_cues_raises(tmp_path, monkeypatch):
             codec_name="dvd_subtitle",
             se_runner=_se_runner_factory(""),
         )
+
+
+# ---------------------------------------------------------------------
+# v0.2.27: fully unattended OCR (Eric's 2026-10-02 criterion). Two
+# headless seconv passes with zero interaction; unknown glyphs are
+# best-guessed by the auto-fix pass and the run records the honest
+# auto-resolved count (never a silent pass - the run-12 defect).
+
+def test_write_ocr_settings_seed(tmp_path):
+    """The /settings: seed exists, parses as JSON, and every key is a
+    real seconv 5.2.0 GeneralSection member (so no unknown-key
+    warning ever fires)."""
+    from bluray_to_mp4.subtitles import SE_CONV_SETTINGS_NAME, write_ocr_settings
+    path = str(tmp_path / SE_CONV_SETTINGS_NAME)
+    write_ocr_settings(path)
+    import json
+    with open(path, encoding="utf-8") as fh:
+        seed = json.load(fh)
+    known = {
+        "subtitleLineMaximumLength", "subtitleMinimumDisplayMilliseconds",
+        "subtitleMaximumDisplayMilliseconds", "currentFrameRate",
+        "defaultFrameRate", "minimumMillisecondsBetweenLines",
+        "maxNumberOfLines", "mergeLinesShorterThan",
+        "subtitleMaximumCharactersPerSeconds",
+        "subtitleOptimalCharactersPerSeconds",
+    }
+    general = seed["general"]
+    assert set(general) <= known  # every key a real seconv schema member
+    assert seed["general"]["currentFrameRate"] == 23.976
+
+
+def test_run_subtitle_ocr_seeds_settings_and_reports_auto_resolved(
+    tmp_path, monkeypatch
+):
+    """The unattended contract, end to end (stubbed se): the settings
+    seed is written before OCR, both passes run, and when the auto-fix
+    pass changes cue text the result notes the auto-resolved count
+    with the best-guess wording (never silent)."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+    raw_srt = "1\n00:00:01,000 --> 00:00:03,000\nl will sh0w it\n"
+    fixed_srt = "1\n00:00:01,000 --> 00:00:03,000\nI will show it\n"
+    se_cmds = []
+    seed_seen = {}
+
+    def runner(cmd):
+        se_cmds.append(cmd)
+        if any(a.startswith("/ocrengine:") for a in cmd):
+            # Observe the seed at OCR time: run_subtitle_ocr cleans up
+            # its artifacts after the sidecar is written.
+            seed_seen["path"] = next(
+                a for a in cmd if a.startswith("/settings:")
+            ).split(":", 1)[1]
+            seed_seen["exists"] = os.path.exists(seed_seen["path"])
+        return _se_runner_factory(raw_srt, fixed_text=fixed_srt)(cmd)
+
+    result = run_subtitle_ocr(
+        str(tmp_path / "movie_t00.mkv"), 2,
+        str(tmp_path / "Movie (2019).mp4"),
+        workdir=str(tmp_path),
+        se_runner=runner,
+    )
+    # Settings seeded before the first pass, via /settings:.
+    assert len(se_cmds) == 2  # raw OCR pass + auto-fix pass
+    from bluray_to_mp4.subtitles import SE_CONV_SETTINGS_NAME
+    assert seed_seen["path"] == os.path.join(str(tmp_path), SE_CONV_SETTINGS_NAME)
+    assert seed_seen["exists"]  # written before OCR ran, not after
+    assert any(a == "/settings:" + seed_seen["path"] for a in se_cmds[0])
+    # Honest auto-resolve warning names the changed-cue count.
+    auto = [n for n in result.notes if "auto-resolved" in n]
+    assert auto and "1 of 1" in auto[0]
+    assert "best-guess" in auto[0]
+    # The fixed text (not the raw) shipped in the sidecar.
+    with open(result.srt_path, encoding="utf-8-sig") as fh:
+        assert "I will show it" in fh.read()
+
+
+def test_run_subtitle_ocr_fix_failure_warns_and_ships_raw(
+    tmp_path, monkeypatch
+):
+    """The auto-fix pass failing is NOT an OCR failure: the raw SRT
+    ships (sidecar written, cues intact) with an honest warning naming
+    the failure - the fail-open contract extends to pass 2."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+    raw_srt = "1\n00:00:01,000 --> 00:00:03,000\nl will sh0w it\n"
+
+    def runner(cmd):
+        if any(a.startswith("/fixcommonerrorsrules:") for a in cmd):
+            return subprocess.CompletedProcess(cmd, 1, "", "fix boom")
+        return _se_runner_factory(raw_srt)(cmd)
+
+    result = run_subtitle_ocr(
+        str(tmp_path / "movie_t00.mkv"), 2,
+        str(tmp_path / "Movie.mp4"),
+        workdir=str(tmp_path),
+        se_runner=runner,
+    )
+    assert result.cue_count == 1
+    assert os.path.exists(result.srt_path)
+    with open(result.srt_path, encoding="utf-8-sig") as fh:
+        assert "l will sh0w it" in fh.read()  # raw text shipped
+    assert any(
+        n.startswith("Unattended OCR auto-fix pass failed")
+        for n in result.notes
+    )
+    assert not any("auto-resolved" in n for n in result.notes)
+
+
+def test_run_subtitle_ocr_hard_failure_still_fail_open(tmp_path, monkeypatch):
+    """Pass 1 (raw OCR) failing still raises SubtitleOcrError - the
+    existing pipeline fail-open warning path (MP4 ships without
+    subtitles) is untouched by the two-pass change."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+
+    def runner(cmd):
+        if any(a.startswith("/fixcommonerrorsrules:") for a in cmd):
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "tesseract missing")
+
+    with pytest.raises(SubtitleOcrError, match="seconv exited with code 1"):
+        run_subtitle_ocr(
+            str(tmp_path / "movie_t00.mkv"), 2,
+            str(tmp_path / "Movie.mp4"),
+            workdir=str(tmp_path),
+            se_runner=runner,
+        )
+
+
+def test_se_gui_binary_refused():
+    """The SE 5.x GUI has no unattended mode (run 12's wizard): both a
+    direct GUI path and a resolved GUI name must be refused before any
+    subprocess spawn."""
+    for gui in ("SubtitleEdit", "SubtitleEdit.exe", r"C:\SE\SubtitleEdit.exe"):
+        with pytest.raises(SubtitleOcrError, match="cannot run unattended OCR"):
+            SubtitleEditOcr(binary=gui)
+
+
+def test_se_resolved_gui_binary_refused(tmp_path, monkeypatch):
+    """A machine where only the GUI is installed: resolve_subtitle_edit
+    finds SubtitleEdit.exe, and run() must refuse it (not spawn the
+    wizard) - the OCR stage then fails open through the pipeline's
+    existing warning path."""
+    monkeypatch.setattr(
+        "bluray_to_mp4.subtitles.resolve_subtitle_edit",
+        lambda binary: r"C:\Tools\SubtitleEdit\SubtitleEdit.exe",
+    )
+    se = SubtitleEditOcr(binary="seconv")
+    with pytest.raises(SubtitleOcrError, match="cannot run unattended OCR"):
+        se.run("in.sup", "out", runner=lambda cmd: None)
 
 
 # ---------------------------------------------------------------------
