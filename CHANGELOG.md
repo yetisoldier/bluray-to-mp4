@@ -2,6 +2,38 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.25] - 2026-10-03
+
+### Fixed
+
+- **DVD AI upscale no longer corrupts frames through realesrgan-x4plus.**
+  The 720p profile ran the x4plus model with `-s 2`, which corrupts this
+  DVD frame path. The stage now runs x4plus at its native 4x scale and
+  downsamples the mezzanine segment to the target height with lanczos
+  (`scale=-2:H`, SAR 1). The anime profile keeps realesr-animevideov3
+  at its intended 2x with an unscaled segment pass.
+
+### Changed
+
+- **Real-ESRGAN auto tiling.** The tile argument is now `-t 0`
+  (model/driver auto tiling), replacing v0.2.24's extent-derived manual
+  tile size. Chunk directories are cleared before reuse, and each
+  chunk logs input/output frame counts and first-PNG extents to
+  `upscale_debug.log` for field diagnosis.
+
+### Added
+
+- **Source geometry plumbing for the upscale.** ffprobe now parses
+  stream height, sample aspect ratio, and display aspect ratio and
+  exposes `first_video_stream`; the pipeline passes that geometry into
+  the upscale plan so frame extraction renders square-pixel 360p
+  frames from the disc's actual geometry (fixed size when the probe
+  reports dimensions, DAR expression fallback otherwise).
+
+### Validated
+
+- Full local test suite: 253 passed.
+
 ## [0.2.24] - 2026-10-03
 
 ### Fixed
