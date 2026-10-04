@@ -2,6 +2,51 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.30] - 2026-10-04
+
+### Added
+
+- **OCR quality reporting (honest signal, never a gate).** Eric
+  reported the run-12/13 (GUI-wizard era) OCR text was "nowhere near
+  accurate"; the v0.2.27 unattended flow removes the babysitting but
+  Tesseract can still misread a disc's VobSub bitmaps (stylized
+  musical fonts are exactly its weak spot), and tonight's run would
+  have shipped the poor text silently. Every OCR run now appends a
+  deterministic, data-driven quality line to its notes:
+  `OCR quality: X% of Y cues clean (Z cues contain non-English
+  characters, W empty)`. "Clean" is a documented conservative
+  character contract (ASCII letters/digits/spaces, basic English
+  punctuation, common accented Latin-1 letters) - pipes, the cent
+  sign, curly quotes, and angle brackets all count as garbage, which
+  is the shape Tesseract's misreads of stylized subtitle fonts take.
+  Counts are taken before normalization drops empty cues so the three
+  numbers always add up. Pure reporting: a garbage-heavy result still
+  ships (fail-open stands), but the run now says so with numbers.
+
+- **OCR diagnosis retention kit.** Re-ripping a disc to re-tune OCR
+  accuracy is expensive, so every OCR stage - success path AND the
+  fail-open path where OCR failed but the MP4 ships - now retains its
+  inputs in `outdir/<output-stem>.ocr/`: the extracted subtitle track
+  that was fed to seconv (the single-track MKV for VobSub, the .sup
+  for PGS) and the raw pass-1 SRT as `<stem>.raw.srt`. That is enough
+  to re-run seconv offline with different engines/settings and diff
+  the output, no disc re-rip needed. The track copy is size-capped at
+  150 MB (skipped with an honest note above that); the tiny raw SRT
+  is always kept. A subfolder on purpose: a bare raw .srt sibling
+  would make every player auto-load the uncorrected pass-1 text.
+
+### Fixed
+
+- **Auto-resolved cue count pairs cues by timing.** Karen's
+  validation nit: the count paired raw and fixed cues positionally
+  with `zip()`, but pass 2 merges and splits cues, so the pairing
+  drifted one-for-one and undercounted exactly when the auto-fix pass
+  had done the most work. Fixed cues are now paired to raw cues by
+  start timestamp (raw texts stored per start_ms; a fixed cue counts
+  as changed when its text is absent at its start_ms, or its start_ms
+  was created by a split). Merged/split cue shapes that the old logic
+  miscounted are pinned by tests.
+
 ## [0.2.29] - 2026-10-04
 
 ### Fixed

@@ -18,12 +18,23 @@ silently. The SRT output is still parsed and normalized locally; a
 zero-cue result is treated as an OCR failure and never silently
 shipped. The normalized SRT is kept as an editable sidecar next to the
 MP4 and embedded into the MP4 as a soft mov_text track (v0.2.16).
+
+v0.2.30 wraps that flow in honest quality reporting and input retention
+(Eric's 2026-10-04 report: the run-12/13 OCR text was 'nowhere near
+accurate' - stylized musical fonts are exactly what Tesseract misreads):
+the run notes gain a deterministic OCR-quality line (clean/garbage/empty
+cue counts over the shipped text), and a <output-stem>.ocr/ kit next to
+the MP4 retains the seconv input track plus the raw pass-1 SRT so
+accuracy can be tuned offline without re-ripping the disc. Reporting and
+retention only - no behavior change to the OCR execution, and fail-open
+stands everywhere.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -53,6 +64,10 @@ class SubtitleOcrError(RuntimeError):
 
 # Settings seed handed to every seconv invocation via /settings:.
 SE_CONV_SETTINGS_NAME = "b2m-seconv-settings.json"
+
+# Pass-1 raw OCR output name (pinned via /outputfilename:). Also the
+# retention source for the diagnosis kit on the failure path.
+_RAW_SRT_NAME = "b2m_ocr_raw.srt"
 
 # The SE 5.x GUI cannot run unattended OCR (no /convert mode) - invoking
 # it is exactly the run-12 wizard interaction, so the wrapper refuses it.
@@ -189,15 +204,147 @@ def _ocr_env(se_binary: str) -> dict:
 
 def _count_auto_resolved_cues(raw_text: str, fixed_text: str) -> int:
     """Number of cues whose text the auto-fix pass changed (unknown
-    glyphs that were best-guessed). Defensive by design: the count is
-    honest reporting, never a gate - any parse problem yields 0 rather
-    than failing an otherwise-good OCR result."""
+    glyphs that were best-guessed). v0.2.30 (Karen's validation nit):
+    cues are paired by TIMING, not position - pass 2 merges and splits
+    cues, so the old zip() pairing drifted one-for-one and undercounted
+    exactly when the fix pass had done the most work. For each fixed
+    cue, count changed when its start_ms has no raw cue carrying the
+    identical text (a dict start_ms -> set of raw texts; an absent
+    start_ms is a split cue the pass created, hence changed).
+    Defensive by design: the count is honest reporting, never a gate -
+    any parse problem yields 0 rather than failing an otherwise-good
+    OCR result."""
     try:
         raw = normalize_cues(parse_srt(raw_text))
         fixed = normalize_cues(parse_srt(fixed_text))
     except SrtError:
         return 0
-    return sum(1 for a, b in zip(raw, fixed) if a.text != b.text)
+    raw_by_start: dict[int, set[str]] = {}
+    for cue in raw:
+        raw_by_start.setdefault(cue.start_ms, set()).add(cue.text)
+    return sum(
+        1 for cue in fixed
+        if cue.text not in raw_by_start.get(cue.start_ms, frozenset())
+    )
+
+
+# --- v0.2.30: OCR quality note (reporting only, never a gate) ---
+
+# The documented "clean" contract behind the quality line: ASCII
+# letters, digits, spaces (plus cue line breaks), the basic punctuation
+# of English subtitles, and the common accented Latin-1 letters -
+# U+00C0..U+00FF minus the two non-letter symbols parked inside that
+# range (multiplication U+00D7 and division U+00F7) - plus U+0178 (Ÿ,
+# the one capital accented letter Latin-1 lacks). Deliberately
+# conservative: curly quotes, the cent sign, pipes and angle brackets
+# all count as garbage, which is exactly the shape Tesseract's misreads
+# of stylized subtitle fonts take. Deterministic, no dependencies.
+_ACCENTED_LATIN1 = frozenset(
+    chr(c) for c in range(0x00C0, 0x0100)
+    if c not in (0x00D7, 0x00F7)
+) | {"\u0178"}
+_OCR_CLEAN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    " \n"
+    ".,!?'\n\"-:;()/&%$"
+    "\u2013\u2014\u2026\u20ac\u00a3\u00b0"
+) | _ACCENTED_LATIN1
+
+
+def _ocr_cue_quality(cues: list[Cue]) -> tuple[int, int, int]:
+    """(total, garbage, empty) counts over the parsed cue list.
+
+    garbage = any character outside _OCR_CLEAN_CHARS (documented
+    above); empty = whitespace-only text after strip. Counted over the
+    PARSED list, before normalize_cues drops the empties, so the three
+    numbers always add up: clean + garbage + empty == total.
+    """
+    garbage = empty = 0
+    for cue in cues:
+        text = cue.text.strip()
+        if not text:
+            empty += 1
+        elif any(ch not in _OCR_CLEAN_CHARS for ch in text):
+            garbage += 1
+    return len(cues), garbage, empty
+
+
+def _ocr_quality_note(parsed_cues: list[Cue]) -> str:
+    """The honest, data-driven quality line for the run notes.
+
+    v0.2.30 (Eric's 2026-10-04 report: the run-12/13 OCR text was
+    'nowhere near accurate'): the note counts clean/garbage/empty cues
+    over the shipped OCR text with the conservative character contract
+    above. Pure reporting - a garbage-heavy result still ships (fail-
+    open stands); the line tells the user to spot-check it and points
+    tuning efforts at the retained .ocr kit.
+    """
+    total, garbage, empty = _ocr_cue_quality(parsed_cues)
+    clean = total - garbage - empty
+    pct = round(clean * 100 / total) if total else 100
+    return (
+        f"OCR quality: {pct}% of {total} cues clean "
+        f"({garbage} cues contain non-English characters, {empty} empty)"
+    )
+
+
+# --- v0.2.30: diagnosis retention kit ---
+
+# The extracted subtitle track (a full-movie PGS .sup can run large) is
+# retained only up to this size; above it the copy is skipped with an
+# honest note. The raw SRT is a few KB - always kept.
+_OCR_TRACK_CAP_MB = 150
+_OCR_TRACK_CAP_BYTES = _OCR_TRACK_CAP_MB * 1024 * 1024
+
+
+def _write_ocr_diagnostic_kit(
+    video_out_path: str,
+    *,
+    track_path: str,
+    raw_srt_path: str,
+) -> list[str]:
+    """Retain the OCR inputs in outdir/<output-stem>.ocr/ (v0.2.30).
+
+    Re-ripping a disc to re-tune OCR accuracy is expensive, so every
+    OCR stage retains its inputs next to the output: the extracted
+    subtitle track that was fed to seconv (the single-track MKV for
+    VobSub, the .sup for PGS) and the raw pass-1 SRT copied as
+    <stem>.raw.srt. That is enough to re-run seconv offline with
+    different engines/settings and diff the output. A subfolder,
+    deliberately: a bare raw .srt next to the MP4 would make every
+    player auto-load the uncorrected pass-1 text over the shipped
+    sidecar. The track copy is size-capped (skip + honest note above
+    the cap); the raw SRT always ships. Retention only and fail-open
+    like everything else in this module: any OSError degrades to a
+    note, never an error. Returns the notes for the run (empty when
+    everything was retained).
+    """
+    notes: list[str] = []
+    out_dir = os.path.dirname(os.path.abspath(video_out_path))
+    stem = os.path.splitext(os.path.basename(video_out_path))[0]
+    kit_dir = os.path.join(out_dir, stem + ".ocr")
+    try:
+        os.makedirs(kit_dir, exist_ok=True)
+        if raw_srt_path and os.path.exists(raw_srt_path):
+            shutil.copy2(raw_srt_path, os.path.join(kit_dir, stem + ".raw.srt"))
+        if track_path and os.path.exists(track_path):
+            size = os.path.getsize(track_path)
+            if size > _OCR_TRACK_CAP_BYTES:
+                notes.append(
+                    f"OCR input retained except the subtitle track "
+                    f"({size / (1024 * 1024):.1f} MB > "
+                    f"{_OCR_TRACK_CAP_MB} MB cap)"
+                )
+            else:
+                shutil.copy2(
+                    track_path,
+                    os.path.join(kit_dir, os.path.basename(track_path)),
+                )
+    except OSError as exc:
+        notes.append(f"OCR diagnosis kit incomplete ({exc})")
+    return notes
 
 
 @dataclass
@@ -460,38 +607,56 @@ def run_subtitle_ocr(
     # passes and report the auto-resolved glyph count honestly.
     settings_path = os.path.join(workdir, SE_CONV_SETTINGS_NAME)
     write_ocr_settings(settings_path)
-    outcome = se.run(img_path, workdir, runner=se_runner)
-    with open(outcome.raw_srt_path, encoding="utf-8-sig") as fh:
-        raw_text = fh.read()
-    with open(outcome.srt_path, encoding="utf-8-sig") as fh:
-        raw = fh.read()
-
-    fixed_parse_failed = False
     try:
-        cues = parse_srt(raw)
-    except SrtError as exc:
-        if outcome.srt_path == outcome.raw_srt_path:
-            # The shipping SRT IS the raw OCR - there is no distinct
-            # fixed file to fall back from, so the fail-closed
-            # contract stands.
-            raise SubtitleOcrError(f"OCR output was not valid SRT: {exc}") from exc
-        # v0.2.29 (Karen's validation): pass 2 exited 0 but its file
-        # does not parse - a truncated partial write. The raw OCR is
-        # still good, so fail open to it instead of raising and losing
-        # the subtitles to broken post-processing.
+        outcome = se.run(img_path, workdir, runner=se_runner)
+        with open(outcome.raw_srt_path, encoding="utf-8-sig") as fh:
+            raw_text = fh.read()
+        with open(outcome.srt_path, encoding="utf-8-sig") as fh:
+            raw = fh.read()
+
+        fixed_parse_failed = False
         try:
-            cues = parse_srt(raw_text)
-        except SrtError:
-            raise SubtitleOcrError(f"OCR output was not valid SRT: {exc}") from exc
-        raw = raw_text
-        fixed_parse_failed = True
-    cues = normalize_cues(cues)
-    notes: list[str] = []
-    if not cues:
-        raise SubtitleOcrError(
-            "OCR completed but produced zero cues; the subtitle track is "
-            "likely unusable (or Tesseract needs its English data)."
+            parsed_cues = parse_srt(raw)
+        except SrtError as exc:
+            if outcome.srt_path == outcome.raw_srt_path:
+                # The shipping SRT IS the raw OCR - there is no distinct
+                # fixed file to fall back from, so the fail-closed
+                # contract stands.
+                raise SubtitleOcrError(
+                    f"OCR output was not valid SRT: {exc}"
+                ) from exc
+            # v0.2.29 (Karen's validation): pass 2 exited 0 but its file
+            # does not parse - a truncated partial write. The raw OCR is
+            # still good, so fail open to it instead of raising and
+            # losing the subtitles to broken post-processing.
+            try:
+                parsed_cues = parse_srt(raw_text)
+            except SrtError:
+                raise SubtitleOcrError(
+                    f"OCR output was not valid SRT: {exc}"
+                ) from exc
+            raw = raw_text
+            fixed_parse_failed = True
+        cues = normalize_cues(parsed_cues)
+        if not cues:
+            raise SubtitleOcrError(
+                "OCR completed but produced zero cues; the subtitle track "
+                "is likely unusable (or Tesseract needs its English data)."
+            )
+    except SubtitleOcrError:
+        # v0.2.30 fail-open retention: the pipeline ships the MP4
+        # without subtitles when OCR raises, so the diagnosis kit must
+        # be written HERE - from whatever OCR inputs exist (the
+        # extracted track always does; the raw SRT whenever pass 1
+        # wrote one) - or a bad-OCR disc could never be re-tuned
+        # without re-ripping it.
+        _write_ocr_diagnostic_kit(
+            video_out_path,
+            track_path=img_path,
+            raw_srt_path=os.path.join(workdir, _RAW_SRT_NAME),
         )
+        raise
+    notes: list[str] = []
     # The honest unattended-OCR report: never a silent pass. The
     # auto-fix pass's changed-cue count is ALWAYS named when it ran -
     # including 0, which proves the pass executed - and unknown glyphs
@@ -518,6 +683,11 @@ def run_subtitle_ocr(
             f"{outcome.fix_error[:200]}); the raw OCR shipped without "
             "glyph corrections - spot-check spelling."
         )
+    # v0.2.30 (Eric's 2026-10-04 accuracy report): the honest,
+    # data-driven quality line. Counts are taken over the parsed cues
+    # BEFORE normalization drops empty ones, so clean + garbage + empty
+    # always adds up to the total. Pure reporting - never a gate.
+    notes.append(_ocr_quality_note(parsed_cues))
     if len(cues) < 50:
         notes.append(
             f"Only {len(cues)} cues detected; check a few against the film."
@@ -526,6 +696,14 @@ def run_subtitle_ocr(
 
     sidecar = os.path.splitext(video_out_path)[0] + ".srt"
     write_srt_file(sidecar, cues)
+    # v0.2.30: retain the OCR inputs for offline accuracy tuning (the
+    # track copy is capped; the raw SRT is not) BEFORE the intermediates
+    # are cleaned up below.
+    notes.extend(_write_ocr_diagnostic_kit(
+        video_out_path,
+        track_path=img_path,
+        raw_srt_path=outcome.raw_srt_path,
+    ))
     os.remove(img_path)
     for tmp in (outcome.raw_srt_path, outcome.srt_path, settings_path):
         if tmp != sidecar:

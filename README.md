@@ -59,6 +59,11 @@ player (VLC, Plex, Jellyfin, Apple TV) reads from `.mp4`. The editable
 sidecar `.srt` is kept next to the file either way. The embed mux writes to
 a temp sibling and atomically replaces the MP4, so a failed mux can never
 destroy the finished encode; the run records a warning and ships the MP4.
+The run notes include an honest OCR-quality line (`OCR quality: X% of Y
+cues clean ...`; v0.2.30), and a `<movie>.ocr` folder next to the MP4 keeps
+the raw pass-1 SRT plus the extracted subtitle track (capped at 150 MB) so
+OCR accuracy can be re-tuned offline without re-ripping the disc — that
+folder is safe to delete.
 
 **Series discs.** Episodes are named `Show Name - S01E05 - Episode Title.mp4`
 with season and starting-episode controls. With a free TMDB key pasted into

@@ -9,7 +9,10 @@ from bluray_to_mp4.srt import Cue, parse_srt, normalize_cues, write_srt, write_s
 from bluray_to_mp4.subtitles import (
     SubtitleEditOcr,
     SubtitleOcrError,
+    _OCR_CLEAN_CHARS,
+    _count_auto_resolved_cues,
     _intermediate_ext,
+    _ocr_quality_note,
     extract_subtitles,
     mux_language,
     mux_srt_into_mp4,
@@ -603,3 +606,245 @@ def test_mux_srt_missing_ffmpeg_message(tmp_path, monkeypatch):
     with pytest.raises(SubtitleOcrError, match="ffmpeg not found for subtitle muxing"):
         mux_srt_into_mp4(str(video), str(srt))
     assert video.read_bytes() == original
+
+
+# ---------------------------------------------------------------------
+# v0.2.30: OCR quality reporting + diagnosis retention. Eric's
+# 2026-10-04 report: the run-12/13 OCR text was 'nowhere near
+# accurate' - the run now ships an honest quality line and retains its
+# inputs in <output-stem>.ocr/ so accuracy can be tuned offline
+# without re-ripping the disc. Reporting and retention only; the OCR
+# execution itself is unchanged and fail-open stands everywhere.
+
+
+def test_ocr_clean_char_contract():
+    """The documented conservative 'clean' set: ASCII letters, digits,
+    spaces/line breaks, basic punctuation, the dash/ellipsis/currency/
+    degree marks, and Latin-1 accented letters (plus U+0178, the one
+    capital accented letter Latin-1 itself lacks). Everything else -
+    pipes, the cent sign, curly quotes, angle brackets, the multiply/
+    divide signs parked inside the Latin-1 range, Latin Extended-A -
+    marks a cue as garbage."""
+    for ch in (
+        "aZ9 \n"
+        ".,!?'\n\"-:;()/&%$"
+        "\u2013\u2014\u2026\u20ac\u00a3\u00b0"
+        "\u00e0\u00e1\u00e2\u00e4\u00e8\u00e9\u00ea\u00eb"
+        "\u00ee\u00ef\u00f4\u00f6\u00fb\u00fc\u00e7\u00f1"
+        "\u00c0\u00c5\u00d6\u00dc\u00df\u00ff\u0178"
+    ):
+        assert ch in _OCR_CLEAN_CHARS, repr(ch)
+    for ch in "|\u00a2\u2018\u2019\u201c<>\u00d7\u00f7\u0100\u2713":
+        assert ch not in _OCR_CLEAN_CHARS, repr(ch)
+
+
+def test_ocr_quality_note_counts_garbage_empty_and_clean():
+    """One line, deterministic counts: clean + garbage + empty always
+    adds up to the parsed total, percentage rounded."""
+    cues = [
+        Cue(1000, 2000, "Hello world"),              # clean
+        Cue(3000, 4000, "Caf\u00e9 na\u00efve"),     # clean (accented)
+        Cue(5000, 6000, "l1|<e me"),                 # garbage (| and <)
+        Cue(7000, 8000, "50\u00a2"),                 # garbage (cent)
+        Cue(9000, 10000, "\u2019Tis the season"),     # garbage (curly ')
+        Cue(11000, 12000, "|"),                       # garbage (pipe)
+        Cue(13000, 14000, "<e>"),                     # garbage (angle)
+        Cue(15000, 16000, "   "),                     # empty
+    ]
+    assert _ocr_quality_note(cues) == (
+        "OCR quality: 25% of 8 cues clean "
+        "(5 cues contain non-English characters, 1 empty)"
+    )
+
+
+def test_ocr_quality_note_all_clean_is_100():
+    note = _ocr_quality_note([Cue(0, 1000, "It's fine \u2013 caf\u00e9s")])
+    assert note == (
+        "OCR quality: 100% of 1 cues clean "
+        "(0 cues contain non-English characters, 0 empty)"
+    )
+
+
+QUALITY_SRT = (
+    "1\n00:00:01,000 --> 00:00:02,000\nHello world\n\n"
+    "2\n00:00:03,000 --> 00:00:04,000\nl1|<e me\n\n"
+    "3\n00:00:05,000 --> 00:00:06,000\nIt's a caf\u00e9\n\n"
+    "4\n00:00:07,000 --> 00:00:08,000\n50\u00a2 and \u2019quote\u2019\n\n"
+    "5\n00:00:09,000 --> 00:00:10,000\n   \n"
+)
+
+
+def test_run_subtitle_ocr_reports_quality_line(tmp_path, monkeypatch):
+    """End to end: the run notes carry the one-line quality report over
+    the shipped OCR text - counts include the empty cue (they are taken
+    before normalization drops it), so the numbers add up to the parsed
+    total."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+    result = run_subtitle_ocr(
+        str(tmp_path / "movie_t00.mkv"), 2,
+        str(tmp_path / "Movie (2019).mp4"),
+        workdir=str(tmp_path),
+        se_runner=_se_runner_factory(QUALITY_SRT),
+    )
+    quality = [n for n in result.notes if n.startswith("OCR quality:")]
+    assert quality == [
+        "OCR quality: 40% of 5 cues clean "
+        "(2 cues contain non-English characters, 1 empty)"
+    ]
+
+
+def test_auto_resolved_split_cues_count_by_timing():
+    """v0.2.30 (Karen's validation nit): pass 2 SPLIT one raw cue into
+    two fixed cues. The old zip() pairing saw only the first pair and
+    undercounted (1); timing pairing counts both split products (the
+    second's start_ms is absent from raw, hence changed)."""
+    raw = "1\n00:00:01,000 --> 00:00:02,000\nl1|<e th1s\n"
+    fixed = (
+        "1\n00:00:01,000 --> 00:00:01,500\nl1|<e\n\n"
+        "2\n00:00:01,500 --> 00:00:02,000\nth1s\n"
+    )
+    assert _count_auto_resolved_cues(raw, fixed) == 2
+
+
+def test_auto_resolved_merge_cues_count_by_timing():
+    """Pass 2 MERGED two short raw cues into one fixed cue; the old
+    zip() pairing then drifted - the orphaned raw cue got compared
+    against an unrelated later fixed cue, under- or over-counting
+    (here it counted 2). Timing pairing keeps the honest count: the
+    merged cue changed, the untouched tail cue did not."""
+    raw = (
+        "1\n00:00:01,000 --> 00:00:02,000\nl1|<e\n\n"
+        "2\n00:00:02,000 --> 00:00:03,000\nsh0w\n\n"
+        "3\n00:00:03,000 --> 00:00:04,000\nit\n"
+    )
+    fixed = (
+        "1\n00:00:01,000 --> 00:00:03,000\nlike\nshow\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\nit\n"
+    )
+    assert _count_auto_resolved_cues(raw, fixed) == 1
+
+
+def test_auto_resolved_identical_cues_count_zero():
+    """Identical text at the same start_ms is NOT auto-resolved work."""
+    text = "1\n00:00:01,000 --> 00:00:02,000\nunchanged text\n"
+    assert _count_auto_resolved_cues(text, text) == 0
+
+
+def test_auto_resolved_parse_error_returns_zero():
+    """The defensive 0-on-parse-error contract is unchanged by the
+    timing-pairing rewrite."""
+    good = "1\n00:00:01,000 --> 00:00:02,000\nx\n"
+    assert _count_auto_resolved_cues("not an srt at all", good) == 0
+    assert _count_auto_resolved_cues(good, "not an srt at all") == 0
+
+
+def test_ocr_kit_success_path_retains_inputs(tmp_path, monkeypatch):
+    """The diagnosis kit lands next to the MP4 as <output-stem>.ocr/
+    with BOTH inputs: the extracted track that was fed to seconv (PGS
+    .sup here) and the raw pass-1 SRT copied as <stem>.raw.srt (the
+    pass-1 text, not the fixed text) - offline re-tuning material.
+    Nothing about it is a warning when everything was retained."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+    raw_srt = "1\n00:00:01,000 --> 00:00:03,000\nl will sh0w it\n"
+    fixed_srt = "1\n00:00:01,000 --> 00:00:03,000\nI will show it\n"
+    result = run_subtitle_ocr(
+        str(tmp_path / "movie_t00.mkv"), 2,
+        str(tmp_path / "Movie (2019).mp4"),
+        workdir=str(tmp_path),
+        se_runner=_se_runner_factory(raw_srt, fixed_text=fixed_srt),
+    )
+    kit = tmp_path / "Movie (2019).ocr"
+    assert (kit / "movie_t00.sup").read_bytes() == b"PGSDATA"
+    with open(kit / "Movie (2019).raw.srt", encoding="utf-8-sig") as fh:
+        assert fh.read() == raw_srt  # raw pass-1 text, not the fixed
+    assert not any("retained except" in n for n in result.notes)
+
+
+def test_ocr_kit_vobsub_retains_single_track_mkv(tmp_path, monkeypatch):
+    """The VobSub kit retains the single-track .mkv that was fed to
+    seconv (the only ffmpeg muxer that accepts dvd_subtitle copy)."""
+    def fake_extract(mkv, index, out_path, *, binary="ffmpeg"):
+        with open(out_path, "wb") as fh:
+            fh.write(b"MKV+VOBSUB")
+        return out_path
+
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", fake_extract)
+    run_subtitle_ocr(
+        str(tmp_path / "movie_t00.mkv"), 7,
+        str(tmp_path / "Movie (2019).mp4"),
+        workdir=str(tmp_path / "work"),
+        codec_name="dvd_subtitle",
+        se_runner=_se_runner_factory(
+            "1\n00:00:01,000 --> 00:00:03,000\nHello world\n"),
+    )
+    kit = tmp_path / "Movie (2019).ocr"
+    assert (kit / "movie_t00.mkv").read_bytes() == b"MKV+VOBSUB"
+    assert (kit / "Movie (2019).raw.srt").is_file()
+
+
+def test_ocr_kit_failure_path_retains_what_exists(tmp_path, monkeypatch):
+    """Fail-open retention: when OCR raises (the pipeline ships the MP4
+    without subtitles), the kit is still created from whatever OCR
+    inputs exist - a hard pass-1 failure leaves the extracted track
+    but no raw SRT."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+
+    def runner(cmd):
+        if any(a.startswith("/ocrengine:") for a in cmd):
+            return subprocess.CompletedProcess(cmd, 1, "", "tesseract died")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with pytest.raises(SubtitleOcrError, match="seconv exited with code 1"):
+        run_subtitle_ocr(
+            str(tmp_path / "movie_t00.mkv"), 2,
+            str(tmp_path / "Movie (2019).mp4"),
+            workdir=str(tmp_path),
+            se_runner=runner,
+        )
+    kit = tmp_path / "Movie (2019).ocr"
+    assert (kit / "movie_t00.sup").is_file()      # the track was retained
+    assert not (kit / "Movie (2019).raw.srt").exists()  # pass 1 wrote none
+
+
+def test_ocr_kit_zero_cue_failure_keeps_raw_srt(tmp_path, monkeypatch):
+    """The zero-cue OCR failure keeps whatever exists: the track AND the
+    (empty) raw SRT pass 1 wrote before the cue-count safety net fired."""
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", _fake_extract)
+    with pytest.raises(SubtitleOcrError, match="zero cues"):
+        run_subtitle_ocr(
+            str(tmp_path / "movie_t00.mkv"), 2,
+            str(tmp_path / "Movie (2019).mp4"),
+            workdir=str(tmp_path),
+            se_runner=_se_runner_factory(""),
+        )
+    kit = tmp_path / "Movie (2019).ocr"
+    assert (kit / "movie_t00.sup").is_file()
+    raw = kit / "Movie (2019).raw.srt"
+    assert raw.is_file() and raw.stat().st_size == 0
+
+
+def test_ocr_kit_cap_skips_oversized_track(tmp_path, monkeypatch):
+    """The subtitle-track copy is capped at 150 MB: a bigger extract is
+    skipped with the honest note, while the tiny raw SRT is always
+    kept."""
+    cap = 150 * 1024 * 1024
+
+    def big_extract(mkv, index, out_path, *, binary="ffmpeg"):
+        with open(out_path, "wb") as fh:  # sparse: size, not bytes
+            fh.seek(cap)
+            fh.write(b"\0")
+        return out_path
+
+    monkeypatch.setattr("bluray_to_mp4.subtitles.extract_subtitles", big_extract)
+    result = run_subtitle_ocr(
+        str(tmp_path / "movie_t00.mkv"), 2,
+        str(tmp_path / "Movie (2019).mp4"),
+        workdir=str(tmp_path),
+        se_runner=_se_runner_factory(
+            "1\n00:00:01,000 --> 00:00:03,000\nHello world\n"),
+    )
+    kit = tmp_path / "Movie (2019).ocr"
+    assert not (kit / "movie_t00.sup").exists()  # over the cap: skipped
+    assert (kit / "Movie (2019).raw.srt").is_file()  # always kept
+    notes = [n for n in result.notes if "retained except the subtitle track" in n]
+    assert notes and "> 150 MB cap" in notes[0]
