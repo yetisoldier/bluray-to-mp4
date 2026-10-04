@@ -31,8 +31,9 @@ All notable changes to bluray-to-mp4. Dates are America/Chicago.
   33,434,888 B). x2plus is a 23-block RRDBNet versus animevideov3's
   compact VGG-style video net, so the live-action profile is slower
   per frame (a ~7.5–8× per-frame ratio was measured on the
-  verification host's llvmpipe CPU device; the 3090 Ti ratio was
-  measured separately and holds the same ordering). `resolve_realesrgan_models`
+  verification host's llvmpipe CPU device only; the 3090 Ti ratio
+  is expected to hold the same ordering but will be measured on the
+  first real run). `resolve_realesrgan_models`
   now requires `realesrgan-x2plus.param`/`.bin`, so a broken bundle
   fails loudly at stage setup instead of mid-disc.
 
