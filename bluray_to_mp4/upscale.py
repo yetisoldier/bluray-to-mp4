@@ -36,13 +36,13 @@ class UpscaleError(RuntimeError):
     """The optional AI-upscale stage failed and should fail open."""
 
 
-# v0.2.27 desync gate: a mezzanine whose duration drifts from the rip
-# (chunk reassembly runs on a stamped frame clock; run 13 proved a
-# wrong stamp drifts each concatenated segment) must never reach the
-# encode. Tolerance: max(5 s, 2%) - generous to VFR audio padding and
-# container rounding, tight enough to catch a 20% fps-stamp drift.
-_MEZZANINE_DURATION_TOLERANCE_SECONDS = 5.0
-_MEZZANINE_DURATION_TOLERANCE_FRACTION = 0.02
+# A mezzanine whose duration drifts from the rip must never reach the
+# encode. The old max(5 s, 2%) gate caught a gross 23.976/29.97 mismatch
+# but allowed Mamma Mia's 15.050-second feature-length drift (only 0.22%).
+# Container rounding is frame-scale, so permit 0.5 s plus a very small
+# proportional allowance while rejecting any viewer-visible accumulation.
+_MEZZANINE_DURATION_TOLERANCE_SECONDS = 0.5
+_MEZZANINE_DURATION_TOLERANCE_FRACTION = 0.0001
 
 
 @dataclass(frozen=True)
@@ -326,7 +326,7 @@ def verify_mezzanine_duration(
     """Sanity gate: mezzanine duration must match the rip (v0.2.27).
 
     Raises UpscaleError naming both durations when they differ by more
-    than max(5 seconds, 2%) - the pipeline's existing fail-open path
+    than max(0.5 seconds, 0.01%) - the pipeline's existing fail-open path
     then encodes the ORIGINAL rip with an honest warning instead of a
     silently desynced upscale. An unknown rip duration (probe failed
     and no title duration - effectively <= 0) must NOT pass the gate

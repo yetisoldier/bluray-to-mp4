@@ -230,7 +230,7 @@ jobs:
           if ($proc.ExitCode -ne 0) { throw "exe exited with $($proc.ExitCode)" }
           Get-Content smoke-out.txt
 
-      - name: Publish v0.2.30 release asset
+      - name: Publish versioned release asset
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

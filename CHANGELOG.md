@@ -2,6 +2,21 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.31] - 2026-10-05
+
+### Fixed
+
+- **DVD AI-upscale audio/video drift is now rejected before the final
+  encode.** The upscale plan prefers FFmpeg's timestamp-derived
+  `avg_frame_rate` over the nominal `r_frame_rate`, preventing a slightly
+  fast nominal clock from accumulating visible sync error across a feature.
+- **The mezzanine duration gate now catches sub-percent feature-length
+  drift.** Its tolerance is tightened from `max(5 seconds, 2%)` to
+  `max(0.5 seconds, 0.01%)`. The measured Mamma Mia failure shape
+  (15.050 seconds over 1:53:39) is pinned by a regression test. If the gate
+  trips, the existing fail-open path discards the upscale and produces a
+  synchronized original-resolution encode instead of shipping a bad file.
+
 ## [0.2.30] - 2026-10-04
 
 ### Added

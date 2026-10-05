@@ -435,25 +435,37 @@ def test_duration_gate_rejects_mismatched_mezzanine():
 
 
 def test_duration_gate_accepts_matched_mezzanine():
-    """A mezzanine within max(5s, 2%) of the rip passes the gate - VFR
-    audio padding and container rounding must never trip it."""
+    """Frame-scale container rounding passes the strict drift gate."""
     from bluray_to_mp4.upscale import verify_mezzanine_duration
 
     verify_mezzanine_duration(
-        "mezz.mkv", 7590.0, probe_duration=lambda p, *, binary="ffprobe": 7592.0
+        "mezz.mkv", 7590.0, probe_duration=lambda p, *, binary="ffprobe": 7590.4
     )
-    # Short rip: the 5-second floor governs (2% of 60s is only 1.2s).
+    # Short rip: the 0.5-second floor governs.
     verify_mezzanine_duration(
-        "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 64.5
+        "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 60.4
     )
 
 
-def test_duration_gate_floor_boundary_rejects_beyond_5s():
+def test_duration_gate_floor_boundary_rejects_beyond_half_second():
     from bluray_to_mp4.upscale import verify_mezzanine_duration
 
     with pytest.raises(UpscaleError, match="does not match"):
         verify_mezzanine_duration(
-            "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 65.5
+            "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 60.6
+        )
+
+
+def test_duration_gate_rejects_mamma_mia_drift_shape():
+    """A 15.050 s error over 1:53:39 is only 0.22%, but is plainly
+    visible and must fail open to the original rip instead of shipping."""
+    from bluray_to_mp4.upscale import verify_mezzanine_duration
+
+    with pytest.raises(UpscaleError, match=r"6804\.6s.*6819\.6s|does not match"):
+        verify_mezzanine_duration(
+            "mezz.mkv",
+            6819.648,
+            probe_duration=lambda p, *, binary="ffprobe": 6804.598,
         )
 
 

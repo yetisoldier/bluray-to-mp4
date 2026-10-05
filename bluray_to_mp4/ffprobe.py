@@ -47,8 +47,8 @@ class ProbedStream:
     height: int = 0
     sample_aspect_ratio: str = ""
     display_aspect_ratio: str = ""
-    r_frame_rate: str = ""    # v0.2.27: ffprobe '24000/1001' style ("" absent)
-    avg_frame_rate: str = ""  # v0.2.27: fallback when r_frame_rate is unusable
+    r_frame_rate: str = ""    # nominal/rational clock; avg fallback
+    avg_frame_rate: str = ""  # actual average clock, preferred when usable
 
 
 def parse_probe(text: str) -> list[ProbedStream]:
@@ -112,14 +112,18 @@ def parse_frame_rate(value: str) -> str | None:
 def video_frame_rate(streams: list[ProbedStream]) -> str | None:
     """First video stream's real frame rate (v0.2.27 desync fix).
 
-    r_frame_rate first, avg_frame_rate fallback, both normalized for
-    ffmpeg -framerate; None when no video stream or nothing parsable.
+    Prefer avg_frame_rate because it describes the stream's actual frame
+    clock. ffprobe's r_frame_rate is a nominal/rational rate and can be
+    slightly faster than the timestamps on telecined or irregular DVD
+    sources; rebuilding PNG frames at that rate causes cumulative A/V
+    drift. Fall back to r_frame_rate when no usable average is reported.
+    None means no video stream or no parsable rate.
     """
     video = first_video_stream(streams)
     if video is None:
         return None
-    return parse_frame_rate(video.r_frame_rate) or parse_frame_rate(
-        video.avg_frame_rate
+    return parse_frame_rate(video.avg_frame_rate) or parse_frame_rate(
+        video.r_frame_rate
     )
 
 

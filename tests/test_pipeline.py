@@ -144,8 +144,8 @@ def test_parse_probe_and_interlace_detection():
 
 
 # ---------------------------------------------------------------------
-# v0.2.27: real-fps probe (run 13 desync fix). ffprobe's r_frame_rate
-# (avg_frame_rate fallback) feeds UpscalePlan.fps so extraction, chunk
+# Real-fps probe (run 13 desync fix). ffprobe's avg_frame_rate
+# (r_frame_rate fallback) feeds UpscalePlan.fps so extraction, chunk
 # timing, and mezzanine reassembly share the rip's true clock; an
 # unparsable rate falls back to 30000/1001 with an honest warning.
 
@@ -173,15 +173,19 @@ def test_parse_frame_rate_rejects_unusable(value):
     assert parse_frame_rate(value) is None
 
 
-def test_video_frame_rate_prefers_r_then_avg():
-    """r_frame_rate wins; avg_frame_rate is the fallback; no video
-    stream (or neither rate usable) yields None."""
+def test_video_frame_rate_prefers_avg_then_r():
+    """The actual average clock wins over a nominal r_frame_rate.
+
+    This pins the Mamma Mia failure class: rebuilding PNG frames at a
+    slightly faster nominal clock accumulates visible A/V drift over a
+    feature even though both rates look like ordinary NTSC values.
+    """
     streams = [ProbedStream(0, "video", "h264", r_frame_rate="24000/1001",
                             avg_frame_rate="25/1")]
-    assert video_frame_rate(streams) == "24000/1001"
-    streams = [ProbedStream(0, "video", "h264", r_frame_rate="0/0",
-                            avg_frame_rate="25/1")]
     assert video_frame_rate(streams) == "25/1"
+    streams = [ProbedStream(0, "video", "h264", r_frame_rate="24000/1001",
+                            avg_frame_rate="0/0")]
+    assert video_frame_rate(streams) == "24000/1001"
     streams = [ProbedStream(0, "video", "h264")]
     assert video_frame_rate(streams) is None
     assert video_frame_rate([ProbedStream(0, "audio", "ac3")]) is None
