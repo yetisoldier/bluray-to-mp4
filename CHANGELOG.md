@@ -2,6 +2,22 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.32] - 2026-10-08
+
+### Fixed
+
+- **The final MP4 filename now exactly matches the movie title shown
+  in Review.** The run worker previously rescanned the disc after
+  Review and rebuilt the filename from the raw disc volume label, so
+  a disc labeled `MAMMA_MIA` produced `MAMMA_MIA (2019).mp4`
+  instead of `Mamma Mia! Here We Go Yet Again (2019).mp4`. The
+  reviewed title now flows through the run plan into the TMDB
+  lookup and the final encode path.
+- **Regression tests cover each handoff boundary.** The UI run plan
+  preserves the reviewed title, the worker passes it through to the
+  pipeline, and the final output path exactly matches the reviewed
+  name.
+
 ## [0.2.31] - 2026-10-05
 
 ### Fixed
