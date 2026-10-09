@@ -171,6 +171,7 @@ class RunWorker(QThread):
                 self.disc_index,
                 self.plan["outdir"],
                 encoder=self.plan.get("encoder", "auto"),
+                movie_name=self.plan.get("movie_name"),
                 series_name=self.plan.get("series_name"),
                 season=self.plan.get("season", 1),
                 start_episode=self.plan.get("start_episode", 1),

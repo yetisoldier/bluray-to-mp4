@@ -319,6 +319,70 @@ def test_start_run_populates_plan(qapp, monkeypatch, tmp_path):
     w.close()
 
 
+def test_movie_run_plan_preserves_reviewed_title(qapp, monkeypatch, tmp_path):
+    """The movie title shown in Review is carried into the worker plan."""
+    import bluray_to_mp4.ui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "RunWorker", _RecordingRunWorker)
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    disc = scan_disc(0, runner=fake_runner(MOVIE_DISC_OUTPUT.splitlines()))
+    w = mw_mod.MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    w.disc = disc
+    w.guess = detect_series(disc)
+    w._fill_review_page()
+    w.edit_movie_title.setText("Mamma Mia! Here We Go Yet Again")
+    w.spin_year.setValue(2019)
+    w.edit_outdir.setText(str(tmp_path))
+    w._start_run()
+
+    plan = w.run_worker.plan
+    expected = "Mamma Mia! Here We Go Yet Again (2019).mp4"
+    assert plan["movie_name"] == "Mamma Mia! Here We Go Yet Again"
+    assert plan["jobs"][0]["output_name"] == expected
+    w.close()
+
+
+def test_run_worker_forwards_reviewed_movie_title(qapp, monkeypatch, tmp_path):
+    """RunWorker must pass the Review title through the pipeline boundary."""
+    from bluray_to_mp4.monitor import MonitorState
+    from bluray_to_mp4.ui import workers as workers_mod
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    captured = {}
+
+    class _Result:
+        jobs = []
+        is_series = False
+        encoder = "x265"
+        errors = []
+
+    def fake_run_pipeline(*args, **kwargs):
+        captured.update(kwargs)
+        return _Result()
+
+    monkeypatch.setattr(workers_mod, "monitor_state", MonitorState())
+    monkeypatch.setattr(workers_mod, "run_pipeline", fake_run_pipeline)
+
+    plan = {
+        "disc_name": "MAMMA_MIA",
+        "movie_name": "Mamma Mia! Here We Go Yet Again",
+        "media_type": "dvd",
+        "is_series": False,
+        "encoder": "x265",
+        "outdir": str(tmp_path),
+        "jobs": [],
+        "tid_names": {},
+    }
+    worker = RunWorker(0, plan, Settings())
+    worker.start()
+    _pump(qapp, worker)
+
+    assert captured["movie_name"] == "Mamma Mia! Here We Go Yet Again"
+
+
 def test_run_worker_emits_jobs_total(qapp, monkeypatch, tmp_path):
     """RunWorker feeds monitor_state.begin with len(plan[jobs])."""
     from bluray_to_mp4.monitor import MonitorState

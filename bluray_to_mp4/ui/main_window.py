@@ -1155,6 +1155,8 @@ class MainWindow(QMainWindow):
             "is_series": bool(self.guess.is_series),
             "encoder": self.combo_encoder.currentText(),
             "outdir": outdir,
+            "movie_name": self.edit_movie_title.text().strip()
+            if not self.guess.is_series else None,
             "series_name": self.edit_series_name.text().strip()
             if self.guess.is_series else None,
             "season": self.spin_season.value(),

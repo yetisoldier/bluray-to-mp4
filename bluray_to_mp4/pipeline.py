@@ -332,6 +332,7 @@ def run_pipeline(
     dry_run: bool = False,
     mkv_runner: Runner | None = None,
     workdir: str | None = None,
+    movie_name: str | None = None,
     series_name: str | None = None,
     season: int = 1,
     start_episode: int = 1,
@@ -369,6 +370,9 @@ def run_pipeline(
     (invalid ones keep the recommendation + a warning note), an explicit
     subtitle None means "no subtitles for this title" and disables the
     rip-time first-stream fallback for it.
+
+    movie_name: the reviewed movie title shown in the UI. It overrides the
+    raw disc volume label for TMDB lookup and the final output filename.
 
     target_gb_per_hour (v0.2.18, Review-page size target): explicit value
     wins over the media-type default; None (or a value equal to the
@@ -474,7 +478,8 @@ def run_pipeline(
         stage(f"Movie disc: main feature {main.duration_seconds // 60} min")
         if year is None and tmdb_key:
             try:
-                hit = lookup_movie(disc.name, key=tmdb_key, fetcher=tmdb_fetcher)
+                hit = lookup_movie(
+                    movie_name or disc.name, key=tmdb_key, fetcher=tmdb_fetcher)
                 if hit and hit.get("year"):
                     year = hit["year"]
                     result.reasons.append(
@@ -482,7 +487,7 @@ def run_pipeline(
                     )
             except TmdbError as exc:
                 result.warnings.append(f"TMDB year lookup failed: {exc}")
-        name = movie_output_name(disc.name, year=year)
+        name = movie_output_name(movie_name or disc.name, year=year)
         names = [(main.tid, name)]
         sel = recommend_title(main)
         sel, note = _apply_stream_overrides(

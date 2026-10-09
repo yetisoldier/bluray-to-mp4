@@ -55,6 +55,19 @@ def test_movie_dry_run_builds_one_job(tmp_path):
     assert "libx265" in args
 
 
+def test_movie_name_override_controls_final_output_name(tmp_path):
+    """The reviewed movie title must survive a fresh disc scan."""
+    result = _movie_run(
+        tmp_path / "out",
+        movie_name="Mamma Mia! Here We Go Yet Again",
+        year=2019,
+    )
+
+    job = result.jobs[0]
+    assert job.output_name == "Mamma Mia! Here We Go Yet Again (2019).mp4"
+    assert job.encode_args[-1].endswith(job.output_name)
+
+
 def test_movie_dry_run_reserves_srt_path(tmp_path):
     result = _movie_run(tmp_path / "out")
     job = result.jobs[0]
