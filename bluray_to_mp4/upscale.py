@@ -20,6 +20,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from .binaries import resolve_ffmpeg, resolve_realesrgan_ncnn
+from .ffprobe import FrameCountProbe, probe_frame_count
 from .makemkv import EncodeCancelled
 
 __all__ = [
@@ -27,22 +28,13 @@ __all__ = [
     "UpscalePlan",
     "model_name_for_mode",
     "resolve_realesrgan_models",
-    "verify_mezzanine_duration",
+    "verify_mezzanine_frames",
     "run_dvd_upscale",
 ]
 
 
 class UpscaleError(RuntimeError):
     """The optional AI-upscale stage failed and should fail open."""
-
-
-# A mezzanine whose duration drifts from the rip must never reach the
-# encode. The old max(5 s, 2%) gate caught a gross 23.976/29.97 mismatch
-# but allowed Mamma Mia's 15.050-second feature-length drift (only 0.22%).
-# Container rounding is frame-scale, so permit 0.5 s plus a very small
-# proportional allowance while rejecting any viewer-visible accumulation.
-_MEZZANINE_DURATION_TOLERANCE_SECONDS = 0.5
-_MEZZANINE_DURATION_TOLERANCE_FRACTION = 0.0001
 
 
 @dataclass(frozen=True)
@@ -64,6 +56,12 @@ class UpscalePlan:
     source_height: int = 0
     display_aspect_ratio: str = ""
     sample_aspect_ratio: str = ""
+    # v0.2.33 frame-exact chunking (design §2.3): the authoritative
+    # decode-counted total from probe_frame_count, required at run
+    # time; chunk_frames is derived once via round(chunk_seconds*fps).
+    total_frames: int | None = None
+    chunk_frames: int | None = None
+    frame_count_from_metadata: bool = False
 
 
 def model_name_for_mode(mode: str) -> str:
@@ -317,49 +315,101 @@ def _write_concat_list(segments: list[Path]) -> str:
     return fh.name
 
 
-def verify_mezzanine_duration(
+def verify_mezzanine_frames(
     mezzanine_path: str,
-    rip_duration_seconds: float,
+    rip_total_frames: int,
     *,
-    probe_duration,
+    probe_frames,
 ) -> None:
-    """Sanity gate: mezzanine duration must match the rip (v0.2.27).
+    """v0.2.33 gate: mezzanine frame count must equal the rip's exactly.
 
-    Raises UpscaleError naming both durations when they differ by more
-    than max(0.5 seconds, 0.01%) - the pipeline's existing fail-open path
-    then encodes the ORIGINAL rip with an honest warning instead of a
-    silently desynced upscale. An unknown rip duration (probe failed
-    and no title duration - effectively <= 0) must NOT pass the gate
-    either (v0.2.29, Karen's validation): with rip=0 the tolerance
-    floor would accept any mezzanine, so the gate refuses it exactly
-    like an unprobeable mezzanine. probe_duration is injected (a
-    probe_duration_seconds-shaped callable) so the gate is testable
-    without ffprobe.
+    Replaces the v0.2.27 duration gate (max(0.5 s, 0.01%) tolerance):
+    under frame-exact chunking the mezzanine contains the rip's frames
+    by construction, so any deviation is a nonzero integer difference -
+    exact equality, no tolerance window. A mismatch raises UpscaleError
+    naming both counts; the pipeline's fail-open path then encodes the
+    ORIGINAL rip, retains the rejected mezzanine, and writes a
+    diagnostic (design §4). rip_total_frames <= 0 (probe failed) must
+    NOT pass either - an unknown count cannot certify a mezzanine.
+    probe_frames is injected (a probe_frame_count-shaped callable) so
+    the gate is testable without ffprobe.
     """
+    if rip_total_frames is None or int(rip_total_frames) <= 0:
+        raise UpscaleError(
+            "rip frame count unknown; refusing to encode a possibly "
+            "desynced upscale"
+        )
     try:
-        mezz = float(probe_duration(mezzanine_path))
-    except Exception as exc:  # unprobeable mezzanine cannot be trusted
+        mezz_probe = probe_frames(mezzanine_path)
+        # Accept either the FrameCountProbe object or a bare int (tests
+        # and the design-doc signature sketch both pass shapes like
+        # int(probe_frames(path))).
+        mezz = (
+            int(mezz_probe.total_frames)
+            if isinstance(mezz_probe, FrameCountProbe)
+            else int(mezz_probe)
+        )
+    except Exception as exc:
         raise UpscaleError(
-            f"upscale mezzanine duration could not be probed "
-            f"({exc}); refusing to encode a possibly desynced upscale"
+            f"upscale mezzanine frame count could not be probed ({exc}); "
+            "refusing to encode a possibly desynced upscale"
         ) from exc
-    rip = float(rip_duration_seconds or 0)
-    if rip <= 0:
+    if mezz != int(rip_total_frames):
         raise UpscaleError(
-            "rip duration unknown (the rip could not be probed and no "
-            "title duration is available); refusing to encode a "
-            "possibly desynced upscale"
+            f"upscale mezzanine has {mezz} frames; the rip has "
+            f"{int(rip_total_frames)}; refusing to encode a desynced upscale"
         )
-    tolerance = max(
-        _MEZZANINE_DURATION_TOLERANCE_SECONDS,
-        _MEZZANINE_DURATION_TOLERANCE_FRACTION * rip,
-    )
-    if abs(mezz - rip) > tolerance:
-        raise UpscaleError(
-            f"upscale mezzanine duration {mezz:.1f}s does not match the "
-            f"rip's {rip:.1f}s (off by {abs(mezz - rip):.1f}s); refusing "
-            "to encode a desynced upscale"
-        )
+
+
+def _fps_float(fps: str) -> float:
+    """Numeric fps from a plan token ("30000/1001" -> 29.970...).
+
+    v0.2.33 §2.3: chunk_frames = round(chunk_seconds * fps) needs a
+    float clock; the token's precision is preserved because the division
+    happens once, not per frame.
+    """
+    text = (fps or "30000/1001").strip()
+    if "/" in text:
+        num, _, den = text.partition("/")
+        try:
+            numerator = float(num.strip())
+            denominator = float(den.strip())
+        except ValueError:
+            return 30000.0 / 1001.0
+        if numerator <= 0 or denominator <= 0:
+            return 30000.0 / 1001.0
+        return numerator / denominator
+    try:
+        rate = float(text)
+    except ValueError:
+        return 30000.0 / 1001.0
+    return rate if rate > 0 else 30000.0 / 1001.0
+
+
+def compute_chunk_frames(chunk_seconds: int, fps: str) -> int:
+    """Frames per full chunk: max(1, round(chunk_seconds * fps)) (§2.3).
+
+    round() not floor(): a nominal "120 s" chunk at 23.976 is 2877
+    frames, closer to the human label.
+    """
+    return max(1, round(max(10, int(chunk_seconds or 120)) * _fps_float(fps)))
+
+
+def compute_chunk_bounds(total_frames: int, chunk_frames: int) -> list[tuple[int, int]]:
+    """Per-chunk (first, count) frame bounds: [i*F, (i+1)*F) windows.
+
+    The last chunk carries the remainder (§2.3). Integer-exact: bounds
+    are frame indices, never durations.
+    """
+    total = int(total_frames)
+    step = max(1, int(chunk_frames))
+    bounds = []
+    first = 0
+    while first < total:
+        count = min(step, total - first)
+        bounds.append((first, count))
+        first += count
+    return bounds
 
 
 def run_dvd_upscale(
@@ -367,8 +417,14 @@ def run_dvd_upscale(
     *,
     on_progress=None,
     cancel=None,
-) -> str:
-    """Run Real-ESRGAN and return the completed mezzanine path.
+) -> tuple[str, int]:
+    """Run Real-ESRGAN and return (mezzanine_path, total_frames).
+
+    v0.2.33: chunks are frame-index windows [i*F, (i+1)*F) extracted
+    with ffmpeg's select filter - never -ss/-t time windows - and each
+    chunk's PNG count is asserted against its expected count, so drift
+    is impossible by construction and any decode/reassembly anomaly
+    fails loudly instead of shipping a desynced mezzanine.
 
     This is an optional cosmetic stage. UpscaleError callers should fail open
     and encode the original DVD rip; EncodeCancelled still propagates.
@@ -392,9 +448,24 @@ def run_dvd_upscale(
         else "setsar=1"
     )
 
-    total_seconds = max(1, int(plan.duration_seconds or 1))
+    # v0.2.33 §2.3: chunk by FRAME INDEX, not time windows. total_frames
+    # comes from the decode-counted pre-flight probe and is required;
+    # chunk_frames = round(chunk_seconds * fps) keeps the operator's
+    # ~2-minute mental model while boundaries stay indexed, not timed.
+    if plan.total_frames is None or int(plan.total_frames) <= 0:
+        raise UpscaleError(
+            "rip frame count unknown; refusing to run a frame-exact "
+            "upscale without it"
+        )
+    total_frames = int(plan.total_frames)
     chunk_seconds = max(10, int(plan.chunk_seconds or 120))
-    chunks = math.ceil(total_seconds / chunk_seconds)
+    F = (
+        int(plan.chunk_frames)
+        if plan.chunk_frames is not None and int(plan.chunk_frames) > 0
+        else compute_chunk_frames(chunk_seconds, plan.fps)
+    )
+    bounds = compute_chunk_bounds(total_frames, F)
+    chunks = len(bounds)
     workroot = Path(plan.workdir)
     workroot.mkdir(parents=True, exist_ok=True)
     output = Path(plan.output_path)
@@ -413,8 +484,7 @@ def run_dvd_upscale(
     segments: list[Path] = []
     try:
         for idx in range(chunks):
-            start = idx * chunk_seconds
-            length = min(chunk_seconds, total_seconds - start)
+            first, count = bounds[idx]
             chunk = workroot / f"chunk_{idx:04d}"
             in_dir = chunk / "in"
             out_dir = chunk / "out"
@@ -429,27 +499,45 @@ def run_dvd_upscale(
                 pass
 
             report(len(segments) / chunks, "extracting frames", idx)
+            # v0.2.33 §2.4: select=between(n,a,b) addresses decoded frame
+            # index n (0-based) - the frame-exact anchor, independent of
+            # timestamps. No -ss: the design's simpler first cut (full
+            # decode; Real-ESRGAN dominates by an order of magnitude).
+            # -vsync 0 (passthrough) is mandatory so ffmpeg does not
+            # duplicate/drop frames to hit an implied CFR output clock.
             _run_process(
                 [
                     ffmpeg,
                     "-y",
                     "-hide_banner",
                     "-nostdin",
-                    "-ss",
-                    str(start),
-                    "-t",
-                    str(length),
                     "-i",
                     plan.input_path,
                     "-an",
                     "-sn",
                     "-vf",
-                    _prepare_filter(plan.deinterlace),
+                    (
+                        f"select='between(n,{first},{first + count - 1})',"
+                        + _prepare_filter(plan.deinterlace)
+                    ),
+                    "-vsync",
+                    "0",
+                    "-start_number",
+                    str(first + 1),
                     str(in_dir / "frame_%08d.png"),
                 ],
                 label=f"upscale frame extraction chunk {idx + 1}/{chunks}",
                 cancel=cancel,
             )
+            # Per-chunk frame-count assertion (§2.4): the first real run
+            # self-validates the select-index behavior for free.
+            actual_in = _count_pngs(in_dir)
+            if actual_in != count:
+                raise UpscaleError(
+                    f"chunk {idx + 1}/{chunks} extracted {actual_in} "
+                    f"frames; expected {count} "
+                    f"(frames {first}..{first + count - 1})"
+                )
             if not any(in_dir.iterdir()):
                 raise UpscaleError(f"no frames extracted for chunk {idx + 1}")
 
@@ -506,6 +594,13 @@ def run_dvd_upscale(
             )
             if not output_frames:
                 raise UpscaleError(f"no upscaled frames produced for chunk {idx + 1}")
+            # Per-chunk assertion after Real-ESRGAN too (§2.4): the engine
+            # must return exactly the frames it was handed.
+            if output_frames != count:
+                raise UpscaleError(
+                    f"chunk {idx + 1}/{chunks} upscaled {output_frames} "
+                    f"frames; expected {count}"
+                )
 
             report(len(segments) / chunks, "writing mezzanine segment", idx)
             _run_process(
@@ -516,6 +611,13 @@ def run_dvd_upscale(
                     "-nostdin",
                     "-framerate",
                     plan.fps,
+                    # v0.2.33: PNGs carry the GLOBAL frame numbering
+                    # (extraction wrote -start_number first+1), so the
+                    # image2 reader must be told where this chunk's
+                    # numbering starts - the default of 1 only matches
+                    # chunk 0.
+                    "-start_number",
+                    str(first + 1),
                     "-i",
                     str(out_dir / "frame_%08d.png"),
                     "-an",
@@ -567,7 +669,7 @@ def run_dvd_upscale(
         if not output.is_file() or output.stat().st_size == 0:
             raise UpscaleError("upscale mezzanine was not created")
         shutil.rmtree(workroot, ignore_errors=True)
-        return str(output)
+        return (str(output), total_frames)
     except EncodeCancelled:
         raise
     except Exception as exc:

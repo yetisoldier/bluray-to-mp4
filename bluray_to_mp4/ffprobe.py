@@ -26,6 +26,10 @@ __all__ = [
     "first_video_stream",
     "parse_frame_rate",
     "video_frame_rate",
+    "probe_frame_count",
+    "FrameCountProbe",
+    "probe_cfr_check",
+    "CfrVerdict",
 ]
 
 INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
@@ -211,3 +215,178 @@ def first_video_width(streams: list[ProbedStream]) -> int | None:
     """
     video = first_video_stream(streams)
     return video.width if video and video.width else None
+
+
+# ---------------------------------------------------------------------
+# v0.2.33 frame-exact chunking: the authoritative frame count probe and
+# the CFR pre-flight (design §2.1/§2.2). Both run once, before any GPU
+# work is committed, so a bad rip costs ~30 s of probing instead of
+# hours of Real-ESRGAN on a doomed run.
+
+
+class FrameCountProbe:
+    """Result of the two-pass frame-count probe (v0.2.33 §2.1).
+
+    total_frames: the authoritative decoded-frame count of the first
+    video stream. from_metadata is True only when the slow decode-count
+    pass failed and the container's nb_frames metadata had to stand in
+    (a known lie source on VOB-sourced rips - the diagnostic records
+    it so the operator can distrust the number).
+    """
+
+    def __init__(self, total_frames: int, *, from_metadata: bool = False):
+        self.total_frames = int(total_frames)
+        self.from_metadata = bool(from_metadata)
+
+
+def _run_ffprobe_json(binary: str, args: list[str], path: str) -> dict:
+    result = subprocess.run(
+        [binary, "-v", "error"] + args + ["-of", "json", path],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise FfprobeError(
+            f"ffprobe failed on {path}: {result.stderr.strip()[:300]}"
+        )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise FfprobeError(f"unparsable ffprobe output: {exc}") from exc
+
+
+def probe_frame_count(path: str, *, binary: str = "ffprobe") -> FrameCountProbe:
+    """Two-pass authoritative frame count of the first video stream.
+
+    v0.2.33 design §2.1. Pass 1 reads nb_frames/nb_read_frames metadata
+    only (fast, unreliable on VOB-sourced DVD rips). Pass 2 runs
+    ffprobe -count_frames, which decodes every packet and counts the
+    frames the stream actually yields - the only figure that cannot
+    be wrong about how many decoded frames the demuxer/decoder emit,
+    which is exactly what the frame-exact extraction must reproduce.
+
+    Selection rule: slow-pass nb_read_frames > 0 is authoritative;
+    otherwise fast-pass nb_frames > 0 stands in with from_metadata=True;
+    otherwise FfprobeError (the caller refuses before any chunk runs).
+    """
+    binary = resolve_ffprobe(binary)
+
+    def _first_stream_int(data: dict, field: str) -> int:
+        try:
+            value = int(data["streams"][0].get(field) or 0)
+        except (KeyError, IndexError, TypeError, ValueError):
+            return 0
+        return value
+
+    # Fast pass: metadata only, no decode.
+    fast = _run_ffprobe_json(
+        binary,
+        ["-select_streams", "v:0", "-show_entries", "stream=nb_frames,nb_read_frames"],
+        path,
+    )
+    fast_nb_frames = _first_stream_int(fast, "nb_frames")
+
+    # Slow pass: decode-count every packet (~20-60 s on a DVD rip).
+    slow = _run_ffprobe_json(
+        binary,
+        [
+            "-select_streams", "v:0", "-count_frames",
+            "-show_entries", "stream=nb_read_frames",
+        ],
+        path,
+    )
+    slow_nb_read_frames = _first_stream_int(slow, "nb_read_frames")
+
+    if slow_nb_read_frames > 0:
+        return FrameCountProbe(slow_nb_read_frames)
+    if fast_nb_frames > 0:
+        return FrameCountProbe(fast_nb_frames, from_metadata=True)
+    raise FfprobeError(
+        f"rip frame count could not be probed for {path}"
+    )
+
+
+@dataclass
+class CfrVerdict:
+    """Outcome of the VFR pre-flight (v0.2.33 §2.2).
+
+    verdict: "CFR" | "VFR" | "UNKNOWN". r_frame_rate/avg_frame_rate
+    carry the raw probe tokens ("24000/1001" or "" when unreported) so
+    the diagnostic can record exactly what the clock probe saw.
+    """
+
+    verdict: str
+    r_frame_rate: str = ""
+    avg_frame_rate: str = ""
+
+
+def _rate_value(value: str) -> float | None:
+    """Numeric rate of an ffprobe token, or None when unusable.
+
+    parse_frame_rate normalizes/rejects but returns the original text;
+    this converts the SAME validated shapes to a float for the |r-a|/a
+    comparison ("24000/1001" -> 23.976..., "25" -> 25.0).
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    if "/" in text:
+        num, _, den = text.partition("/")
+        try:
+            numerator = float(num.strip())
+            denominator = float(den.strip())
+        except ValueError:
+            return None
+        if numerator <= 0 or denominator <= 0:
+            return None
+        return numerator / denominator
+    try:
+        rate = float(text)
+    except ValueError:
+        return None
+    return rate if rate > 0 else None
+
+
+def probe_cfr_check(path: str, *, binary: str = "ffprobe") -> CfrVerdict:
+    """Classify the rip's frame clock as CFR, VFR, or UNKNOWN.
+
+    v0.2.33 design §2.2. Piggybacks on the -count_frames decode pass
+    (which already decodes everything) to read r_frame_rate and
+    avg_frame_rate in the same subprocess. Verdicts:
+
+    - UNKNOWN: either rate missing/unparsable -> the caller refuses the
+      upscale; a rip whose clock cannot even be named must not be
+      rebuilt on a guessed constant clock.
+    - VFR: |r - a| / a > 0.001 (0.1%) -> the caller refuses pre-flight;
+      reassembling a variable-clock source at constant fps re-creates
+      drift by construction.
+    - CFR: proceed (the overwhelmingly common MakeMKV case).
+    """
+    binary = resolve_ffprobe(binary)
+    data = _run_ffprobe_json(
+        binary,
+        [
+            "-select_streams", "v:0", "-count_frames",
+            "-show_entries", "stream=r_frame_rate,avg_frame_rate,nb_read_frames",
+        ],
+        path,
+    )
+    try:
+        stream = data["streams"][0]
+    except (KeyError, IndexError) as exc:
+        raise FfprobeError(f"no video stream reported for {path}") from exc
+    r_raw = str(stream.get("r_frame_rate") or "").strip()
+    a_raw = str(stream.get("avg_frame_rate") or "").strip()
+    # parse_frame_rate is the existing validator (design §2.2): reuse it
+    # so the pre-flight accepts exactly the shapes the fps probe does.
+    r_token = parse_frame_rate(r_raw)
+    a_token = parse_frame_rate(a_raw)
+    r_value = _rate_value(r_token) if r_token else None
+    a_value = _rate_value(a_token) if a_token else None
+    if r_value is None or a_value is None:
+        return CfrVerdict("UNKNOWN", r_raw, a_raw)
+    if abs(r_value - a_value) / a_value > 0.001:
+        return CfrVerdict("VFR", r_raw, a_raw)
+    return CfrVerdict("CFR", r_raw, a_raw)

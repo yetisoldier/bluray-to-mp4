@@ -2,12 +2,15 @@
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 from bluray_to_mp4 import pipeline as pipeline_mod
 from bluray_to_mp4.cli import build_parser
 from bluray_to_mp4.ffprobe import (
+    CfrVerdict,
+    FrameCountProbe,
     FfprobeError,
     ProbedStream,
     first_video_stream,
@@ -258,6 +261,28 @@ def _stub_probe(monkeypatch, *, width=3840, height=2160,
     monkeypatch.setattr(
         pipeline_mod, "probe_streams",
         lambda path, *, binary="ffprobe": streams,
+    )
+
+
+def _stub_frame_preflight(
+    monkeypatch, *, total_frames=163_267, from_metadata=False,
+    verdict="CFR", r_frame_rate="24000/1001", avg_frame_rate="24000/1001",
+):
+    """Stub the v0.2.33 pre-flight probes: the decode-counted frame
+    total (probe_frame_count) and the CFR verdict (probe_cfr_check).
+    Defaults describe the Mamma Mia-scale film rip: 163,267 frames at
+    23.976 fps (~1:53:39), decode-counted (from_metadata=False), and
+    a CFR clock (r == a). The fake rip on disk is a text file, so the
+    real helpers cannot run on it."""
+    monkeypatch.setattr(
+        pipeline_mod, "probe_frame_count",
+        lambda path, *, binary="ffprobe": FrameCountProbe(
+            total_frames, from_metadata=from_metadata),
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "probe_cfr_check",
+        lambda path, *, binary="ffprobe": CfrVerdict(
+            verdict, r_frame_rate=r_frame_rate, avg_frame_rate=avg_frame_rate),
     )
 
 
@@ -790,6 +815,119 @@ def test_probe_duration_seconds_parses_and_errors(monkeypatch):
         ff.probe_duration_seconds("/x.mp4")
 
 
+def test_probe_frame_count_two_pass_selection(monkeypatch):
+    """v0.2.33 §2.1 selection rule, exercised on stubbed ffprobe JSON:
+    slow-pass nb_read_frames wins; on a failed slow pass the fast-pass
+    nb_frames stands in with from_metadata=True; both empty -> refuse."""
+    from bluray_to_mp4 import ffprobe as ff
+
+    def make_run(payloads):
+        payloads = list(payloads)
+
+        def fake_run(*a, **kw):
+            class _Result:
+                pass
+
+            r = _Result()
+            r.returncode, r.stderr = 0, ""
+            r.stdout = payloads.pop(0)
+            return r
+
+        return fake_run
+
+    # Slow pass (48 decoded frames) wins over fast-pass metadata (60).
+    monkeypatch.setattr(
+        ff.subprocess, "run",
+        make_run([
+            '{"streams": [{"nb_frames": "60"}]}',
+            '{"streams": [{"nb_read_frames": "48"}]}',
+        ]),
+    )
+    probe = ff.probe_frame_count("/x.mkv")
+    assert probe.total_frames == 48
+    assert probe.from_metadata is False
+
+    # Slow pass reports zero -> metadata stands in, flagged.
+    monkeypatch.setattr(
+        ff.subprocess, "run",
+        make_run([
+            '{"streams": [{"nb_frames": "60"}]}',
+            '{"streams": [{"nb_read_frames": "0"}]}',
+        ]),
+    )
+    probe = ff.probe_frame_count("/x.mkv")
+    assert probe.total_frames == 60
+    assert probe.from_metadata is True
+
+    # Both unusable -> honest refusal before any chunk runs.
+    monkeypatch.setattr(
+        ff.subprocess, "run",
+        make_run([
+            '{"streams": [{}]}',
+            '{"streams": [{}]}',
+        ]),
+    )
+    with pytest.raises(FfprobeError, match="could not be probed"):
+        ff.probe_frame_count("/x.mkv")
+
+
+def test_probe_cfr_check_verdicts(monkeypatch):
+    """v0.2.33 §2.2: |r-a|/a > 0.1% -> VFR; missing/unparsable ->
+    UNKNOWN; otherwise CFR. Piggybacks r/avg rates off the same
+    -count_frames JSON as the frame count."""
+    from bluray_to_mp4 import ffprobe as ff
+
+    def make_run(payload):
+        def fake_run(*a, **kw):
+            class _Result:
+                pass
+
+            r = _Result()
+            r.returncode, r.stderr = 0, ""
+            r.stdout = payload
+            return r
+
+        return fake_run
+
+    # CFR: identical clocks.
+    monkeypatch.setattr(
+        ff.subprocess, "run",
+        make_run(
+            '{"streams": [{"r_frame_rate": "24000/1001", '
+            '"avg_frame_rate": "24000/1001", "nb_read_frames": "36"}]}'))
+    verdict = ff.probe_cfr_check("/x.mkv")
+    assert verdict.verdict == "CFR"
+    assert verdict.r_frame_rate == "24000/1001"
+    assert verdict.avg_frame_rate == "24000/1001"
+
+    # VFR: 23.976 nominal vs 29.97 average - a 25% clock gap.
+    monkeypatch.setattr(
+        ff.subprocess, "run",
+        make_run(
+            '{"streams": [{"r_frame_rate": "24000/1001", '
+            '"avg_frame_rate": "30000/1001", "nb_read_frames": "36"}]}'))
+    verdict = ff.probe_cfr_check("/x.mkv")
+    assert verdict.verdict == "VFR"
+
+    # Sub-0.1% rounding differences stay CFR (23.976 vs 23.976023...).
+    monkeypatch.setattr(
+        ff.subprocess, "run",
+        make_run(
+            '{"streams": [{"r_frame_rate": "24000/1001", '
+            '"avg_frame_rate": "23.976", "nb_read_frames": "36"}]}'))
+    verdict = ff.probe_cfr_check("/x.mkv")
+    assert verdict.verdict == "CFR"
+
+    # UNKNOWN: unreported average clock.
+    monkeypatch.setattr(
+        ff.subprocess, "run",
+        make_run(
+            '{"streams": [{"r_frame_rate": "24000/1001", '
+            '"avg_frame_rate": "", "nb_read_frames": "36"}]}'))
+    verdict = ff.probe_cfr_check("/x.mkv")
+    assert verdict.verdict == "UNKNOWN"
+
+
 # ---------------------------------------------------------------------
 # v0.2.15 Gap 1: Review-page stream overrides (backend merge contract).
 # The UI combos land in a separate session; these tests pin the
@@ -1310,19 +1448,16 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
         sample_aspect_ratio="32:27", display_aspect_ratio="16:9",
         subtitle_count=0,
     )
-    # v0.2.27: the duration gate probes both the rip and the mezzanine;
-    # a matching pair (the scan fixture says 2:06:30 = 7590s) lets the
-    # fake mezzanine through the gate.
-    monkeypatch.setattr(
-        pipeline_mod, "probe_duration_seconds",
-        lambda path, *, binary="ffprobe": 7590.0)
+    # v0.2.33: the pre-flight probes the rip's frame count and CFR
+    # verdict; the plan must carry the decode-counted total.
+    _stub_frame_preflight(monkeypatch)
     captures = {"upscale": [], "encode": [], "progress": []}
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
         captures["upscale"].append(plan)
         if on_progress is not None:
             on_progress(0.5, 42.0)
-        return plan.output_path
+        return (plan.output_path, plan.total_frames)
 
     def fake_encode(args, *, duration_seconds, binary="ffmpeg",
                     on_progress=None, cancel=None):
@@ -1341,6 +1476,10 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     plan = captures["upscale"][0]
     assert plan.mode == "720p"
     assert plan.fps == "24000/1001"  # v0.2.27: the rip's real frame clock
+    # v0.2.33: the plan carries the decode-counted frame total and the
+    # metadata flag from the pre-flight (design §2.3).
+    assert plan.total_frames == 163_267
+    assert plan.frame_count_from_metadata is False
     assert plan.source_width == 720
     assert plan.source_height == 480
     assert plan.sample_aspect_ratio == "32:27"
@@ -1353,12 +1492,14 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     maps = [args[i + 1] for i, arg in enumerate(args) if arg == "-map"]
     assert maps == ["1:a:0?", "0:v:0"]
     assert ("upscale", 0, 0.5, 42.0, None) in captures["progress"]
+    assert result.jobs[0].upscale_mezzanine_path == plan.output_path
 
 
 def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):
     from bluray_to_mp4.upscale import UpscaleError
 
     _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(monkeypatch)
     captures = []
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
@@ -1386,21 +1527,21 @@ def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):
 def test_upscale_fps_probe_failure_falls_back_with_warning(tmp_path, monkeypatch):
     """v0.2.27: an unparsable/unreported rip frame rate must not crash
     the run - the plan falls back to the 30000/1001 default and the
-    result carries an honest warning naming the fallback."""
+    result carries an honest warning naming the fallback. v0.2.33: the
+    fallback fps only governs the -framerate STAMP (the CFR pre-flight
+    uses ffprobe directly, not the streams stub)."""
     _stub_probe(monkeypatch, width=720, subtitle_count=0, r_frame_rate="garbage",
                 avg_frame_rate="")
+    _stub_frame_preflight(monkeypatch, r_frame_rate="24000/1001",
+                          avg_frame_rate="24000/1001")
     plans = []
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
         plans.append(plan)
-        return plan.output_path
+        return (plan.output_path, plan.total_frames)
 
     monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
     monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
-    # The gate probes durations; the fake mezzanine matches the rip.
-    monkeypatch.setattr(
-        pipeline_mod, "probe_duration_seconds",
-        lambda path, *, binary="ffprobe": 7590.0)
     outdir = tmp_path / "out"
     result = run_pipeline(
         0, str(outdir), encoder="x265", dry_run=False,
@@ -1413,32 +1554,49 @@ def test_upscale_fps_probe_failure_falls_back_with_warning(tmp_path, monkeypatch
     assert any("29.97 fps default" in w for w in result.warnings)
 
 
-def test_upscale_duration_gate_fails_open_to_original_rip(tmp_path, monkeypatch):
-    """v0.2.27 run-13 gate: a mezzanine whose duration drifts from the
-    rip (wrong fps stamp) is refused; the pipeline encodes the ORIGINAL
-    rip with an honest warning - a desynced mezzanine never silently
-    reaches the encode."""
-    from bluray_to_mp4.upscale import UpscaleError
+def test_upscale_frames_gate_fails_open_with_retention(tmp_path, monkeypatch):
+    """v0.2.33 gate + retention (design §5 row 5): a mezzanine whose
+    frame count differs from the rip's is refused; the pipeline encodes
+    the ORIGINAL rip with an honest warning, the rejected mezzanine is
+    RETAINED as *.rejected-<ts>.mkv (never deleted), and a diagnostic
+    JSON is written beside it with expected vs actual counts and the
+    fps probe values."""
+    import json as _json
+    import glob as _glob
 
     _stub_probe(monkeypatch, width=720, subtitle_count=0,
                 r_frame_rate="24000/1001")
+    _stub_frame_preflight(monkeypatch, total_frames=163_267)
     encode_inputs = []
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
-        return plan.output_path
+        # Put a physical mezzanine on disk so retention has something
+        # to rename (the real stage writes it before the gate runs).
+        mezz = Path(plan.output_path)
+        mezz.parent.mkdir(parents=True, exist_ok=True)
+        mezz.write_bytes(b"rejected mezzanine payload")
+        return (plan.output_path, plan.total_frames)
 
     def fake_encode(args, *, duration_seconds, binary="ffmpeg",
                     on_progress=None, cancel=None):
         encode_inputs.append(
             [args[i + 1] for i, arg in enumerate(args) if arg == "-i"])
 
-    def fake_probe(path, *, binary="ffprobe"):
-        # Rip is 2:06:30; the mezzanine drifted ~20% shorter (run 13).
-        return 7590.0 if not path.endswith("_720p.mkv") else 6072.0
+    def fake_gate_probe(path, *, binary="ffprobe"):
+        # The mezzanine probe (gate): one frame short of the rip.
+        return FrameCountProbe(163_266)
 
     monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
     monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
-    monkeypatch.setattr(pipeline_mod, "probe_duration_seconds", fake_probe)
+    # probe_frame_count is used by BOTH the pre-flight (rip: 163_267)
+    # and the gate (mezzanine: 163_266) - discriminate on path shape.
+    monkeypatch.setattr(
+        pipeline_mod, "probe_frame_count",
+        lambda path, *, binary="ffprobe": (
+            FrameCountProbe(163_266) if "_720p" in path
+            else FrameCountProbe(163_267)
+        ),
+    )
     outdir = tmp_path / "out"
     result = run_pipeline(
         0, str(outdir), encoder="x265", dry_run=False,
@@ -1446,17 +1604,167 @@ def test_upscale_duration_gate_fails_open_to_original_rip(tmp_path, monkeypatch)
         dvd_upscale_mode="720p",
     )
     assert result.jobs and result.jobs[0].completed  # the MP4 still ships
-    # Encode maps video from the ORIGINAL rip, not the drifted mezzanine.
+    # Encode maps video from the ORIGINAL rip, not the short mezzanine.
     assert encode_inputs[0] == [result.jobs[0].input_path]
     assert any("DVD AI upscale failed" in w for w in result.warnings)
-    assert any("6072.0s" in w and "7590.0s" in w for w in result.warnings)
-    assert result.jobs[0].upscale_mezzanine_path is None or not any(
-        "_720p.mkv" in i for inputs in encode_inputs for i in inputs
+    assert any("163266" in w and "163267" in w for w in result.warnings)
+    # Retention: the mezzanine was renamed, never deleted.
+    upscale_dir = outdir / ".rip" / ".upscale"
+    rejected = list(upscale_dir.glob("title_00_720p.rejected-*.mkv"))
+    assert rejected, "rejected mezzanine must be retained, not deleted"
+    assert rejected[0].read_bytes() == b"rejected mezzanine payload"
+    # The warning names the retained artifacts (design §4).
+    assert any("rejected mezzanine retained at" in w for w in result.warnings)
+    assert any("diagnostic at" in w for w in result.warnings)
+    # The diagnostic records the full drift picture.
+    diagnostics = list(upscale_dir.glob("*.diagnostic.json"))
+    assert diagnostics
+    payload = _json.loads(diagnostics[0].read_text(encoding="utf-8"))
+    assert payload["rip_total_frames"] == 163_267
+    assert payload["mezzanine_frame_count"] == 163_266
+    assert payload["rip_fps"] == "24000/1001"
+    assert payload["r_frame_rate"] == "24000/1001"
+    assert payload["avg_frame_rate"] == "24000/1001"
+    assert payload["cfr_verdict"] == "CFR"
+    assert payload["chunks"] == 57  # ceil(163267 / 2877)
+    assert payload["chunk_frames"] == 2877
+    assert payload["expected_per_chunk"][0] == 2877
+    assert payload["expected_per_chunk"][-1] == 163267 - 56 * 2877
+    assert "163266" in payload["error"] and "163267" in payload["error"]
+    # No mezzanine was fed to the encode.
+    assert not any("_720p" in i for inputs in encode_inputs for i in inputs)
+
+
+def test_upscale_frame_probe_failure_refuses_before_gpu(tmp_path, monkeypatch):
+    """v0.2.33 §2.1: when the frame-count probe fails entirely
+    (neither decode-count nor metadata), the pipeline refuses BEFORE
+    run_dvd_upscale - no GPU stage is ever entered - and fails open
+    to the original rip with the honest warning."""
+    from bluray_to_mp4.ffprobe import FfprobeError
+
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    upscale_calls = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        upscale_calls.append(plan)
+        return (plan.output_path, 1)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+
+    def boom(path, *, binary="ffprobe"):
+        raise FfprobeError("rip frame count could not be probed")
+
+    monkeypatch.setattr(pipeline_mod, "probe_frame_count", boom)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
     )
+    assert result.jobs and result.jobs[0].completed  # encode still ships
+    assert upscale_calls == []  # the GPU stage was NEVER entered
+    assert any("could not be probed" in w for w in result.warnings)
+    assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+def test_vfr_rip_refused_before_gpu(tmp_path, monkeypatch):
+    """v0.2.33 §5 row 6: a genuinely variable-clock rip (r_frame_rate
+    24000/1001 vs avg_frame_rate 30000/1001 - a 25% clock gap) is
+    refused BEFORE run_dvd_upscale: the GPU stage is never entered, the
+    warning names the variable frame rate honestly, and the encode
+    ships the original rip. Reassembling a VFR source at constant fps
+    would re-create drift by construction."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    upscale_calls = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        upscale_calls.append(plan)
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pipeline_mod, "probe_frame_count",
+        lambda path, *, binary="ffprobe": FrameCountProbe(163_267))
+    monkeypatch.setattr(
+        pipeline_mod, "probe_cfr_check",
+        lambda path, *, binary="ffprobe": CfrVerdict(
+            "VFR", r_frame_rate="24000/1001", avg_frame_rate="30000/1001"))
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed  # the MP4 still ships
+    assert upscale_calls == []  # the GPU stage was NEVER entered
+    assert any("variable frame rate" in w for w in result.warnings)
+    assert any("24000/1001" in w and "30000/1001" in w for w in result.warnings)
+    assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+def test_unknown_frame_rate_rip_refused_before_gpu(tmp_path, monkeypatch):
+    """v0.2.33 §5 row 6 (UNKNOWN verdict): a rip whose clock cannot
+    even be named (unparseable/unreported rates) must not be rebuilt on
+    a guessed constant clock - refuse pre-flight, fail open."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    upscale_calls = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        upscale_calls.append(plan)
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pipeline_mod, "probe_frame_count",
+        lambda path, *, binary="ffprobe": FrameCountProbe(163_267))
+    monkeypatch.setattr(
+        pipeline_mod, "probe_cfr_check",
+        lambda path, *, binary="ffprobe": CfrVerdict(
+            "UNKNOWN", r_frame_rate="garbage", avg_frame_rate=""))
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert upscale_calls == []
+    assert any("frame rate could not be determined" in w for w in result.warnings)
+    assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+def test_cfr_rip_proceeds_to_upscale(tmp_path, monkeypatch):
+    """v0.2.33 §5 row 6 (CFR control): identical r/avg rates proceed -
+    the Mamma Mia disc lands here (its drift came from time-window
+    chunking, not VFR); run_dvd_upscale IS called."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(monkeypatch, total_frames=163_267)
+    upscale_calls = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        upscale_calls.append(plan)
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert len(upscale_calls) == 1  # CFR proceeds into the GPU stage
+    assert not any("variable frame rate" in w for w in result.warnings)
+    assert not any("rejected mezzanine retained" in w for w in result.warnings)
 
 
 def test_dvd_upscale_cancel_still_propagates(tmp_path, monkeypatch):
     _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(monkeypatch)
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
         raise EncodeCancelled("cancelled during upscale")

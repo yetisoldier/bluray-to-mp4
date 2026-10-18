@@ -9,12 +9,15 @@ running the OCR.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 from .binaries import resolve_ffmpeg
 from .encode import (
@@ -27,12 +30,17 @@ from .encode import (
 DVD_UPSCALE_GB_PER_HOUR = 1.5
 DVD_UPSCALE_MODES = {"off", "720p", "720p_anime"}
 from .ffprobe import (
+    CfrVerdict,
+    FfprobeError,
+    FrameCountProbe,
     ProbedStream,
     first_video_stream,
     first_video_width,
     is_interlaced,
     nth_of_type,
+    probe_cfr_check,
     probe_duration_seconds,
+    probe_frame_count,
     probe_streams,
     video_frame_rate,
 )
@@ -59,7 +67,7 @@ from .upscale import (
     UpscaleError,
     UpscalePlan,
     run_dvd_upscale,
-    verify_mezzanine_duration,
+    verify_mezzanine_frames,
 )
 
 if False:  # pragma: no cover - typing only
@@ -312,6 +320,78 @@ def _normalize_dvd_upscale_mode(mode: str | None, media_type: str | None) -> str
 
 def _upscale_mezzanine_path(rip_dir: str, tid: int) -> str:
     return os.path.join(rip_dir, ".upscale", f"title_{tid:02d}_720p.mkv")
+
+
+def _retain_rejected_mezzanine(job, rip_dir, probe_ctx, error_text):
+    """v0.2.33 retention (design §4): keep a rejected mezzanine.
+
+    On a gate trip the mezzanine at job.upscale_mezzanine_path is
+    renamed to <name>_720p.rejected-<ISO8601>.mkv (never deleted; the
+    operator decides) next to a written <same>.diagnostic.json with
+    expected vs actual counts, the fps probe values, and the per-chunk
+    expectations, so drift is measurable from artifacts, not logs.
+    probe_ctx carries the pipeline's live pre-flight locals (rip_fps,
+    frame_probe, cfr, rip_total_frames) from the except site. Returns
+    (rejected_path, diagnostic_path) or None when nothing was on disk
+    to retain. Never raises - retention must not mask the original
+    failure.
+    """
+    try:
+        mezz = job.upscale_mezzanine_path
+        if not mezz or not os.path.isfile(mezz):
+            return None
+        mezz_path = Path(mezz)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        stem = mezz_path.stem  # title_00_720p
+        rejected = mezz_path.with_name(f"{stem}.rejected-{stamp}.mkv")
+        os.replace(mezz, rejected)
+        diagnostic = mezz_path.with_name(f"{stem}.rejected-{stamp}.diagnostic.json")
+
+        rip_fps = probe_ctx.get("rip_fps")
+        frame_probe = probe_ctx.get("frame_probe")
+        cfr = probe_ctx.get("cfr")
+        rip_total = probe_ctx.get("rip_total_frames") or 0
+        chunk_frames = None
+        expected_per_chunk: list[int] = []
+        try:
+            from .upscale import compute_chunk_bounds, compute_chunk_frames
+
+            if rip_total and rip_fps:
+                chunk_frames = compute_chunk_frames(120, rip_fps)
+                expected_per_chunk = [
+                    count for _, count in compute_chunk_bounds(rip_total, chunk_frames)
+                ]
+        except Exception:
+            chunk_frames = None
+            expected_per_chunk = []
+        mezzanine_frame_count = None
+        try:
+            probe = probe_frame_count(str(rejected))
+            mezzanine_frame_count = int(probe.total_frames)
+        except Exception:
+            mezzanine_frame_count = None
+        payload = {
+            "rip_path": job.input_path,
+            "rip_total_frames": rip_total,
+            "frame_count_from_metadata": bool(
+                getattr(frame_probe, "from_metadata", False)
+            ),
+            "rip_fps": rip_fps,
+            "r_frame_rate": getattr(cfr, "r_frame_rate", ""),
+            "avg_frame_rate": getattr(cfr, "avg_frame_rate", ""),
+            "cfr_verdict": getattr(cfr, "verdict", ""),
+            "chunks": len(expected_per_chunk),
+            "chunk_frames": chunk_frames,
+            "expected_per_chunk": expected_per_chunk,
+            "mezzanine_frame_count": mezzanine_frame_count,
+            "error": error_text,
+        }
+        with open(diagnostic, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        return (str(rejected), str(diagnostic))
+    except Exception:
+        return None
 
 
 def _resolve_gbph(value: float | None, media_type: str | None) -> float | None:
@@ -765,8 +845,39 @@ def run_pipeline(
                             "frame rate; upscale chunks will be stamped with "
                             "the 29.97 fps default"
                         )
+                    # v0.2.33 pre-flight (design §2.1/§2.2): the authoritative
+                    # decode-counted frame count and the CFR verdict run
+                    # once, BEFORE run_dvd_upscale, so a bad rip costs ~30 s
+                    # of probing instead of GPU hours on a doomed run. A VFR
+                    # or UNKNOWN verdict raises UpscaleError INSIDE this try
+                    # so it hits the same fail-open handler - the pipeline
+                    # never enters the GPU stage for a refused rip.
                     try:
-                        video_input_path = run_dvd_upscale(
+                        try:
+                            frame_probe = probe_frame_count(job.input_path)
+                        except FfprobeError as exc:
+                            # §2.1: a rip whose count cannot be probed is
+                            # refused BEFORE any chunk runs - honest no in
+                            # ~30 s, no GPU time burned. Fail open via the
+                            # same UpscaleError handler as every other
+                            # upscale-stage refusal.
+                            raise UpscaleError(str(exc)) from exc
+                        rip_total_frames = int(frame_probe.total_frames)
+                        cfr = probe_cfr_check(job.input_path)
+                        if cfr.verdict != "CFR":
+                            reason = (
+                                "variable frame rate"
+                                if cfr.verdict == "VFR"
+                                else "frame rate could not be determined"
+                            )
+                            raise UpscaleError(
+                                f"rip has a {reason} (r_frame_rate="
+                                f"{cfr.r_frame_rate!r}, avg_frame_rate="
+                                f"{cfr.avg_frame_rate!r}); a variable-clock rip "
+                                "cannot be reassembled at a constant frame rate "
+                                "without re-creating drift"
+                            )
+                        mezz_path, _mezz_stage_frames = run_dvd_upscale(
                             UpscalePlan(
                                 input_path=job.input_path,
                                 output_path=job.upscale_mezzanine_path
@@ -777,6 +888,8 @@ def run_pipeline(
                                 duration_seconds=title.duration_seconds,
                                 deinterlace=deinterlace,
                                 fps=rip_fps,
+                                total_frames=rip_total_frames,
+                                frame_count_from_metadata=frame_probe.from_metadata,
                                 source_width=video_stream.width if video_stream else 0,
                                 source_height=video_stream.height if video_stream else 0,
                                 display_aspect_ratio=(
@@ -793,19 +906,25 @@ def run_pipeline(
                             ) if on_progress else None,
                             cancel=cancel,
                         )
-                        # v0.2.27 sanity gate: a mezzanine whose duration
-                        # drifts from the rip (wrong fps stamp) must never
-                        # silently reach the encode - fail open to the
-                        # original rip with an honest warning instead.
-                        try:
-                            rip_duration = probe_duration_seconds(job.input_path)
-                        except Exception:
-                            rip_duration = float(title.duration_seconds or 0)
-                        verify_mezzanine_duration(
-                            video_input_path, rip_duration,
-                            probe_duration=probe_duration_seconds,
+                        video_input_path = None
+                        # v0.2.33: the mezzanine path is on disk now
+                        # (run_dvd_upscale returned); retention (§4) needs
+                        # it even when the gate below rejects the file.
+                        job.upscale_mezzanine_path = mezz_path
+                        # v0.2.33 gate (design §3): exact integer frame-count
+                        # equality between mezzanine and rip - no tolerance
+                        # window. Under frame-exact chunking the mezzanine
+                        # contains the rip's frames by construction, so any
+                        # deviation is a real defect and must fail open to
+                        # the original rip with an honest warning. The
+                        # mezzanine count is probed fresh (the stage's own
+                        # return only echoes the plan total; the gate must
+                        # measure the file on disk).
+                        verify_mezzanine_frames(
+                            mezz_path, rip_total_frames,
+                            probe_frames=probe_frame_count,
                         )
-                        job.upscale_mezzanine_path = video_input_path
+                        video_input_path = mezz_path
                     except UpscaleError as exc:
                         stage(
                             f"AI upscale failed for {job.output_name}; "
@@ -814,6 +933,20 @@ def run_pipeline(
                             f"{job.output_name}: DVD AI upscale failed ({exc}); "
                             "encoded the original DVD rip instead."
                         )
+                        # v0.2.33 retention (design §4): a rejected mezzanine
+                        # is NEVER deleted - it is renamed next to the
+                        # original with a written diagnostic (expected vs
+                        # actual counts, fps probe values, per-chunk plan)
+                        # so drift is measurable from artifacts, not logs.
+                        retained = _retain_rejected_mezzanine(
+                            job, rip_dir, locals(), str(exc)
+                        )
+                        if retained:
+                            result.warnings.append(
+                                f"{job.output_name}: rejected mezzanine "
+                                f"retained at {retained[0]}; diagnostic at "
+                                f"{retained[1]}"
+                            )
                         video_input_path = None
 
                 stage(f"Encoding {job.output_name} ({result.encoder}) ...")
@@ -890,8 +1023,17 @@ def run_pipeline(
         # Full success + default workdir: the .rip intermediates are
         # reproducible junk, so reclaim the disk. A caller-supplied
         # workdir is never touched (it may be shared/persistent).
-        if rip_dir == os.path.join(outdir, ".rip") and all(
-            job.completed for job in result.jobs
+        # v0.2.33: a run that retained a rejected mezzanine (§4) is NOT
+        # junk - the operator must decide - so retention suppresses
+        # the reclaim for this run.
+        retained_mezzanines = any(
+            ".rejected-" in w and "retained at" in w
+            for w in result.warnings
+        )
+        if (
+            rip_dir == os.path.join(outdir, ".rip")
+            and all(job.completed for job in result.jobs)
+            and not retained_mezzanines
         ):
             shutil.rmtree(rip_dir, ignore_errors=True)
     except Exception as exc:

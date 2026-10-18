@@ -39,11 +39,16 @@ def test_upscale_uses_2x_model_forced_tile_and_direct_segment(monkeypatch, tmp_p
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
         elif label.startswith("Real-ESRGAN"):
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
 
@@ -57,14 +62,19 @@ def test_upscale_uses_2x_model_forced_tile_and_direct_segment(monkeypatch, tmp_p
             workdir=str(tmp_path / "work"),
             mode="720p",
             duration_seconds=1,
+            total_frames=2,
         )
     )
 
-    assert result == str(output)
+    # v0.2.33: the stage returns (mezzanine_path, total_frames).
+    assert result == (str(output), 2)
     extract_cmd = next(
         cmd for label, cmd in calls if label.startswith("upscale frame extraction")
     )
+    # v0.2.33: the prepare filter is appended AFTER select=between(n,...)
+    # (design §2.4 - deinterlace/geometry run on the selected frames).
     assert extract_cmd[extract_cmd.index("-vf") + 1] == (
+        "select='between(n,0,1)',"
         "scale=w='trunc(360*dar/2)*2':h=360:flags=lanczos,setsar=1"
     )
 
@@ -150,11 +160,16 @@ def test_probe_geometry_does_not_change_2x_engine_path(monkeypatch, tmp_path):
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
         elif label.startswith("Real-ESRGAN"):
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
 
@@ -167,6 +182,7 @@ def test_probe_geometry_does_not_change_2x_engine_path(monkeypatch, tmp_path):
             workdir=str(tmp_path / "work"),
             mode="720p",
             duration_seconds=1,
+            total_frames=2,
             source_width=720,
             source_height=480,
             display_aspect_ratio="16:9",
@@ -177,7 +193,10 @@ def test_probe_geometry_does_not_change_2x_engine_path(monkeypatch, tmp_path):
     extract_cmd = next(
         cmd for label, cmd in calls if label.startswith("upscale frame extraction")
     )
+    # v0.2.33: the prepare filter is appended AFTER select=between(n,...)
+    # (design §2.4 - deinterlace/geometry run on the selected frames).
     assert extract_cmd[extract_cmd.index("-vf") + 1] == (
+        "select='between(n,0,1)',"
         "scale=w='trunc(360*dar/2)*2':h=360:flags=lanczos,setsar=1"
     )
 
@@ -210,12 +229,17 @@ def test_tile_size_covers_frame_without_forcing_2048(monkeypatch, tmp_path, requ
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
         elif label.startswith("Real-ESRGAN"):
             seen.append(cmd)
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
 
@@ -228,6 +252,7 @@ def test_tile_size_covers_frame_without_forcing_2048(monkeypatch, tmp_path, requ
             workdir=str(tmp_path / "work"),
             mode="720p",
             duration_seconds=1,
+            total_frames=2,
             tile_size=requested,
         )
     )
@@ -260,12 +285,17 @@ def test_tile_argument_never_uses_auto_tiling(monkeypatch, tmp_path):
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
         elif label.startswith("Real-ESRGAN"):
             seen.append(cmd)
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
 
@@ -278,6 +308,7 @@ def test_tile_argument_never_uses_auto_tiling(monkeypatch, tmp_path):
             workdir=str(tmp_path / "work"),
             mode="720p",
             duration_seconds=1,
+            total_frames=2,
         )
     )
 
@@ -306,11 +337,16 @@ def test_anime_profile_keeps_anime_model_at_2x(monkeypatch, tmp_path):
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
         elif label.startswith("Real-ESRGAN"):
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
 
@@ -323,6 +359,7 @@ def test_anime_profile_keeps_anime_model_at_2x(monkeypatch, tmp_path):
             workdir=str(tmp_path / "work"),
             mode="720p_anime",
             duration_seconds=1,
+            total_frames=2,
         )
     )
 
@@ -359,19 +396,32 @@ def _stub_upscale_internals(monkeypatch, tmp_path):
     )
 
 
-def _recording_run_process(calls):
+def _recording_run_process(calls, count=2):
+    """Fake _run_process for run_dvd_upscale tests.
+
+    v0.2.33: extraction writes exactly `count` PNGs per chunk (the
+    per-chunk frame-count assertion must hold) starting at the chunk's
+    -start_number, and the segment writer records the segment file.
+    """
+
     def fake_run(cmd, *, label, cancel=None):
         calls.append((label, cmd))
         if label.startswith("upscale frame extraction"):
             in_dir = Path(cmd[-1]).parent
             in_dir.mkdir(parents=True, exist_ok=True)
-            (in_dir / "frame_00000001.png").write_bytes(png_header(640, 360))
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(count):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
         elif label.startswith("Real-ESRGAN"):
             out_dir = Path(cmd[cmd.index("-o") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "frame_00000001.png").write_bytes(png_header(1280, 720))
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
         elif label.startswith("upscale mezzanine segment"):
             Path(cmd[-1]).write_bytes(b"segment")
+
     return fake_run
 
 
@@ -390,6 +440,7 @@ def test_mezzanine_command_carries_probed_fps(monkeypatch, tmp_path):
             workdir=str(tmp_path / "work"),
             mode="720p",
             duration_seconds=1,
+            total_frames=2,
             fps="24000/1001",
         )
     )
@@ -412,6 +463,7 @@ def test_mezzanine_command_default_fps_is_2997(monkeypatch, tmp_path):
         workdir=str(tmp_path / "work"),
         mode="720p",
         duration_seconds=1,
+        total_frames=2,
     )
     assert plan.fps == "30000/1001"
     run_dvd_upscale(plan)
@@ -421,84 +473,274 @@ def test_mezzanine_command_default_fps_is_2997(monkeypatch, tmp_path):
     assert segment_cmd[segment_cmd.index("-framerate") + 1] == "30000/1001"
 
 
-def test_duration_gate_rejects_mismatched_mezzanine():
-    """A mezzanine 20% shorter than the rip (the run-13 drift shape)
-    is refused with an UpscaleError naming BOTH durations - the
-    pipeline then encodes the original rip with an honest warning."""
-    from bluray_to_mp4.upscale import verify_mezzanine_duration
+# ---------------------------------------------------------------------
+# v0.2.33 frame-exact gate (design §3): verify_mezzanine_frames replaces
+# the duration gate. Exact INTEGER frame-count equality, no tolerance
+# window - under frame-exact chunking the mezzanine contains the rip's
+# frames by construction, so any drift mechanism produces a nonzero
+# integer difference. The old duration-gate tests are retired with the
+# function; the pinned Mamma Mia 15.05 s drift fixture FLIPS to a pass
+# case (design §5 row 4): that shape cannot occur when counts match.
+
+def test_frames_gate_rejects_mismatched_frame_count():
+    """An off-by-one frame mismatch is refused with an UpscaleError
+    naming BOTH counts - the pipeline then encodes the original rip,
+    retains the mezzanine, and writes a diagnostic."""
+    from bluray_to_mp4.upscale import verify_mezzanine_frames
 
     def probe(path, *, binary="ffprobe"):
-        return 6072.0 if "mezz" in path else 7590.0
+        return 6071 if "mezz" in path else 6072
 
-    with pytest.raises(UpscaleError, match=r"6072\.0s.*7590\.0s|does not match"):
-        verify_mezzanine_duration("mezz.mkv", 7590.0, probe_duration=probe)
+    with pytest.raises(UpscaleError, match="6071.*6072"):
+        verify_mezzanine_frames("mezz.mkv", 6072, probe_frames=probe)
 
 
-def test_duration_gate_accepts_matched_mezzanine():
-    """Frame-scale container rounding passes the strict drift gate."""
-    from bluray_to_mp4.upscale import verify_mezzanine_duration
+def test_frames_gate_accepts_exact_match():
+    """Equal counts pass - even the Mamma Mia 15.05 s drift SHAPE is a
+    pass case now, because under frame-exact reassembly equal frame
+    counts cannot coexist with drift (the mezzanine is stamped at the
+    rip's own verified CFR clock)."""
+    from bluray_to_mp4.upscale import verify_mezzanine_frames
 
-    verify_mezzanine_duration(
-        "mezz.mkv", 7590.0, probe_duration=lambda p, *, binary="ffprobe": 7590.4
+    # The old fixture: rip 6819.648s, mezz 6804.598s at the SAME clock
+    # would imply different frame counts - refused. Equal counts pass.
+    verify_mezzanine_frames(
+        "mezz.mkv", 163_267, probe_frames=lambda p, *, binary="ffprobe": 163_267
     )
-    # Short rip: the 0.5-second floor governs.
-    verify_mezzanine_duration(
-        "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 60.4
+
+
+def test_frames_gate_accepts_mamma_mia_when_counts_match():
+    """Rewritten from the v0.2.31 duration fixture (6804.598s vs
+    6819.648s was a REJECT under the 0.5s+0.01% gate): the same disc
+    under frame-exact chunking produces a mezzanine with EXACTLY the
+    rip's 163_267 frames (the drift came from time-window chunking,
+    not from the frames themselves), and the gate passes it."""
+    from bluray_to_mp4.upscale import verify_mezzanine_frames
+
+    verify_mezzanine_frames(
+        "mezz.mkv", 163_267, probe_frames=lambda p, *, binary="ffprobe": 163_267
     )
-
-
-def test_duration_gate_floor_boundary_rejects_beyond_half_second():
-    from bluray_to_mp4.upscale import verify_mezzanine_duration
-
-    with pytest.raises(UpscaleError, match="does not match"):
-        verify_mezzanine_duration(
-            "mezz.mkv", 60.0, probe_duration=lambda p, *, binary="ffprobe": 60.6
+    # And one frame short is still refused - exact equality only.
+    with pytest.raises(UpscaleError, match="163266.*163267"):
+        verify_mezzanine_frames(
+            "mezz.mkv", 163_267, probe_frames=lambda p, *, binary="ffprobe": 163_266
         )
 
 
-def test_duration_gate_rejects_mamma_mia_drift_shape():
-    """A 15.050 s error over 1:53:39 is only 0.22%, but is plainly
-    visible and must fail open to the original rip instead of shipping."""
-    from bluray_to_mp4.upscale import verify_mezzanine_duration
-
-    with pytest.raises(UpscaleError, match=r"6804\.6s.*6819\.6s|does not match"):
-        verify_mezzanine_duration(
-            "mezz.mkv",
-            6819.648,
-            probe_duration=lambda p, *, binary="ffprobe": 6804.598,
-        )
-
-
-def test_duration_gate_rejects_unprobeable_mezzanine():
+def test_frames_gate_rejects_unprobeable_mezzanine():
     """A mezzanine ffprobe cannot read cannot be trusted - refuse it
     (fail open to the original rip), never encode a blind guess."""
-    from bluray_to_mp4.upscale import verify_mezzanine_duration
+    from bluray_to_mp4.upscale import verify_mezzanine_frames
 
     def broken(path, *, binary="ffprobe"):
         raise RuntimeError("ffprobe failed")
 
     with pytest.raises(UpscaleError, match="could not be probed"):
-        verify_mezzanine_duration("mezz.mkv", 7590.0, probe_duration=broken)
+        verify_mezzanine_frames("mezz.mkv", 7590, probe_frames=broken)
 
 
-def test_duration_gate_rejects_unknown_rip_duration():
-    """v0.2.29 (Karen's validation): an unknown rip duration (probe
-    failed AND no title duration - effectively <= 0) must NOT pass
-    the gate. With rip=0 the 5-second tolerance floor would accept
-    any mezzanine, so the gate refuses it exactly like an
-    unprobeable mezzanine and the existing fail-open encodes the
-    original rip with a warning."""
-    from bluray_to_mp4.upscale import verify_mezzanine_duration
+def test_frames_gate_rejects_unknown_rip_frame_count():
+    """v0.2.29 semantics carried to frames (design §3): an unknown rip
+    count (probe failed - effectively <= 0 or None) must NOT pass the
+    gate; an unknown count cannot certify a mezzanine."""
+    from bluray_to_mp4.upscale import verify_mezzanine_frames
 
     def probe(path, *, binary="ffprobe"):
-        return 7590.0
+        return 7590
 
-    # Zero: probe failed and no title duration available.
-    with pytest.raises(UpscaleError, match="rip duration unknown"):
-        verify_mezzanine_duration("mezz.mkv", 0.0, probe_duration=probe)
-    # None (falsy title duration) - same refusal, via `or 0`.
-    with pytest.raises(UpscaleError, match="rip duration unknown"):
-        verify_mezzanine_duration("mezz.mkv", None, probe_duration=probe)
+    # Zero: the frame-count probe failed entirely.
+    with pytest.raises(UpscaleError, match="rip frame count unknown"):
+        verify_mezzanine_frames("mezz.mkv", 0, probe_frames=probe)
+    # None (probe never ran) - same refusal.
+    with pytest.raises(UpscaleError, match="rip frame count unknown"):
+        verify_mezzanine_frames("mezz.mkv", None, probe_frames=probe)
     # Negative garbage is equally unknown.
-    with pytest.raises(UpscaleError, match="rip duration unknown"):
-        verify_mezzanine_duration("mezz.mkv", -1.0, probe_duration=probe)
+    with pytest.raises(UpscaleError, match="rip frame count unknown"):
+        verify_mezzanine_frames("mezz.mkv", -1, probe_frames=probe)
+
+
+# ---------------------------------------------------------------------
+# v0.2.33 frame math (design §5 rows 1-3): chunk frames at odd fps,
+# last-chunk remainder, and boundary alignment of the extraction cmd.
+
+def test_chunk_math_24000_1001():
+    """Design §5 row 1: fps=24000/1001, total=10000, chunk_seconds=120
+    -> F = round(120*24000/1001) = 2877, chunks = ceil(10000/2877) = 4,
+    remainder = 10000 - 3*2877 = 1369."""
+    from bluray_to_mp4.upscale import (
+        compute_chunk_bounds,
+        compute_chunk_frames,
+    )
+
+    F = compute_chunk_frames(120, "24000/1001")
+    assert F == 2877
+    bounds = compute_chunk_bounds(10000, F)
+    firsts = [first for first, _ in bounds]
+    counts = [count for _, count in bounds]
+    assert len(bounds) == 4
+    # Row 2: per-chunk counts are [2877, 2877, 2877, 1369].
+    assert counts == [2877, 2877, 2877, 1369]
+    # Boundaries align: chunks span [i*F, (i+1)*F).
+    assert firsts == [0, 2877, 5754, 8631]
+    assert sum(counts) == 10000
+
+
+def test_extraction_uses_frame_index_select(monkeypatch, tmp_path):
+    """Design §5 row 3: the extraction command addresses decoded frame
+    indices via select='between(n,first,last)' - chunk 2 of the same
+    plan is between(n,2877,5753) - and contains NO -ss/-t; -vsync 0 is
+    present (passthrough so ffmpeg never dup/drop to hit a clock)."""
+    calls = []
+    _stub_upscale_internals(monkeypatch, tmp_path)
+
+    def fake_run(cmd, *, label, cancel=None):
+        calls.append((label, cmd))
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            # Write exactly the frames this chunk must yield.
+            between = cmd[cmd.index("-vf") + 1].split("between(n,")[1]
+            first = int(between.split(",")[0])
+            last = int(between.split(",")[1].split(")")[0])
+            for i in range(first, last + 1):
+                (in_dir / f"frame_{start_number + (i - first):08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+        elif label.startswith("upscale mezzanine concat"):
+            # The concat writes the final mezzanine from the segment list.
+            Path(cmd[-1]).write_bytes(b"mezzanine")
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+
+    run_dvd_upscale(
+        UpscalePlan(
+            input_path=str(tmp_path / "input.mkv"),
+            output_path=str(tmp_path / "out.mkv"),
+            workdir=str(tmp_path / "work"),
+            mode="720p",
+            duration_seconds=1,
+            total_frames=10000,
+            fps="24000/1001",
+        )
+    )
+
+    extract_cmds = [
+        cmd for label, cmd in calls if label.startswith("upscale frame extraction")
+    ]
+    assert len(extract_cmds) == 4
+    # Chunk 2: frames [2877, 5754) -> between(n,2877,5753).
+    vf2 = extract_cmds[1][extract_cmds[1].index("-vf") + 1]
+    assert "select='between(n,2877,5753)'" in vf2
+    # No seek, no time window (frame-index extraction, §2.4).
+    assert "-ss" not in extract_cmds[1]
+    assert "-t" not in extract_cmds[1]
+    assert "-vsync" in extract_cmds[1]
+    assert extract_cmds[1][extract_cmds[1].index("-vsync") + 1] == "0"
+    # -start_number continues the global PNG numbering.
+    assert extract_cmds[1][extract_cmds[1].index("-start_number") + 1] == "2878"
+    # Last chunk is the remainder: between(n,8631,9999).
+    vf_last = extract_cmds[3][extract_cmds[3].index("-vf") + 1]
+    assert "select='between(n,8631,9999)'" in vf_last
+    # v0.2.33: the segment reader must be told where this chunk's PNG
+    # numbering starts (extraction wrote global numbering, not 1-based
+    # per chunk) - otherwise chunks > 0 fail to open their input.
+    seg_cmds = [
+        cmd for label, cmd in calls if label.startswith("upscale mezzanine segment")
+    ]
+    assert seg_cmds[1][seg_cmds[1].index("-start_number") + 1] == "2878"
+
+
+def test_run_dvd_upscale_requires_total_frames(monkeypatch, tmp_path):
+    """Design §2.3: a plan without a probed total_frames refuses before
+    any chunk runs - the pre-flight owns the count, never the stage."""
+    _stub_upscale_internals(monkeypatch, tmp_path)
+    with pytest.raises(UpscaleError, match="rip frame count unknown"):
+        run_dvd_upscale(
+            UpscalePlan(
+                input_path=str(tmp_path / "input.mkv"),
+                output_path=str(tmp_path / "out.mkv"),
+                workdir=str(tmp_path / "work"),
+                mode="720p",
+                duration_seconds=1,
+            )
+        )
+
+
+def test_per_chunk_extraction_count_mismatch_raises(monkeypatch, tmp_path):
+    """Design §2.4 per-chunk assertion: extraction returning the wrong
+    frame count fails the chunk loudly instead of building a short
+    mezzanine."""
+    calls = []
+    _stub_upscale_internals(monkeypatch, tmp_path)
+
+    def fake_run(cmd, *, label, cancel=None):
+        calls.append((label, cmd))
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            # Off-by-one: one frame short of the requested window.
+            last = cmd[cmd.index("-vf") + 1]
+            first = int(last.split("between(n,")[1].split(",")[0])
+            for i in range(first, first + 3):  # plan asked for 4
+                (in_dir / f"frame_{start_number + (i - first):08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+    with pytest.raises(UpscaleError, match="extracted 3"):
+        run_dvd_upscale(
+            UpscalePlan(
+                input_path=str(tmp_path / "input.mkv"),
+                output_path=str(tmp_path / "out.mkv"),
+                workdir=str(tmp_path / "work"),
+                mode="720p",
+                duration_seconds=1,
+                total_frames=4,
+            )
+        )
+
+
+def test_per_chunk_upscale_count_mismatch_raises(monkeypatch, tmp_path):
+    """Design §2.4 second assertion: Real-ESRGAN must return exactly the
+    frames it was handed; a short output fails the chunk."""
+    calls = []
+    _stub_upscale_internals(monkeypatch, tmp_path)
+
+    def fake_run(cmd, *, label, cancel=None):
+        calls.append((label, cmd))
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(3):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            # Drop one upscaled frame.
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png"))[:-1]:
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+    with pytest.raises(UpscaleError, match="upscaled 2"):
+        run_dvd_upscale(
+            UpscalePlan(
+                input_path=str(tmp_path / "input.mkv"),
+                output_path=str(tmp_path / "out.mkv"),
+                workdir=str(tmp_path / "work"),
+                mode="720p",
+                duration_seconds=1,
+                total_frames=3,
+            )
+        )
