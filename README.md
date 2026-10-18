@@ -9,7 +9,7 @@ reasons, and every recommendation has a dropdown you can override.
 > Personal backups of discs you own only. Keep the tool and its output
 > private; circumvention law varies by jurisdiction.
 
-**Current version: v0.2.31** (Windows x64, exe included)
+**Current version: v0.2.33** (Windows x64, exe included)
 
 ## Quick start
 

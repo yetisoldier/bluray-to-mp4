@@ -2,6 +2,26 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.33] - 2026-10-18
+
+### Fixed
+
+- **DVD AI upscale now chunks by exact frame index, not time windows.**
+  The rip's frame count is probed once (decode-counted, not metadata)
+  and each chunk extracts frames [i*F, (i+1)*F) via ffmpeg's select
+  filter. Accumulated duration drift — the failure that burned six
+  GPU-hours on Mamma Mia HWA and still shipped the original rip — is
+  impossible by construction.
+- **The upscale gate now requires exact frame-count equality** between
+  mezzanine and rip (was: duration within 0.5 s + 0.01%). A mismatch
+  fails open to the original rip as before, but the rejected mezzanine is
+  now retained next to a written diagnostic (expected vs actual counts,
+  fps probe values) so future drift is measurable from artifacts.
+- **Variable-frame-rate rips are refused before any GPU work.** A
+  pre-flight check compares r_frame_rate vs avg_frame_rate; a true VFR
+  rip fails open in seconds with an honest warning instead of after the
+  upscale runs.
+
 ## [0.2.32] - 2026-10-08
 
 ### Fixed
