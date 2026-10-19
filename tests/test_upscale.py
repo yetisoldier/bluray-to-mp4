@@ -560,6 +560,100 @@ def test_frames_gate_rejects_unknown_rip_frame_count():
 
 
 # ---------------------------------------------------------------------
+# v0.2.34 clock gate (design §3): verify_mezzanine_clock composes with
+# verify_mezzanine_frames on the TIME axis. The frames gate owns exactness
+# (integer counts); this gate owns the CLOCK - the mezzanine's container
+# duration must match the selected audio stream's measured extent within
+# max(2 s floor, 0.1% relative). It kills the shipped-.33 failure shape:
+# correct count + wrong stamped rate = wrong playback duration, which the
+# count gate cannot see.
+
+def _clock_probe(seconds: float):
+    """probe_duration_seconds-shaped stub returning a fixed figure."""
+    def probe(path, *, binary="ffprobe"):
+        return seconds
+    return probe
+
+
+def test_clock_gate_passes_within_tolerance():
+    """U1: the good Mamma Mia shape - mezzanine 6,819.7 s (163,509
+    frames at 23.976) vs 6,818.4 s of audio; delta 1.3 s against a
+    tolerance of max(2.0, 6.82) = 6.8 s. Passes with 5x headroom - the
+    audio lead-in/out skew a correct stamp still carries is not a
+    failure."""
+    from bluray_to_mp4.upscale import verify_mezzanine_clock
+
+    verify_mezzanine_clock(
+        "mezz.mkv", 6818.4, probe_duration=_clock_probe(6819.7))
+
+
+def test_clock_gate_rejects_rate_class_desync():
+    """U2: the shipped-v0.2.33 failure shape - the same 163,509 frames
+    stamped 29.97 play 5,453 s against 6,818.4 s of audio (delta 1,365 s,
+    a rate-CLASS error 25% apart). The gate refuses with both durations
+    and the tolerance named; the pipeline then fails open to the
+    original rip with retention + diagnostic."""
+    from bluray_to_mp4.upscale import verify_mezzanine_clock
+
+    with pytest.raises(UpscaleError) as exc:
+        verify_mezzanine_clock(
+            "mezz.mkv", 6818.4, probe_duration=_clock_probe(5453.0))
+    message = str(exc.value)
+    assert "5453.0" in message and "6818.4" in message
+    assert "6.8" in message  # the tolerance that was exceeded
+
+
+def test_clock_gate_tolerance_scales_with_short_content():
+    """U3: a 90-minute title's tolerance is max(2.0, 0.1% x 5,400) =
+    5.4 s - the relative term scales down for short content while the
+    2 s floor keeps tiny features gating sanely. Boundary behavior is
+    pinned at exactly the tolerance (pass) and a hair past (fail).
+    """
+    from bluray_to_mp4.upscale import verify_mezzanine_clock
+
+    audio = 5400.0
+    verify_mezzanine_clock(
+        "mezz.mkv", audio, probe_duration=_clock_probe(audio + 5.4))
+    verify_mezzanine_clock(
+        "mezz.mkv", audio, probe_duration=_clock_probe(audio - 5.4))
+    with pytest.raises(UpscaleError):
+        verify_mezzanine_clock(
+            "mezz.mkv", audio, probe_duration=_clock_probe(audio + 5.5))
+    # Short content rides the 2 s floor, not the relative term.
+    verify_mezzanine_clock("mezz.mkv", 60.0, probe_duration=_clock_probe(61.5))
+    with pytest.raises(UpscaleError):
+        verify_mezzanine_clock("mezz.mkv", 60.0, probe_duration=_clock_probe(63.0))
+
+
+def test_clock_gate_rejects_unprobeable_mezzanine():
+    """U4: a mezzanine whose duration ffprobe cannot read cannot be
+    clock-verified - refuse it honestly (same shape as the frames
+    gate's unprobeable refusal), never encode a blind guess."""
+    from bluray_to_mp4.upscale import verify_mezzanine_clock
+
+    def broken(path, *, binary="ffprobe"):
+        raise RuntimeError("ffprobe failed")
+
+    with pytest.raises(UpscaleError, match="could not be probed"):
+        verify_mezzanine_clock("mezz.mkv", 6818.4, probe_duration=broken)
+
+
+def test_clock_gate_rejects_unknown_audio_duration():
+    """Companion to U4 on the other operand: an unknown audio extent
+    (probe failed upstream - <= 0 or None) cannot certify a clock;
+    the gate refuses exactly like an unknown rip frame count (v0.2.29
+    semantics carried to the clock axis)."""
+    from bluray_to_mp4.upscale import verify_mezzanine_clock
+
+    with pytest.raises(UpscaleError, match="audio duration unknown"):
+        verify_mezzanine_clock(
+            "mezz.mkv", 0.0, probe_duration=_clock_probe(6818.4))
+    with pytest.raises(UpscaleError, match="audio duration unknown"):
+        verify_mezzanine_clock(
+            "mezz.mkv", None, probe_duration=_clock_probe(6818.4))
+
+
+# ---------------------------------------------------------------------
 # v0.2.33 frame math (design §5 rows 1-3): chunk frames at odd fps,
 # last-chunk remainder, and boundary alignment of the extraction cmd.
 

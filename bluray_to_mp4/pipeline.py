@@ -38,10 +38,12 @@ from .ffprobe import (
     first_video_width,
     is_interlaced,
     nth_of_type,
+    probe_audio_duration_seconds,
     probe_cfr_check,
     probe_duration_seconds,
     probe_frame_count,
     probe_streams,
+    snap_to_canonical_rate,
     video_frame_rate,
 )
 from .makemkv import (
@@ -67,6 +69,7 @@ from .upscale import (
     UpscaleError,
     UpscalePlan,
     run_dvd_upscale,
+    verify_mezzanine_clock,
     verify_mezzanine_frames,
 )
 
@@ -350,6 +353,10 @@ def _retain_rejected_mezzanine(job, rip_dir, probe_ctx, error_text):
         rip_fps = probe_ctx.get("rip_fps")
         frame_probe = probe_ctx.get("frame_probe")
         cfr = probe_ctx.get("cfr")
+        audio_probe = probe_ctx.get("audio_probe")
+        derived_rate = probe_ctx.get("derived_rate")
+        rate_snapped = probe_ctx.get("rate_snapped")
+        audio_ordinal = probe_ctx.get("audio_ordinal")
         rip_total = probe_ctx.get("rip_total_frames") or 0
         chunk_frames = None
         expected_per_chunk: list[int] = []
@@ -370,6 +377,20 @@ def _retain_rejected_mezzanine(job, rip_dir, probe_ctx, error_text):
             mezzanine_frame_count = int(probe.total_frames)
         except Exception:
             mezzanine_frame_count = None
+        # v0.2.34 §4: the diagnostic records the full rate picture - the
+        # container's claimed rates next to the decode-truth derivation
+        # (raw + snapped + the chosen stamp), the audio duration and its
+        # source, and (when the clock gate tripped post-upscale) the
+        # mezzanine's own container duration and the gate's tolerance.
+        mezzanine_duration = None
+        clock_tolerance = None
+        audio_seconds = getattr(audio_probe, "seconds", None)
+        if audio_seconds:
+            try:
+                mezzanine_duration = probe_duration_seconds(str(rejected))
+            except Exception:
+                mezzanine_duration = None
+            clock_tolerance = max(2.0, 0.001 * float(audio_seconds))
         payload = {
             "rip_path": job.input_path,
             "rip_total_frames": rip_total,
@@ -380,6 +401,24 @@ def _retain_rejected_mezzanine(job, rip_dir, probe_ctx, error_text):
             "r_frame_rate": getattr(cfr, "r_frame_rate", ""),
             "avg_frame_rate": getattr(cfr, "avg_frame_rate", ""),
             "cfr_verdict": getattr(cfr, "verdict", ""),
+            "audio_duration_seconds": getattr(audio_probe, "seconds", None),
+            "audio_duration_source": (
+                "format" if getattr(audio_probe, "from_format", False)
+                else "stream" if audio_probe is not None else None
+            ),
+            "audio_stream_ordinal": (
+                audio_ordinal if audio_ordinal is not None
+                else getattr(audio_probe, "stream_ordinal", None)
+            ),
+            "derived_rate_raw": derived_rate,
+            "derived_rate_snapped": rate_snapped if rate_snapped is not None else (
+                None if derived_rate is None else True
+            ),
+            "stamp_fps": rip_fps,
+            "container_r_frame_rate": getattr(cfr, "r_frame_rate", ""),
+            "container_avg_frame_rate": getattr(cfr, "avg_frame_rate", ""),
+            "mezzanine_duration_seconds": mezzanine_duration,
+            "clock_tolerance_seconds": clock_tolerance,
             "chunks": len(expected_per_chunk),
             "chunk_frames": chunk_frames,
             "expected_per_chunk": expected_per_chunk,
@@ -831,20 +870,6 @@ def run_pipeline(
                 video_input_path = None
                 if job.upscale_mode != "off":
                     stage(f"Upscaling {job.output_name} ({job.upscale_mode}) ...")
-                    # v0.2.27 desync fix: the mezzanine writer stamps every
-                    # reassembled chunk with plan.fps, and the plan previously
-                    # hard-coded 29.97 (MakeMKV strips pulldown, so a film DVD
-                    # rip is 23.976 and every segment drifted ~20% - run 13).
-                    # Probe the rip's real frame clock; a failed probe falls
-                    # back to the old default with an honest warning.
-                    rip_fps = video_frame_rate(streams)
-                    if rip_fps is None:
-                        rip_fps = "30000/1001"
-                        result.warnings.append(
-                            f"{job.output_name}: could not probe the rip's "
-                            "frame rate; upscale chunks will be stamped with "
-                            "the 29.97 fps default"
-                        )
                     # v0.2.33 pre-flight (design §2.1/§2.2): the authoritative
                     # decode-counted frame count and the CFR verdict run
                     # once, BEFORE run_dvd_upscale, so a bad rip costs ~30 s
@@ -852,6 +877,20 @@ def run_pipeline(
                     # or UNKNOWN verdict raises UpscaleError INSIDE this try
                     # so it hits the same fail-open handler - the pipeline
                     # never enters the GPU stage for a refused rip.
+                    #
+                    # v0.2.34 (design §1.3/§1.4): plan.fps is now DERIVED
+                    # from decode truth - rip_total_frames divided by the
+                    # selected audio stream's measured duration, snapped
+                    # to a canonical rate - instead of the container's
+                    # r_frame_rate/avg_frame_rate metadata (both fields
+                    # lied uniformly on the 2026-10-18 Mamma Mia HWA
+                    # probe: 30000/1001 on a soft-telecined 23.976 film).
+                    # The .33 VFR/UNKNOWN refusal runs first (unchanged);
+                    # the snap then runs on CFR verdicts only. The metadata
+                    # tokens survive solely as diagnostic fields. An
+                    # unsnappable rate refuses here, inside the same try,
+                    # so it hits the same fail-open handler: honest no in
+                    # ~30 s of probes, no GPU burn.
                     try:
                         try:
                             frame_probe = probe_frame_count(job.input_path)
@@ -877,6 +916,35 @@ def run_pipeline(
                                 "cannot be reassembled at a constant frame rate "
                                 "without re-creating drift"
                             )
+                        # §1.1: the denominator is the exact audio ordinal
+                        # the encode maps from (nth_ordinal of the selected
+                        # stream); encode's own None fallback maps a:0?, so
+                        # a None ordinal probes a:0 the same way.
+                        audio_ordinal = nth_ordinal(streams, audio)
+                        try:
+                            audio_probe = probe_audio_duration_seconds(
+                                job.input_path, audio_ordinal)
+                        except FfprobeError as exc:
+                            # §1.1 sanity refusals (no usable figure, <10 s,
+                            # >25% stream-vs-format skew) must hit the same
+                            # fail-open handler as every other pre-flight
+                            # refusal - encode the original rip, no GPU burn.
+                            raise UpscaleError(str(exc)) from exc
+                        derived_rate = rip_total_frames / audio_probe.seconds
+                        try:
+                            rip_fps, rate_snapped = snap_to_canonical_rate(
+                                derived_rate)
+                        except FfprobeError as exc:
+                            raise UpscaleError(
+                                f"derived stamp rate {derived_rate:.4f} fps "
+                                f"(from {rip_total_frames} decoded frames / "
+                                f"{audio_probe.seconds:.1f} s of "
+                                + ("container" if audio_probe.from_format
+                                   else "audio stream")
+                                + " duration) does not match a canonical "
+                                "rate; refusing to guess the mezzanine "
+                                f"clock ({exc})"
+                            ) from exc
                         mezz_path, _mezz_stage_frames = run_dvd_upscale(
                             UpscalePlan(
                                 input_path=job.input_path,
@@ -923,6 +991,17 @@ def run_pipeline(
                         verify_mezzanine_frames(
                             mezz_path, rip_total_frames,
                             probe_frames=probe_frame_count,
+                        )
+                        # v0.2.34 clock gate (design §3), composed on the
+                        # orthogonal axis: the frames gate proved the COUNT;
+                        # this proves the CLOCK - the mezzanine's container
+                        # duration must match the selected audio stream's
+                        # measured extent within max(2 s, 0.1%). Same try,
+                        # same fail-open handler; the diagnostic (§4) gains
+                        # the clock fields via the probe_ctx locals below.
+                        verify_mezzanine_clock(
+                            mezz_path, audio_probe.seconds,
+                            probe_duration=probe_duration_seconds,
                         )
                         video_input_path = mezz_path
                     except UpscaleError as exc:

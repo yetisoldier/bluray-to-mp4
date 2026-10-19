@@ -9,6 +9,7 @@ import pytest
 from bluray_to_mp4 import pipeline as pipeline_mod
 from bluray_to_mp4.cli import build_parser
 from bluray_to_mp4.ffprobe import (
+    AudioDurationProbe,
     CfrVerdict,
     FrameCountProbe,
     FfprobeError,
@@ -267,13 +268,33 @@ def _stub_probe(monkeypatch, *, width=3840, height=2160,
 def _stub_frame_preflight(
     monkeypatch, *, total_frames=163_267, from_metadata=False,
     verdict="CFR", r_frame_rate="24000/1001", avg_frame_rate="24000/1001",
+    audio_duration=None, audio_from_format=False, mezzanine_duration=None,
 ):
-    """Stub the v0.2.33 pre-flight probes: the decode-counted frame
-    total (probe_frame_count) and the CFR verdict (probe_cfr_check).
+    """Stub the v0.2.33 pre-flight probes and the v0.2.34 derivation
+    inputs: the decode-counted frame total (probe_frame_count), the
+    CFR verdict (probe_cfr_check), the selected audio stream's
+    measured duration (probe_audio_duration_seconds), and the
+    mezzanine container duration the clock gate probes
+    (probe_duration_seconds).
+
     Defaults describe the Mamma Mia-scale film rip: 163,267 frames at
-    23.976 fps (~1:53:39), decode-counted (from_metadata=False), and
-    a CFR clock (r == a). The fake rip on disk is a text file, so the
-    real helpers cannot run on it."""
+    23.976 fps (~1:53:39), decode-counted (from_metadata=False), and a
+    CFR clock (r == a). The fake rip on disk is a text file, so the
+    real helpers cannot run on it.
+
+    v0.2.34: the stamp rate is DERIVED (frames / audio duration), so
+    the default audio duration is the .33 fixture's consistent pair -
+    total_frames at 24000/1001 (163,267 frames -> 6,809.59 s) - which
+    keeps every existing caller one-line and derives exactly
+    24000/1001. The real-disc numbers (163,509 frames / 6,818.4 s,
+    design §5 fixture a) are passed explicitly by the v0.2.34 tests.
+    mezzanine_duration defaults to the audio figure (clock-gate delta
+    0: the gate passes); clock-trip tests override it.
+    """
+    if audio_duration is None:
+        audio_duration = total_frames / (24000.0 / 1001.0)
+    if mezzanine_duration is None:
+        mezzanine_duration = audio_duration
     monkeypatch.setattr(
         pipeline_mod, "probe_frame_count",
         lambda path, *, binary="ffprobe": FrameCountProbe(
@@ -283,6 +304,16 @@ def _stub_frame_preflight(
         pipeline_mod, "probe_cfr_check",
         lambda path, *, binary="ffprobe": CfrVerdict(
             verdict, r_frame_rate=r_frame_rate, avg_frame_rate=avg_frame_rate),
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds",
+        lambda path, audio_index, *, binary="ffprobe": AudioDurationProbe(
+            float(audio_duration), from_format=audio_from_format,
+            stream_ordinal=None if audio_from_format else 0),
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "probe_duration_seconds",
+        lambda path, *, binary="ffprobe": float(mezzanine_duration),
     )
 
 
@@ -928,6 +959,175 @@ def test_probe_cfr_check_verdicts(monkeypatch):
     assert verdict.verdict == "UNKNOWN"
 
 
+def _probe_run_stub(monkeypatch, *, stream_duration=None, format_duration=None,
+                    fmt_error=False):
+    """Stub ffprobe subprocess.run for probe_audio_duration_seconds:
+    the a:N stream probe answers stream_duration (None = ffprobe
+    failed/unparsable -> format fallback), and probe_duration_seconds'
+    format=duration call answers format_duration (or raises when
+    fmt_error). Calls are keyed by the -select_streams argument."""
+    from bluray_to_mp4 import ffprobe as ff
+
+    class _Result:
+        pass
+
+    def fake_run(cmd, **kw):
+        if "-select_streams" in cmd:
+            r = _Result()
+            r.returncode, r.stderr = 0, ""
+            r.stdout = "" if stream_duration is None else f"{stream_duration}\n"
+            return r
+        # format=duration probe (probe_duration_seconds) or any other
+        # ffprobe call the helper might make.
+        if fmt_error:
+            raise RuntimeError("ffprobe failed")
+        r = _Result()
+        r.returncode, r.stderr = 0, ""
+        r.stdout = "" if format_duration is None else f"{format_duration}\n"
+        return r
+
+    monkeypatch.setattr(ff.subprocess, "run", fake_run)
+    return fake_run
+
+
+def test_probe_audio_duration_stream_extent_primary(monkeypatch):
+    """F1: the selected stream's measured extent wins over the format
+    figure (design §1.1 step 1); the ordinal lands in the result."""
+    from bluray_to_mp4 import ffprobe as ff
+
+    _probe_run_stub(
+        monkeypatch, stream_duration=6818.4, format_duration=6800.0)
+    probe = ff.probe_audio_duration_seconds("/x.mkv", 0)
+    assert probe.seconds == pytest.approx(6818.4)
+    assert probe.from_format is False
+    assert probe.stream_ordinal == 0
+    # A non-zero audio ordinal is probed at a:{N} and reported back.
+    _probe_run_stub(
+        monkeypatch, stream_duration=5400.0, format_duration=5400.0)
+    probe = ff.probe_audio_duration_seconds("/x.mkv", 2)
+    assert probe.stream_ordinal == 2
+    # audio_index=None probes a:0 (encode's own -map a:0? fallback).
+    probe = ff.probe_audio_duration_seconds("/x.mkv", None)
+    assert probe.stream_ordinal == 0
+
+
+def test_probe_audio_duration_format_fallback_and_failures(monkeypatch):
+    """F2: no stream extent -> format fallback (from_format=True);
+    neither figure -> refuse; <10 s -> refuse; 26% skew -> refuse;
+    5% skew -> proceeds with the stream extent (design §1.1 step 3)."""
+    from bluray_to_mp4 import ffprobe as ff
+
+    # No stream duration, healthy format duration -> fallback, flagged.
+    _probe_run_stub(monkeypatch, stream_duration=None, format_duration=6818.4)
+    probe = ff.probe_audio_duration_seconds("/x.mkv", 0)
+    assert probe.seconds == pytest.approx(6818.4)
+    assert probe.from_format is True
+    assert probe.stream_ordinal is None
+
+    # Neither figure -> honest refusal (fail-open upstream).
+    _probe_run_stub(monkeypatch, stream_duration=None, format_duration=None)
+    with pytest.raises(FfprobeError, match="no usable audio or format duration"):
+        ff.probe_audio_duration_seconds("/x.mkv", 0)
+
+    # Format duration below the 10 s floor -> refusal (probe artifact,
+    # not a movie; guards the division against pathological rates).
+    _probe_run_stub(monkeypatch, stream_duration=None, format_duration=5.0)
+    with pytest.raises(FfprobeError, match="minimum"):
+        ff.probe_audio_duration_seconds("/x.mkv", 0)
+
+    # Stream extent 26% off the container figure -> broken probe,
+    # refuse (never silently set the stamp from a bad extent).
+    _probe_run_stub(
+        monkeypatch, stream_duration=5000.0, format_duration=6818.4)
+    with pytest.raises(FfprobeError, match="disagrees with the container"):
+        ff.probe_audio_duration_seconds("/x.mkv", 0)
+
+    # 5% skew (normal lead-in/out skew) proceeds with the stream extent.
+    _probe_run_stub(
+        monkeypatch, stream_duration=6477.0, format_duration=6818.4)
+    probe = ff.probe_audio_duration_seconds("/x.mkv", 0)
+    assert probe.seconds == pytest.approx(6477.0)
+    assert probe.from_format is False
+
+    # A format duration that does not parse (but exists) is treated as
+    # absent: the stream extent still stands when it is healthy.
+    _probe_run_stub(
+        monkeypatch, stream_duration=6818.4, format_duration=None)
+    probe = ff.probe_audio_duration_seconds("/x.mkv", 0)
+    assert probe.seconds == pytest.approx(6818.4)
+    assert probe.from_format is False
+
+
+def test_snap_to_canonical_rate_table():
+    """F3 (design §5/§6): the canonical snap table with the real-disc
+    numbers, the refusal cases, and the tolerance edge (inclusive ±0.1%)."""
+    from bluray_to_mp4.ffprobe import CANONICAL_RATES, SNAP_TOLERANCE_FRACTION
+
+    # The disc that forced .34: 163,509 / 6,818.4 = 23.9775 -> film clock.
+    assert ff_snap(163_509 / 6818.4) == ("24000/1001", True)
+    # A true 29.97 video source (fixture b): 29.9856 -> 0.052% off - snaps.
+    assert ff_snap(163_509 / 5453.0) == ("30000/1001", True)
+    # PAL control (fixture d first half): 100,000 / 4,000 = exactly 25 ->
+    # snaps with snapped=False (no adjustment happened).
+    assert ff_snap(100_000 / 4000.0) == ("25", False)
+    # Near misses within measurement noise (4th-decimal wobble).
+    assert ff_snap(25.02) == ("25", True)
+    assert ff_snap(50.04) == ("50", True)
+    assert ff_snap(59.97) == ("60000/1001", True)
+    assert ff_snap(24.001) == ("24", True)
+    # Unsnappable: 26.3158 (fixture d) - 5%+ from every entry.
+    with pytest.raises(FfprobeError, match="26.3158"):
+        ff_snap(100_000 / 3800.0)
+    # Honest boundary near 24 (deviation note: the design's F3 row
+    # "between 23.976 and 24 -> refuse" is an arithmetic slip - those
+    # two entries are 0.1% apart, so a mid-gap value is WITHIN 0.1% of
+    # one of them and nearest-neighbor snaps it, exactly as specified
+    # in §1.2's algorithm). 23.99 is nearer 24 -> snaps to "24".
+    assert ff_snap(23.99) == ("24", True)
+    # One basis point PAST 24's outer window refuses (0.11% above 24
+    # and 0.21% above 24000/1001 - outside both windows).
+    with pytest.raises(FfprobeError):
+        ff_snap(24.0264)
+    # Tolerance edge is inclusive: +0.1% of a canonical rate snaps.
+    # (Deviation note: the 24000/1001 and 24 entries are exactly 0.1%
+    # apart, so their inclusive windows TOUCH at 24.0 exactly - the one
+    # point where a value is within tolerance of two entries. There 24
+    # is strictly nearer (0% vs 0.1%), so nearest-neighbor snaps to
+    # "24" with snapped=False: the exactly-correct answer at the
+    # exact boundary, per §1.2's algorithm.)
+    for token, canonical in CANONICAL_RATES:
+        assert ff_snap(canonical * (1 + SNAP_TOLERANCE_FRACTION)) == (
+            token, True) if token != "24000/1001" else True
+    assert ff_snap(24000.0 / 1001.0 * (1 + SNAP_TOLERANCE_FRACTION)) == (
+        "24", False)  # == 24.0 exactly: the nearer entry, no adjustment
+    # Just inside the window on the other entries snaps with adjustment.
+    assert ff_snap(25.0 * (1 + SNAP_TOLERANCE_FRACTION)) == ("25", True)
+    assert ff_snap(30000.0 / 1001.0 * (1 + SNAP_TOLERANCE_FRACTION)) == (
+        "30000/1001", True)
+    # -0.1% is likewise inclusive for every entry (except the touching
+    # pair from the other side: 24 - 0.1% lands within 24000/1001's and
+    # 24's windows; nearer wins).
+    for token, canonical in CANONICAL_RATES:
+        assert ff_snap(canonical * (1 - SNAP_TOLERANCE_FRACTION)) == (
+            token, True) if token != "24" else True
+    assert ff_snap(24.0 * (1 - SNAP_TOLERANCE_FRACTION)) == (
+        "24000/1001", True)
+    # One basis point past the window refuses.
+    with pytest.raises(FfprobeError):
+        ff_snap(25.0 * (1 + 0.0011))
+    # Non-positive garbage refuses before any comparison.
+    with pytest.raises(FfprobeError, match="not a positive rate"):
+        ff_snap(0.0)
+
+
+def ff_snap(value):
+    """Import-light wrapper: snap_to_canonical_rate without a module
+    alias at the test top (keeps the table test readable)."""
+    from bluray_to_mp4.ffprobe import snap_to_canonical_rate
+
+    return snap_to_canonical_rate(value)
+
+
 # ---------------------------------------------------------------------
 # v0.2.15 Gap 1: Review-page stream overrides (backend merge contract).
 # The UI combos land in a separate session; these tests pin the
@@ -1524,20 +1724,23 @@ def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):
     assert any("encoded the original DVD rip instead" in w for w in result.warnings)
 
 
-def test_upscale_fps_probe_failure_falls_back_with_warning(tmp_path, monkeypatch):
-    """v0.2.27: an unparsable/unreported rip frame rate must not crash
-    the run - the plan falls back to the 30000/1001 default and the
-    result carries an honest warning naming the fallback. v0.2.33: the
-    fallback fps only governs the -framerate STAMP (the CFR pre-flight
-    uses ffprobe directly, not the streams stub)."""
-    _stub_probe(monkeypatch, width=720, subtitle_count=0, r_frame_rate="garbage",
-                avg_frame_rate="")
-    _stub_frame_preflight(monkeypatch, r_frame_rate="24000/1001",
-                          avg_frame_rate="24000/1001")
-    plans = []
+def test_upscale_unsnappable_rate_refuses_before_gpu(tmp_path, monkeypatch):
+    """Design §5 fixture (d): a derived rate that snaps to no canonical
+    entry must refuse BEFORE run_dvd_upscale - the GPU stage is never
+    entered - and fail open to the original rip, the warning naming the
+    derived rate and the nearest candidate. This replaces the v0.2.27
+    fallback test: the 30000/1001-with-warning fallback is retired by
+    design §1.3 step 5 (.34 always knows the rate or refuses; the stamp
+    never falls back to a default)."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    # Fixture (d): 100,000 decoded frames over 3,800 s -> 26.3158 fps,
+    # 5%+ from the nearest canonical (25) - unsnappable, refused.
+    _stub_frame_preflight(
+        monkeypatch, total_frames=100_000, audio_duration=3800.0)
+    upscale_calls = []
 
     def fake_upscale(plan, *, on_progress=None, cancel=None):
-        plans.append(plan)
+        upscale_calls.append(plan)
         return (plan.output_path, plan.total_frames)
 
     monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
@@ -1548,10 +1751,11 @@ def test_upscale_fps_probe_failure_falls_back_with_warning(tmp_path, monkeypatch
         mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
         dvd_upscale_mode="720p",
     )
-    assert result.jobs and result.jobs[0].completed
-    assert plans[0].fps == "30000/1001"  # fallback default
-    assert any("could not probe the rip's frame rate" in w for w in result.warnings)
-    assert any("29.97 fps default" in w for w in result.warnings)
+    assert result.jobs and result.jobs[0].completed  # the MP4 still ships
+    assert upscale_calls == []  # the GPU stage was NEVER entered
+    assert any("26.3158" in w for w in result.warnings)
+    assert any("nearest" in w for w in result.warnings)
+    assert any("encoded the original DVD rip instead" in w for w in result.warnings)
 
 
 def test_upscale_frames_gate_fails_open_with_retention(tmp_path, monkeypatch):
@@ -1777,6 +1981,302 @@ def test_dvd_upscale_cancel_still_propagates(tmp_path, monkeypatch):
             mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
             dvd_upscale_mode="720p",
         )
+
+
+# ---------------------------------------------------------------------
+# v0.2.34: derived stamp rate (design §5/§6). plan.fps comes from
+# decode truth (frames / selected-audio duration, snapped to a
+# canonical rate); the container's rate fields are diagnostic-only.
+
+_MAMMA_MIA_HWA_FRAMES = 163_509      # Eric's probe of J:\.rip\C1_t10.mkv
+_MAMMA_MIA_HWA_AUDIO_SECONDS = 6818.4  # 113.6-min film clock
+
+
+def test_stamp_rate_derived_from_decode_truth_soft_telecine(
+    tmp_path, monkeypatch,
+):
+    """Design §5 fixture (a) - the Mamma Mia HWA bug being fixed. The
+    container lies uniformly (r == avg == 30000/1001, so the .33 CFR
+    pre-flight correctly passes its own definition), but the decode
+    truth is 163,509 frames over 6,818.4 s = 23.9775 fps -> snaps to
+    24000/1001. The plan must stamp 23.976, chunk at 2877 frames, and
+    encode from the mezzanine. Shipped v0.2.33 would have stamped
+    30000/1001 (~20% desync)."""
+    from bluray_to_mp4.upscale import compute_chunk_bounds, compute_chunk_frames
+
+    _stub_probe(
+        monkeypatch, width=720, subtitle_count=0,
+        r_frame_rate="30000/1001", avg_frame_rate="30000/1001",
+    )
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        r_frame_rate="30000/1001", avg_frame_rate="30000/1001",
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS,
+    )
+    plans = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        plans.append(plan)
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert len(plans) == 1
+    plan = plans[0]
+    # The regression: the stamp is the DERIVED clock, not the container's.
+    assert plan.fps == "24000/1001"
+    assert plan.total_frames == _MAMMA_MIA_HWA_FRAMES
+    # Chunk math at the derived clock (design §2): 2877/chunk -> 57
+    # chunks, matching the observed 10/17 plan.
+    chunk_frames = compute_chunk_frames(120, plan.fps)
+    assert chunk_frames == 2877
+    bounds = compute_chunk_bounds(_MAMMA_MIA_HWA_FRAMES, chunk_frames)
+    assert len(bounds) == 57
+    assert bounds[-1] == (56 * 2877, _MAMMA_MIA_HWA_FRAMES - 56 * 2877)
+    # The stamp decision is silent when it works: no frame-rate noise.
+    assert not any("frame rate" in w for w in result.warnings)
+
+
+def test_stamp_rate_true_2997_video_source_unchanged(tmp_path, monkeypatch):
+    """Design §5 fixture (b) - the conservative control. A true 29.97
+    video source (163,509 frames / 5,453.0 s -> 29.9856 fps, the audio-
+    skew noise a real disc produces) keeps .33's answer: the derived
+    rate snaps to 30000/1001 and the plan is identical to a truthful
+    container's. The fix changes nothing for discs that tell the truth.
+    """
+    from bluray_to_mp4.upscale import compute_chunk_frames
+
+    _stub_probe(
+        monkeypatch, width=720, subtitle_count=0,
+        r_frame_rate="30000/1001", avg_frame_rate="30000/1001",
+    )
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        r_frame_rate="30000/1001", avg_frame_rate="30000/1001",
+        audio_duration=5453.0,
+    )
+    plans = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        plans.append(plan)
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert plans[0].fps == "30000/1001"
+    assert compute_chunk_frames(120, plans[0].fps) == 3596  # .33's number
+    assert not any("frame rate" in w for w in result.warnings)
+
+
+def test_stamp_rate_no_audio_uses_format_duration(tmp_path, monkeypatch):
+    """Design §5 fixture (c): no audio-stream extent -> the format
+    duration stands in (from_format=True) and the derivation proceeds
+    at the same total; the fallback is recorded so the operator can
+    distrust it. Standalone helper behavior (the pipeline hard-errors
+    earlier when no audio stream exists at all), so the pipeline-level
+    stub carries audio_from_format=True with the same 6,818.4 s figure.
+    """
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS,
+        audio_from_format=True,
+    )
+    probes = []
+    real_probe = pipeline_mod.probe_audio_duration_seconds
+
+    def recording_probe(path, audio_index, *, binary="ffprobe"):
+        probes.append((path, audio_index))
+        return AudioDurationProbe(
+            _MAMMA_MIA_HWA_AUDIO_SECONDS, from_format=True, stream_ordinal=None)
+
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds", recording_probe)
+    plans = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        plans.append(plan)
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert plans[0].fps == "24000/1001"  # same derivation as fixture (a)
+    assert plans and probes  # the selected ordinal was probed
+
+
+def test_stamp_rate_no_audio_missing_format_refuses(tmp_path, monkeypatch):
+    """Design §5 fixture (c) refusal sub-case: no stream extent AND no
+    parsable format duration -> the pre-flight refuses before the GPU
+    stage and fails open (helper F2 pins the standalone behavior).
+    """
+    from bluray_to_mp4.upscale import UpscaleError as _UpscaleError
+
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(monkeypatch)
+
+    def boom(path, audio_index, *, binary="ffprobe"):
+        raise FfprobeError(
+            "no usable audio or format duration for /fake; cannot derive "
+            "the stamp rate")
+
+    monkeypatch.setattr(pipeline_mod, "probe_audio_duration_seconds", boom)
+    upscale_calls = []
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale",
+        lambda plan, *, on_progress=None, cancel=None: (
+            upscale_calls.append(plan), (plan.output_path, plan.total_frames),
+        )[1],
+    )
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert upscale_calls == []  # refused before the GPU stage
+    assert any("no usable audio or format duration" in w for w in result.warnings)
+    assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+def test_clock_gate_trip_retains_mezzanine_and_diagnostic(
+    tmp_path, monkeypatch,
+):
+    """Design §6 P5: a clock-gate trip POST-upscale (frames gate passes,
+    mezzanine plays at the wrong speed) fails open to the original rip,
+    retains the rejected mezzanine as *.rejected-*.mkv, and the
+    diagnostic JSON carries the full v0.2.34 rate picture - derived raw
+    + snapped, container fields, audio duration + source, mezzanine
+    duration, and the gate's tolerance."""
+    import json as _json
+
+    _stub_probe(monkeypatch, width=720, subtitle_count=0,
+                r_frame_rate="30000/1001", avg_frame_rate="30000/1001")
+    # The shape that shipped broken in .33: exact frames, wrong clock -
+    # a 163,509-frame mezzanine stamped 29.97 plays 5,453 s against
+    # 6,818.4 s of audio.
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        r_frame_rate="30000/1001", avg_frame_rate="30000/1001",
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS,
+        mezzanine_duration=5453.0,
+    )
+    encode_inputs = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        mezz = Path(plan.output_path)
+        mezz.parent.mkdir(parents=True, exist_ok=True)
+        mezz.write_bytes(b"clock-desynced mezzanine payload")
+        return (plan.output_path, plan.total_frames)
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        encode_inputs.append(
+            [args[i + 1] for i, arg in enumerate(args) if arg == "-i"])
+
+    # The frames gate passes (exact count); only the clock trips.
+    monkeypatch.setattr(
+        pipeline_mod, "probe_frame_count",
+        lambda path, *, binary="ffprobe": FrameCountProbe(
+            _MAMMA_MIA_HWA_FRAMES),
+    )
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed  # the MP4 still ships
+    # Encode maps video from the ORIGINAL rip, not the desynced mezzanine.
+    assert encode_inputs[0] == [result.jobs[0].input_path]
+    assert any("plays for" in w and "audio runs" in w for w in result.warnings)
+    assert any("rejected mezzanine retained at" in w for w in result.warnings)
+    assert any("diagnostic at" in w for w in result.warnings)
+    upscale_dir = outdir / ".rip" / ".upscale"
+    rejected = list(upscale_dir.glob("title_00_720p.rejected-*.mkv"))
+    assert rejected, "rejected mezzanine must be retained, not deleted"
+    assert rejected[0].read_bytes() == b"clock-desynced mezzanine payload"
+    diagnostics = list(upscale_dir.glob("*.diagnostic.json"))
+    assert diagnostics
+    payload = _json.loads(diagnostics[0].read_text(encoding="utf-8"))
+    # The full §4 rate picture: derived truth next to the container's
+    # claims, plus the clock-gate evidence.
+    assert payload["rip_total_frames"] == _MAMMA_MIA_HWA_FRAMES
+    assert payload["stamp_fps"] == "24000/1001"
+    assert payload["derived_rate_raw"] == pytest.approx(
+        _MAMMA_MIA_HWA_FRAMES / _MAMMA_MIA_HWA_AUDIO_SECONDS, rel=1e-6)
+    assert payload["derived_rate_snapped"] is True
+    assert payload["container_r_frame_rate"] == "30000/1001"
+    assert payload["container_avg_frame_rate"] == "30000/1001"
+    assert payload["audio_duration_seconds"] == pytest.approx(
+        _MAMMA_MIA_HWA_AUDIO_SECONDS)
+    assert payload["audio_duration_source"] == "stream"
+    assert payload["audio_stream_ordinal"] == 0
+    assert payload["mezzanine_duration_seconds"] == pytest.approx(5453.0)
+    assert payload["clock_tolerance_seconds"] == pytest.approx(
+        max(2.0, 0.001 * _MAMMA_MIA_HWA_AUDIO_SECONDS))
+    assert payload["chunks"] == 57
+    assert payload["chunk_frames"] == 2877
+    assert "plays for" in payload["error"]
+
+
+def test_derived_rate_diagnostic_fields_on_success(tmp_path, monkeypatch):
+    """Design §6 P6 (light contract): on a SUCCESSFUL upscale run the
+    pipeline derives the rate, snaps it, and completes without
+    warnings - the stamp decision is silent when it works (fixture a's
+    no-noise contract), and no retention/diagnostic artifacts appear.
+    """
+    _stub_probe(monkeypatch, width=720, subtitle_count=0,
+                r_frame_rate="30000/1001", avg_frame_rate="30000/1001")
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        r_frame_rate="30000/1001", avg_frame_rate="30000/1001",
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS,
+    )
+    plans = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        plans.append(plan)
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert plans[0].fps == "24000/1001"
+    assert not any("frame rate" in w for w in result.warnings)
+    assert not any("rejected mezzanine retained" in w for w in result.warnings)
+    upscale_dir = outdir / ".rip" / ".upscale"
+    assert not list(upscale_dir.glob("*.diagnostic.json")) if upscale_dir.exists() else True
 
 
 def test_gbph_override_reaches_real_run_encode_args(tmp_path, monkeypatch):

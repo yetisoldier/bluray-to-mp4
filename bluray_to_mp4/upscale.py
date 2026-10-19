@@ -29,6 +29,7 @@ __all__ = [
     "model_name_for_mode",
     "resolve_realesrgan_models",
     "verify_mezzanine_frames",
+    "verify_mezzanine_clock",
     "run_dvd_upscale",
 ]
 
@@ -358,6 +359,66 @@ def verify_mezzanine_frames(
         raise UpscaleError(
             f"upscale mezzanine has {mezz} frames; the rip has "
             f"{int(rip_total_frames)}; refusing to encode a desynced upscale"
+        )
+
+
+def verify_mezzanine_clock(
+    mezzanine_path: str,
+    audio_duration_seconds: float,
+    *,
+    probe_duration,
+    tolerance_fraction: float = 0.001,
+    tolerance_floor_seconds: float = 2.0,
+) -> None:
+    """v0.2.34 clock gate: the mezzanine must PLAY as long as the audio.
+
+    Composes with verify_mezzanine_frames on an orthogonal axis (design
+    §3): the frames gate asks "did we rebuild every frame?" (count,
+    exact); this gate asks "does the rebuilt mezzanine play for as long
+    as the audio we ship?" (time, tolerance). It exists because the
+    2026-10-18 Mamma Mia HWA probe falsified the assumption behind the
+    v0.2.33 duration-gate deletion: correct count + wrong CLOCK =
+    wrong duration (a 163,509-frame mezzanine at 29.97 plays 5,453 s
+    against 6,818 s of audio), and verify_mezzanine_frames passes
+    because the count is exact. It deliberately does NOT resurrect
+    verify_mezzanine_duration: that gate probed the RIP against the
+    title-scan integer (retired semantics); this gate probes the
+    MEZZANINE against the selected audio stream's measured extent.
+
+    Tolerance = max(tolerance_floor_seconds, tolerance_fraction x
+    audio): single-digit seconds absorb the audio lead-in/out skew
+    that survives even a correct stamp (mezzanine 6,819.7 s vs audio
+    6,818.4 s on this disc - delta 1.3 s), while a rate-CLASS error
+    (23.976 vs 29.97 stamps the same frames 25% apart = 1,366 s of
+    delta) exceeds any tolerance here by two orders of magnitude.
+    probe_duration is injected (a probe_duration_seconds-shaped
+    callable) so the gate is testable without ffprobe; a probe failure
+    raises UpscaleError so the same fail-open handler runs.
+    """
+    audio_seconds = float(audio_duration_seconds or 0.0)
+    if audio_seconds <= 0:
+        raise UpscaleError(
+            "audio duration unknown; cannot verify the mezzanine clock"
+        )
+    tolerance = max(
+        float(tolerance_floor_seconds),
+        float(tolerance_fraction) * audio_seconds,
+    )
+    try:
+        mezz_seconds = float(probe_duration(mezzanine_path))
+    except Exception as exc:
+        raise UpscaleError(
+            f"upscale mezzanine duration could not be probed ({exc}); "
+            "refusing to encode a possibly desynced upscale"
+        ) from exc
+    delta = abs(mezz_seconds - audio_seconds)
+    if delta > tolerance:
+        raise UpscaleError(
+            f"upscale mezzanine plays for {mezz_seconds:.1f} s but the "
+            f"audio runs {audio_seconds:.1f} s (delta {delta:.1f} s, "
+            f"tolerance {tolerance:.1f} s); the stamped frame rate "
+            "does not match the shipped audio clock - refusing to "
+            "encode a desynced upscale"
         )
 
 
