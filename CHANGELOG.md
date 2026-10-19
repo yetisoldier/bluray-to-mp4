@@ -2,6 +2,36 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.34] - 2026-10-18
+
+### Fixed
+
+- **DVD AI upscale now derives the mezzanine stamp rate from decoded
+  reality instead of container metadata.** The rip's decode-counted frame
+  total is divided by the shipped audio stream's measured duration and
+  snapped to a canonical rate (24000/1001, 24, 25, 30000/1001, 50,
+  60000/1001) within 0.1%. Soft-telecined discs whose container lies
+  uniformly (r_frame_rate == avg_frame_rate == 29.97 on a 23.976 film;
+  the Mamma Mia HWA redo probe: 163,509 decoded frames over 6,818.4 s of
+  audio = a true 23.976 clock, while both container fields claim 29.97)
+  now stamp 23.976 and stay in sync - v0.2.33 would have reassembled the
+  exact frame count at the lying 29.97 and shipped a ~20% desync. The
+  v0.2.33 CFR pre-flight is retained as a diagnostic (VFR still
+  refuses); the container's rate fields no longer set the stamp. A rate
+  that snaps to nothing canonical is REFUSED before any GPU work,
+  failing open to the original rip exactly like the v0.2.33 VFR
+  refusal.
+- **Restored a clock gate next to the frame-count gate.**
+  `verify_mezzanine_clock` checks the mezzanine's container duration
+  against the rip's selected-audio duration within 0.1% (floor 2 s);
+  a mismatch fails open, retains the rejected mezzanine, and the
+  diagnostic now records the decoded-truth rate (raw + snapped + chosen
+  stamp), the audio duration and its source, the container's claimed
+  rates side by side, and the mezzanine's measured duration with the
+  gate tolerance. This is not the old `verify_mezzanine_duration`
+  (which compared against the retired title-scan integer): it probes
+  the mezzanine against the audio stream the encode actually ships.
+
 ## [0.2.33] - 2026-10-18
 
 ### Fixed

@@ -9,7 +9,7 @@ reasons, and every recommendation has a dropdown you can override.
 > Personal backups of discs you own only. Keep the tool and its output
 > private; circumvention law varies by jurisdiction.
 
-**Current version: v0.2.33** (Windows x64, exe included)
+**Current version: v0.2.34** (Windows x64, exe included)
 
 ## Quick start
 
@@ -87,6 +87,14 @@ GB/hour, so every run self-grades against the size target.
   (hardcoded 29.97 fps stamp on a 23.976 rip) and is fixed by the real-fps
   probe plus the mezzanine duration gate (v0.2.27). Since v0.2.28 the
   live-action 720p profile runs the bundled, verified RealESRGAN_x2plus.
+- **v0.2.34 (2026-10-18):** the Mamma Mia HWA redo probe caught both
+  container rate fields lying uniformly (29.97 on a soft-telecined
+  23.976 film). The DVD AI upscale now derives its stamp rate from
+  decode truth (frames / measured audio duration, snapped to a canonical
+  rate, refusing anything that snaps to nothing) and a restored clock
+  gate re-verifies the mezzanine's playback duration against the shipped
+  audio - so the redo's mezzanine will be stamped 23.976 and stay in
+  sync. First field verification is tonight's redo run.
 - **Remaining field-unverified item:** Windows-native OCR end-to-end
   (seconv + bundled Tesseract have not yet run on a real disc in the
   packaged app; scheduled for tonight's run).
