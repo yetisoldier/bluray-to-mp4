@@ -11,6 +11,7 @@ import os
 import time
 import webbrowser
 
+import bluray_to_mp4
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -102,7 +103,10 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._tick_elapsed)
 
-        self.setWindowTitle("Ripper")
+        # v0.2.35 (§4.5 D.2.1): the title names the running build - the
+        # surface Eric can check from the taskbar even mid-blind-finalize
+        # (single source: bluray_to_mp4.__version__, read once here).
+        self.setWindowTitle(f"Ripper v{bluray_to_mp4.__version__}")
         self.setMinimumSize(980, 700)
         self.resize(1080, 760)
         self.setStyleSheet("")  # theme.py applies the real stylesheet
@@ -185,6 +189,13 @@ class MainWindow(QMainWindow):
         self.total_pill = QLabel("")
         self.total_pill.setObjectName("statusPill")
         header_row.addWidget(self.total_pill)
+        # v0.2.35 (§4.5 D.2.2): a persistent version pill - static text
+        # set once at construction, never refreshed (a pill, not a
+        # settings row; the same statusPill design system as its
+        # neighbors). About stays the discoverable detail view.
+        self.version_pill = QLabel(f"v{bluray_to_mp4.__version__}")
+        self.version_pill.setObjectName("statusPill")
+        header_row.addWidget(self.version_pill)
         self.monitor_pill = QLabel("")
         self.monitor_pill.setObjectName("statusPill")
         header_row.addWidget(self.monitor_pill)
@@ -793,10 +804,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(muted("Recently completed outputs (newest first)."))
         card = card_frame()
         cl = QVBoxLayout(card)
-        self.history_table = QTableWidget(0, 7)
+        self.history_table = QTableWidget(0, 8)
         self.history_table.setHorizontalHeaderLabels(
             ["Output", "Type", "Duration", "Size", "GB/hr",
-             "Target GB/hr", "Notes"])
+             "Target GB/hr", "Ver", "Notes"])
         self.history_table.horizontalHeader().setStretchLastSection(True)
         cl.addWidget(self.history_table)
         btn_row = QHBoxLayout()
@@ -843,13 +854,18 @@ class MainWindow(QMainWindow):
             # empty cell.
             target = getattr(rec, "target_gb_per_hour", 0.0)
             target_text = f"{target:.2f}" if target else ""
+            # v0.2.35 (§4.5 D.2.4): the build that produced this row -
+            # the column-add pattern follows target GB/hr; a pre-
+            # v0.2.35 record renders an empty cell (honest unknown).
+            ver_text = getattr(rec, "version", "") or ""
             self.history_table.setItem(row, 0, QTableWidgetItem(name))
             self.history_table.setItem(row, 1, QTableWidgetItem(rec.kind))
             self.history_table.setItem(row, 2, QTableWidgetItem(duration))
             self.history_table.setItem(row, 3, QTableWidgetItem(size_text))
             self.history_table.setItem(row, 4, QTableWidgetItem(gb_text))
             self.history_table.setItem(row, 5, QTableWidgetItem(target_text))
-            self.history_table.setItem(row, 6, QTableWidgetItem(warnings))
+            self.history_table.setItem(row, 6, QTableWidgetItem(ver_text))
+            self.history_table.setItem(row, 7, QTableWidgetItem(warnings))
         self.history_table.resizeColumnsToContents()
 
     # ------------------------------------------------------------------

@@ -1,7 +1,9 @@
 """End-to-end pipeline dry-run tests (no makemkvcon/ffmpeg required)."""
 
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -2300,3 +2302,553 @@ def test_gbph_override_reaches_real_run_encode_args(tmp_path, monkeypatch):
     assert result.jobs and all(j.completed for j in result.jobs)
     dry = _movie_run(tmp_path / "dry", target_gb_per_hour=3.0)
     assert _b_v_kbps(captured[0]) == _b_v_kbps(dry.jobs[0].encode_args)
+
+
+# =====================================================================
+# v0.2.35: finalize-phase heartbeat at the pipeline gate block (design
+# §2.1/§2.3 scope 2), .upscale purge preservation (§3.6), resume end to
+# end (§3), and Karen's patch-forward findings C.1-C.4.
+
+def _dvd_upscale_env(monkeypatch, tmp_path, *, upscale_calls=None,
+                     on_progress=None, cancel=None,
+                     gate_delay=0.0, frames=None, audio_seconds=None,
+                     format_seconds=None, cfr_error=False,
+                     mezzanine_duration=None):
+    """Shared environment for the v0.2.35 pipeline tests: a DVD scan
+    with a complete existing rip (reuse lane skips the physical rip),
+    stubbed probes, and a run_dvd_upscale fake that emits stage-shaped
+    progress and returns a real mezzanine path on disk."""
+    _stub_probe(monkeypatch, width=720, height=480, subtitle_count=0,
+                sample_aspect_ratio="32:27", display_aspect_ratio="16:9")
+    total = frames if frames is not None else _MAMMA_MIA_HWA_FRAMES
+    audio = audio_seconds if audio_seconds is not None else _MAMMA_MIA_HWA_AUDIO_SECONDS
+    monkeypatch.setattr(
+        pipeline_mod, "probe_frame_count",
+        lambda path, *, binary="ffprobe": FrameCountProbe(total))
+    monkeypatch.setattr(
+        pipeline_mod, "probe_cfr_check",
+        lambda path, *, binary="ffprobe": CfrVerdict(
+            "CFR", r_frame_rate="24000/1001", avg_frame_rate="24000/1001"))
+    fmt = format_seconds if format_seconds is not None else audio
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds",
+        lambda path, audio_index, *, binary="ffprobe": AudioDurationProbe(
+            audio, from_format=False, stream_ordinal=audio_index or 0,
+            format_seconds=fmt))
+    monkeypatch.setattr(
+        pipeline_mod, "probe_duration_seconds",
+        lambda path, *, binary="ffprobe": float(
+            mezzanine_duration if mezzanine_duration is not None else audio))
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode",
+        lambda args, *, duration_seconds, binary="ffmpeg",
+        on_progress=None, cancel=None: None)
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        if upscale_calls is not None:
+            upscale_calls.append(plan)
+        mezz = Path(plan.output_path)
+        mezz.parent.mkdir(parents=True, exist_ok=True)
+        mezz.write_bytes(b"mezzanine payload")
+        if on_progress is not None:
+            on_progress(1.0, None, {"chunk": 57, "chunks": 57,
+                                    "step": "chunk complete"})
+        return (plan.output_path, plan.total_frames)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    return fake_upscale
+
+
+def _run_dvd_pipeline(monkeypatch, tmp_path, *, on_progress=None,
+                      upscale_env=None, cancel=None):
+    (upscale_env or _dvd_upscale_env)(monkeypatch, tmp_path)
+    return run_pipeline(
+        0, str(tmp_path / "out"), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(tmp_path)),
+        dvd_upscale_mode="720p",
+        on_progress=on_progress,
+        cancel=cancel,
+    )
+
+
+def test_pipeline_emits_finalize_steps_before_gates(tmp_path, monkeypatch):
+    """P-A1: the gate block announces each verify step (clamped 0.999)
+    through the SAME on_progress lambda the stage used, before each
+    gate runs - the 2026-10-19 65-minute silent decode now names
+    itself."""
+    gate_calls = []
+
+    def slow_frames_gate(mezz, rip_total, *, probe_frames):
+        gate_calls.append(("frames", mezz))
+        time.sleep(0.16)  # > 2 heartbeat ticks at the patched interval
+
+    def fast_clock_gate(mezz, audio, *, probe_duration,
+                        tolerance_fraction=0.001,
+                        tolerance_floor_seconds=2.0):
+        gate_calls.append(("clock", mezz))
+
+    monkeypatch.setattr(pipeline_mod, "_FINALIZE_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(pipeline_mod, "verify_mezzanine_frames",
+                        slow_frames_gate)
+    monkeypatch.setattr(pipeline_mod, "verify_mezzanine_clock",
+                        fast_clock_gate)
+
+    events = []
+    _run_dvd_pipeline(
+        monkeypatch, tmp_path,
+        upscale_env=lambda mp, tp: _dvd_upscale_env(mp, tp),
+        on_progress=events.append,
+    )
+
+    kinds = [k for k, _ in gate_calls]
+    assert kinds == ["frames", "clock"], "both gates ran in order"
+    finalize = [e for e in events if e[0] == "upscale" and e[4]
+                and e[4].get("step") in (
+                    pipeline_mod.FINALIZE_STEP_VERIFY_FRAMES,
+                    pipeline_mod.FINALIZE_STEP_VERIFY_CLOCK)]
+    steps = [e[4]["step"] for e in finalize]
+    assert steps[0] == pipeline_mod.FINALIZE_STEP_VERIFY_FRAMES
+    assert steps[-1] == pipeline_mod.FINALIZE_STEP_VERIFY_CLOCK
+    # Both emissions clamped at 0.999, eta None (no fake progress).
+    for e in finalize:
+        assert e[2] == pytest.approx(0.999)
+        assert e[3] is None
+    # The frames announcement precedes the frames gate call.
+    first_frames_idx = steps.index(pipeline_mod.FINALIZE_STEP_VERIFY_FRAMES)
+    assert first_frames_idx == 0
+
+
+def test_classify_snapshot_finalize_fresh_heartbeat_not_stuck():
+    """P-A2: heartbeat-alive finalize (fresh update_age) with progress
+    frozen at the clamp for an hour reads RUNNING - the exact shape the
+    2026-10-19 watcher false-fired five STALLs on."""
+    from bluray_to_mp4.monitor import classify_snapshot
+
+    snap = {
+        "busy": True,
+        "stage": "Upscaling movie ...",
+        "current_job": "movie",
+        "jobs_done": 0,
+        "jobs_total": 1,
+        "progress": 0.999,
+        "step": "verifying frame count (full decode)",
+        "updated_at": 4990.0,
+        "progress_updated_at": 1390.0,   # frozen for 3600 s
+        "stage_started_at": 1390.0,
+        "last_error": None,
+    }
+    health = classify_snapshot(snap, now=5000.0, stale_seconds=300.0)
+    assert health["status"] == "running"
+    assert health["ok"]
+    assert health["reasons"] == []
+
+
+def test_classify_snapshot_finalize_dead_heartbeat_stuck():
+    """P-A3: the same finalize shape with a DEAD heartbeat (update_age
+    900 s) reads STUCK with the no-monitor-update reason - heartbeat
+    dead IS the hang signal."""
+    from bluray_to_mp4.monitor import classify_snapshot
+
+    snap = {
+        "busy": True,
+        "stage": "Upscaling movie ...",
+        "current_job": "movie",
+        "jobs_done": 0,
+        "jobs_total": 1,
+        "progress": 0.999,
+        "step": "verifying audio clock",
+        "updated_at": 4100.0,
+        "progress_updated_at": 3200.0,
+        "stage_started_at": 3200.0,
+        "last_error": None,
+    }
+    health = classify_snapshot(snap, now=5000.0, stale_seconds=300.0)
+    assert health["status"] == "stuck"
+    assert any("no monitor update" in r for r in health["reasons"])
+
+
+def test_classify_snapshot_nonfinalize_at_999_still_stuck():
+    """P-A4: the exemption is finalize-steps-only - a non-finalize step
+    (or None) frozen at 100% with a stale update still reads stuck."""
+    from bluray_to_mp4.monitor import classify_snapshot
+
+    snap = {
+        "busy": True,
+        "stage": "Upscaling movie ...",
+        "current_job": "movie",
+        "jobs_done": 0,
+        "jobs_total": 1,
+        "progress": 1.0,
+        "step": "chunk complete",
+        "updated_at": 100.0,
+        "progress_updated_at": 100.0,
+        "stage_started_at": 100.0,
+        "last_error": None,
+    }
+    health = classify_snapshot(snap, now=500.0, stale_seconds=300.0)
+    assert health["status"] == "stuck"
+    assert any("100.0%" in r for r in health["reasons"])
+
+    # No step at all: same verdict (the exemption is keyed on the step
+    # tokens, never on 'upscale' stage text alone).
+    snap["step"] = None
+    health = classify_snapshot(snap, now=500.0, stale_seconds=300.0)
+    assert health["status"] == "stuck"
+
+
+def test_rip_purge_preserves_upscale_tree_when_upscale_planned(
+        tmp_path, monkeypatch):
+    """P-B1: with an upscale planned, the .upscale tree (resume
+    material + mezzanines) survives the pre-rip purge while a stray
+    file dies; with upscale off, the old purge behavior stands."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_encode(monkeypatch)
+    outdir = tmp_path / "out"
+    rip_dir = outdir / ".rip"
+    upscale_dir = rip_dir / ".upscale"
+    work = upscale_dir / "title_00_work" / "chunk_0000"
+    work.mkdir(parents=True)
+    (work / "segment.mkv").write_bytes(b"resume material")
+    stray = rip_dir / "stale_junk.mkv"
+    stray.write_bytes(b"leftover")
+
+    # Upscale planned: .upscale survives, stray dies.
+    run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=_no_rip_runner(_DVD_SCAN),
+        dvd_upscale_mode="720p",
+    )
+    assert (work / "segment.mkv").exists(), (
+        ".upscale tree must survive the purge when an upscale is planned")
+    assert not stray.exists()
+
+    # Upscale off: .upscale is stale junk and is purged (old behavior).
+    work2 = rip_dir / ".upscale" / "title_00_work" / "chunk_0000"
+    work2.mkdir(parents=True, exist_ok=True)
+    (work2 / "segment.mkv").write_bytes(b"stale without a plan")
+    run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=_no_rip_runner(_DVD_SCAN),
+        dvd_upscale_mode="off",
+    )
+    assert not upscale_dir.exists(), (
+        "no planned upscale: .upscale is stale and must be purged")
+
+
+def test_resume_end_to_end_only_missing_chunks_recomputed(
+        tmp_path, monkeypatch):
+    """P-B2: the interrupt fixture - attempt 1 cancels mid-run (chunk
+    work exists), attempt 2 re-enters with the manifest matching and
+    reuses the verified segments; only the missing chunk recomputes."""
+    import bluray_to_mp4.upscale as upscale_mod
+    from bluray_to_mp4.upscale import run_dvd_upscale as real_run
+
+    _stub_probe(monkeypatch, width=720, height=480, subtitle_count=0,
+                sample_aspect_ratio="32:27", display_aspect_ratio="16:9")
+    # Audio duration chosen so the derived rate snaps a canonical token
+    # (8 frames / (8 / (24000/1001)) s == 24000/1001 exactly) - the real
+    # snap runs; 8/0.2 would derive 40 fps and refuse pre-GPU.
+    _stub_frame_preflight(
+        monkeypatch, total_frames=8,
+        audio_duration=8 / (24000.0 / 1001.0))
+    # 8 frames at the default 120 s chunking would be ONE chunk; force
+    # F=2 (2-frame chunks -> 4 chunks) so the interrupt/recompute split
+    # is observable. The stage consults compute_chunk_frames only when
+    # the plan carries no explicit chunk_frames.
+    monkeypatch.setattr(
+        upscale_mod, "compute_chunk_frames",
+        lambda chunk_seconds, fps: 2)
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale", real_run)
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        pass
+
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+
+    # The stage needs its own binary stubs + counting fake processes.
+    monkeypatch.setattr(
+        upscale_mod, "resolve_realesrgan_ncnn",
+        lambda binary: str(tmp_path / "rg-stub"))
+    (tmp_path / "rg-stub").write_bytes(b"stub")
+    monkeypatch.setattr(upscale_mod, "resolve_ffmpeg", lambda binary: "ffmpeg")
+    monkeypatch.setattr(
+        upscale_mod, "resolve_realesrgan_models",
+        lambda binary, models_path=None: str(tmp_path))
+    monkeypatch.setattr(
+        upscale_mod, "resolve_ffprobe", lambda binary: "ffprobe")
+
+    work_calls = []
+
+    def fake_run(cmd, *, label, cancel=None):
+        work_calls.append(label)
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            between = cmd[cmd.index("-vf") + 1].split("between(n,")[1]
+            first = int(between.split(",")[0])
+            last = int(between.split(",")[1].split(")")[0])
+            for i in range(first, last + 1):
+                (in_dir / f"frame_{start_number + (i - first):08d}.png"
+                 ).write_bytes(png_header_bytes(640, 360))
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header_bytes(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"seg")
+        elif label.startswith("upscale mezzanine concat"):
+            Path(cmd[-1]).write_bytes(b"mezzanine")
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+
+    def segment_probe(cmd, **kw):
+        joined = " ".join(cmd)
+        # Every existing segment verifies: 2 frames at the plan fps.
+        class _Result:
+            returncode = 0
+            stderr = ""
+            stdout = json.dumps({"streams": [{
+                "nb_read_frames": "2", "r_frame_rate": "24000/1001"}]})
+        return _Result()
+
+    monkeypatch.setattr(upscale_mod.subprocess, "run", segment_probe)
+
+    outdir = tmp_path / "out"
+    script = _DVD_SCAN.splitlines() + _rip_tail(outdir)
+
+    # Attempt 1: compute chunk 1, then "interrupt" before chunk 2 by
+    # raising inside the second extraction.
+    attempts = {"n": 0}
+
+    def interrupting_run(cmd, *, label, cancel=None):
+        if label.startswith("upscale frame extraction"):
+            attempts["n"] += 1
+            if attempts["n"] == 2:
+                raise EncodeCancelled("interrupted mid-run")
+        return fake_run(cmd, label=label, cancel=cancel)
+
+    monkeypatch.setattr(upscale_mod, "_run_process", interrupting_run)
+    with pytest.raises(EncodeCancelled):
+        run_pipeline(
+            0, str(outdir), encoder="x265", dry_run=False,
+            mkv_runner=fake_runner(script),
+            dvd_upscale_mode="720p",
+        )
+
+    # The workroot survived the interruption with chunk 1's segment.
+    workroot = outdir / ".rip" / ".upscale" / "title_00_work"
+    assert (workroot / "chunk_0000" / "segment.mkv").exists()
+
+    # Attempt 2: full re-entry - the manifest matches, chunk 1 resumes,
+    # only chunks 2-4 recompute.
+    work_calls.clear()
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(script),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    extract_labels = [l for l in work_calls
+                      if l.startswith("upscale frame extraction")]
+    assert len(extract_labels) == 3, "only the missing chunks recompute"
+    assert all(f"chunk {n}/4" in l for l, n in zip(
+        extract_labels, (2, 3, 4)))
+    # The final mezzanine was built and gated: the encode mapped VIDEO
+    # from the mezzanine (its -i inputs), and no fail-open warning fired.
+    # (After full success the .rip tree - .upscale included - is
+    # reclaimed per the unchanged v0.2.12 policy, so the file is gone.)
+    upscale_warns = [w for w in result.warnings
+                     if "DVD AI upscale failed" in w]
+    assert not upscale_warns, f"unexpected upscale failure: {upscale_warns}"
+    encode_inputs = getattr(result.jobs[0], "encode_args", [])
+    assert encode_inputs, "the real encode args were rebuilt post-upscale"
+
+
+def png_header_bytes(width, height):
+    """PNG IHDR stub reused by the P-B2 fixture (kept local so the test
+    file has no cross-file import)."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08\x06\x00\x00\x00"
+    )
+
+
+def test_cfr_probe_crash_fails_open_not_job_failure(tmp_path, monkeypatch):
+    """P-C1: a raw FfprobeError inside probe_cfr_check is converted to
+    UpscaleError inside the pre-flight try - the encode ships the
+    original rip (fail OPEN), the job is NOT in result.errors."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    upscale_calls = []
+    _stub_frame_preflight(monkeypatch, total_frames=163_267)
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale",
+        lambda plan, *, on_progress=None, cancel=None: (
+            upscale_calls.append(plan),
+            (plan.output_path, plan.total_frames))[1])
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode", lambda *a, **k: None)
+
+    def boom(path, *, binary="ffprobe"):
+        raise FfprobeError("ffprobe binary missing entirely")
+
+    monkeypatch.setattr(pipeline_mod, "probe_cfr_check", boom)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed  # encode still ships
+    assert upscale_calls == []  # never entered the GPU stage
+    assert result.errors == []  # C2: not a job failure
+    assert any("CFR pre-flight could not probe" in w for w in result.warnings)
+    assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+def test_snap_neighbor_split_refuses(tmp_path, monkeypatch):
+    """P-C2: the blind spot firing - 163,509 frames, audio extent
+    under-reported to 6,807.0 s (derives 24.0206 -> snaps 24) while the
+    format duration 6,819.8 s derives 23.975 -> snaps 24000/1001. The
+    neighbor split REFUSES before the GPU stage and fails open, naming
+    both rates."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    upscale_calls = []
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        audio_duration=6807.0)
+    # Attach the independent format figure to the stubbed probe result.
+    real_probe = pipeline_mod.probe_audio_duration_seconds
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds",
+        lambda path, audio_index, *, binary="ffprobe": AudioDurationProbe(
+            6807.0, from_format=False, stream_ordinal=audio_index or 0,
+            format_seconds=6819.8))
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale",
+        lambda plan, *, on_progress=None, cancel=None: (
+            upscale_calls.append(plan),
+            (plan.output_path, plan.total_frames))[1])
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed  # encode still ships
+    assert upscale_calls == []  # refused BEFORE the GPU stage
+    split_warning = [w for w in result.warnings if "provenance split" in w]
+    assert split_warning, "the refusal warning must name the split"
+    # The warning names both rates and both snap tokens.
+    assert "24.0207" in split_warning[0]
+    assert "23.9751" in split_warning[0] or "23.975" in split_warning[0]
+    assert "24000/1001" in split_warning[0]
+    assert any("encoded the original DVD rip instead" in w
+               for w in result.warnings)
+
+
+def test_snap_agreement_proceeds_silently(tmp_path, monkeypatch):
+    """P-C3 (the control): today's disc numbers - audio extent 6,818.4 s
+    and format duration 6,819.8 s BOTH derive 23.977/23.975 and snap
+    24000/1001. No new warning; the C.4 parity reason carries both
+    figures on success."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS)
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds",
+        lambda path, audio_index, *, binary="ffprobe": AudioDurationProbe(
+            _MAMMA_MIA_HWA_AUDIO_SECONDS, from_format=False,
+            stream_ordinal=audio_index or 0, format_seconds=6819.8))
+    plans = []
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale",
+        lambda plan, *, on_progress=None, cancel=None: (
+            plans.append(plan),
+            (plan.output_path, plan.total_frames))[1])
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert plans and plans[0].fps == "24000/1001"
+    # Silent when it works: no cross-check warning.
+    assert not any("cross" in w for w in result.warnings)
+    # C.4 parity: the success reason records both figures.
+    parity = [r for r in result.reasons
+              if "upscale stamp 24000/1001" in r]
+    assert parity, "success-path provenance reason required"
+    assert "23.9806" in parity[0]  # 163,509 / 6,818.4 (this disc's truth)
+    assert "format-duration cross-check" in parity[0]
+    assert "agrees" in parity[0]
+
+
+def test_snap_one_side_unsnappable_warns_and_proceeds(tmp_path, monkeypatch):
+    """P-C4: the audio side snaps cleanly but the format-side rate is
+    garbage (26.3 -> unsnappable) -> proceed on the audio-stream
+    derivation with a warning that carries both figures, plus the C.4
+    parity reason."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS)
+    # Format duration chosen so the derived format rate is ~26.3:
+    # 163,509 / 6,216 s = 26.30 -> snaps nothing.
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds",
+        lambda path, audio_index, *, binary="ffprobe": AudioDurationProbe(
+            _MAMMA_MIA_HWA_AUDIO_SECONDS, from_format=False,
+            stream_ordinal=audio_index or 0, format_seconds=6216.0))
+    plans = []
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale",
+        lambda plan, *, on_progress=None, cancel=None: (
+            plans.append(plan),
+            (plan.output_path, plan.total_frames))[1])
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    assert plans and plans[0].fps == "24000/1001"
+    warned = [w for w in result.warnings if "cross-check unsnappable" in w]
+    assert warned, "one-sided noise must warn, not refuse"
+    assert "23.9806" in warned[0]
+    assert "26.3" in warned[0]
+    # C.4: the parity reason still lands (without the format agreement
+    # clause, since the format side did not agree - it did not classify).
+    parity = [r for r in result.reasons
+              if "upscale stamp 24000/1001" in r]
+    assert parity
+
+
+def test_dead_import_absent():
+    """P-C5 (C.1): video_frame_rate is no longer imported by the
+    pipeline (dead since v0.2.34 replaced the metadata read) - the
+    helper itself stays in ffprobe."""
+    import inspect
+
+    source = inspect.getsource(pipeline_mod)
+    assert "video_frame_rate" not in source, (
+        "pipeline must not import the dead video_frame_rate helper")
+    from bluray_to_mp4 import ffprobe
+    assert hasattr(ffprobe, "video_frame_rate"), (
+        "the helper stays in ffprobe.py (v0.2.34 §1.4: not deleted)")

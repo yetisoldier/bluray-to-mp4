@@ -430,11 +430,18 @@ class AudioDurationProbe:
     (the diagnostic records the fallback so the operator can distrust
     it). stream_ordinal is the audio ordinal that was probed (None when
     the format fallback ran without an audio selection).
+
+    v0.2.35 C.3: format_seconds carries the container FORMAT duration
+    the 25% sanity already resolved - an independent provenance from
+    the stream extent, promoted to the snap-time cross-check. None
+    when the format probe failed/absent or when seconds IS the format
+    fallback (the guard needs a SECOND opinion, not the same figure).
     """
 
     seconds: float
     from_format: bool = False
     stream_ordinal: int | None = None
+    format_seconds: float | None = None
 
 
 def probe_audio_duration_seconds(
@@ -518,7 +525,8 @@ def probe_audio_duration_seconds(
                 "refusing to derive the stamp rate from a broken extent"
             )
         chosen = AudioDurationProbe(
-            stream_seconds, from_format=False, stream_ordinal=ordinal)
+            stream_seconds, from_format=False, stream_ordinal=ordinal,
+            format_seconds=format_seconds)
     else:
         # Format-duration fallback: no audio stream, or the stream
         # duration field absent/unparsable (design §1.1 step 2).

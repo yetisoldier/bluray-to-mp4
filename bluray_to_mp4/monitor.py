@@ -22,11 +22,15 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import bluray_to_mp4 as _pkg
+from .upscale import FINALIZE_STEPS
+
 __all__ = [
     "JobRecord",
     "MonitorState",
     "MonitorServer",
     "classify_snapshot",
+    "FINALIZE_STEPS",
     "state",
     "start_server",
     "start_server_with_fallback",
@@ -80,8 +84,21 @@ def classify_snapshot(snapshot: dict, *, now: float | None = None,
         if update_age is not None and update_age >= stale_limit:
             status = "stuck"
             reasons.append(f"no monitor update for {int(update_age)}s")
+        # v0.2.35 §2.4: heartbeat-alive finalize is the DESIGNED silent
+        # state - the step names the phase (concat / decode gate /
+        # clock gate) and update_age proves the 15 s heartbeat, so the
+        # frozen-at-clamp progress reason is suppressed while the
+        # heartbeat lives. A dead heartbeat (update_age >= stale)
+        # still fires the "no monitor update" stuck above - heartbeat
+        # dead IS the hang signal; only the progress-frozen reason is
+        # exempt, and only for the three finalize step tokens.
+        finalize_alive = (
+            snapshot.get("step") in FINALIZE_STEPS
+            and update_age is not None
+            and update_age < stale_seconds
+        )
         if progress_age is not None and progress_age >= stale_seconds:
-            if progress >= 0.999:
+            if progress >= 0.999 and not finalize_alive:
                 status = "stuck"
                 reasons.append(
                     f"progress has been at {progress * 100:.1f}% for {int(progress_age)}s"
@@ -90,6 +107,7 @@ def classify_snapshot(snapshot: dict, *, now: float | None = None,
                 progress <= 0.001
                 and stage_age is not None
                 and stage_age >= stale_limit
+                and not finalize_alive
             ):
                 status = "stalled"
                 reasons.append(
@@ -134,6 +152,11 @@ class JobRecord:
     target_gb_per_hour: float = 0.0
     warnings: list[str] = field(default_factory=list)
     finished_at: float = field(default_factory=time.time)
+    # v0.2.35 (§4.5 D.2.4): the build that produced this output - the
+    # History attribution Eric asked for. "" = a pre-v0.2.35 record,
+    # rendered as an empty cell (same convention as size_bytes=0 /
+    # target_gb_per_hour=0.0 for pre-feature rows).
+    version: str = ""
 
     @property
     def gb_per_hour(self) -> float:
@@ -264,6 +287,14 @@ class MonitorState:
         with self._lock:
             payload = {
                 "busy": self.busy,
+                # v0.2.35 (§4.5 D.2.3): build identity in every served
+                # payload - /status and /health both serve this snapshot,
+                # so a remote watcher can confirm the running build
+                # without touching the box. Constant per process; begin/
+                # finish/fail never touch it. Read as an ATTRIBUTE of the
+                # package at snapshot time (not a from-import value copy)
+                # so the T-D1 flip test proves there is no second source.
+                "version": _pkg.__version__,
                 "disc": self.disc_name,
                 "disc_type": self.disc_type,
                 "series_mode": self.series_mode,
@@ -301,6 +332,7 @@ class MonitorState:
                     "gb_per_hour": round(r.gb_per_hour, 2),
                     "warnings": list(r.warnings),
                     "finished_at": r.finished_at,
+                    "version": r.version,
                 }
                 for r in self.recent[:limit]
             ]

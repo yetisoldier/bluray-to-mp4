@@ -2,6 +2,48 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.35] - 2026-10-19
+
+### Fixed
+
+- **The upscale finalize phase now announces itself and stays alive in
+  the monitor.** Concat, the frame-count gate, and the clock gate each
+  emit a named monitor step, and a 15 s heartbeat keeps the status
+  `updated_at` fresh through the full-decode gate (ffprobe -count_frames
+  emits no progress; a 65-minute legitimate silence in today's completed
+  Mamma Mia run read as five STALL false alarms and nearly cost a
+  healthy ~5-GPU-hour run to a kill that had no per-chunk resume to fall
+  back on). The health classifier now treats heartbeat-alive finalize as
+  RUNNING and heartbeat-dead silence as STUCK - external watchers can
+  tell legit quiet from a hang.
+- **Interrupted DVD upscales now resume per chunk.** A re-entered run
+  verifies each existing chunk segment (decode-count equals the chunk's
+  expected frames, stamp rate equals the plan fps, file decodes) against
+  a plan fingerprint and recomputes only the missing or mismatched
+  chunks. The .rip purge preserves the .upscale tree when an upscale is
+  planned; the rip-reuse lane is untouched; the final mezzanine and both
+  gates are always rebuilt/re-run (concat is cheap; GPU hours are not).
+- **A CFR-probe tool crash now fails open** to encoding the original
+  rip like the upscale stage's other refusals, instead of failing the
+  whole job (Karen's validation finding, pre-existing gap).
+- **A true-23.976 disc whose audio extent under-reports by a few
+  seconds can no longer snap to 24 and slip the clock gate.** The
+  pre-flight now derives the rate twice - from the shipped audio
+  stream's extent and from the container format duration - and REFUSES
+  (fails open) when the two snap to different canonical rates. Successful
+  runs record both figures in the run reasons for audit parity with
+  rejection diagnostics.
+
+### Added
+
+- **The app's version is now visible everywhere a run is observed.** The
+  main-window title and a header pill show the running build; the
+  monitor's /status and /health payloads carry a `version` field so
+  remote checks can verify build identity; and each History row records
+  which build produced it. All surfaces read the single `__version__`
+  source of truth (motivated by today's finalize-phase incident, where
+  the running build could not be confirmed without asking the box).
+
 ## [0.2.34] - 2026-10-18
 
 ### Fixed

@@ -29,6 +29,10 @@ from .encode import (
 
 DVD_UPSCALE_GB_PER_HOUR = 1.5
 DVD_UPSCALE_MODES = {"off", "720p", "720p_anime"}
+# v0.2.35 §2.2: the gate-block finalize emissions clamp the bar at 0.999
+# (the mezzanine is not proven until BOTH gates pass; a 1.0 emission
+# makes the CLI print a newline per heartbeat tick).
+_FINALIZE_FRAC_GATE = 0.999
 from .ffprobe import (
     CfrVerdict,
     FfprobeError,
@@ -44,7 +48,6 @@ from .ffprobe import (
     probe_frame_count,
     probe_streams,
     snap_to_canonical_rate,
-    video_frame_rate,
 )
 from .makemkv import (
     EncodeCancelled,
@@ -66,8 +69,12 @@ from .subtitles import (
 )
 from .tmdb import TmdbError, lookup_movie, season_episode_titles
 from .upscale import (
+    FINALIZE_STEP_VERIFY_CLOCK,
+    FINALIZE_STEP_VERIFY_FRAMES,
+    ProgressHeartbeat,
     UpscaleError,
     UpscalePlan,
+    _FINALIZE_HEARTBEAT_SECONDS,
     run_dvd_upscale,
     verify_mezzanine_clock,
     verify_mezzanine_frames,
@@ -385,6 +392,12 @@ def _retain_rejected_mezzanine(job, rip_dir, probe_ctx, error_text):
         mezzanine_duration = None
         clock_tolerance = None
         audio_seconds = getattr(audio_probe, "seconds", None)
+        format_seconds = getattr(audio_probe, "format_seconds", None)
+        format_rate = (
+            rip_total / format_seconds
+            if rip_total and format_seconds
+            else None
+        )
         if audio_seconds:
             try:
                 mezzanine_duration = probe_duration_seconds(str(rejected))
@@ -419,6 +432,10 @@ def _retain_rejected_mezzanine(job, rip_dir, probe_ctx, error_text):
             "container_avg_frame_rate": getattr(cfr, "avg_frame_rate", ""),
             "mezzanine_duration_seconds": mezzanine_duration,
             "clock_tolerance_seconds": clock_tolerance,
+            # v0.2.35 §7.2: the C.3 cross-provenance figures land in the
+            # rejection diagnostic too (additive keys, never raise).
+            "format_duration_seconds": format_seconds,
+            "format_derived_rate": format_rate,
             "chunks": len(expected_per_chunk),
             "chunk_frames": chunk_frames,
             "expected_per_chunk": expected_per_chunk,
@@ -685,7 +702,18 @@ def run_pipeline(
     # the job loop below and reused instead of re-ripped (Eric's "Mamma
     # Mia! Here We Go Again": a finished t00.mkv sat in .rip after the
     # cancelled run). Only files no planned job expects are removed.
+    # v0.2.35 §3.6: when any job plans an upscale, the whole .upscale
+    # tree (per-title workroots + mezzanines) is expected too - it is
+    # the per-chunk resume material this run may verify and reuse, not
+    # stale output. The anti-hang guarantee is unaffected: the purge
+    # exists for makemkvcon's interactive overwrite prompt, which only
+    # concerns top-level rip outputs; .upscale/ is never a makemkv
+    # target. Upscale off (or a non-DVD scan) keeps the old behavior -
+    # a leftover .upscale tree IS stale then.
     _expected = {os.path.normcase(job.input_path) for job in result.jobs}
+    if any(job.upscale_mode != "off" for job in result.jobs):
+        _expected.add(
+            os.path.normcase(os.path.join(rip_dir, ".upscale")))
     for _stale in os.listdir(rip_dir):
         _p = os.path.join(rip_dir, _stale)
         if os.path.normcase(_p) in _expected:
@@ -902,7 +930,23 @@ def run_pipeline(
                             # upscale-stage refusal.
                             raise UpscaleError(str(exc)) from exc
                         rip_total_frames = int(frame_probe.total_frames)
-                        cfr = probe_cfr_check(job.input_path)
+                        # v0.2.35 C.2 (Karen's finding): probe_cfr_check
+                        # was the ONE unwrapped probe in the pre-flight -
+                        # a raw FfprobeError (missing binary, nonzero
+                        # exit, malformed JSON) escaped the inner try's
+                        # UpscaleError-only handler and hit the per-job
+                        # except Exception, failing the whole job over
+                        # a tool failure on a healthy rip. Wrapped like
+                        # its siblings: same handler, fail OPEN to the
+                        # original rip.
+                        try:
+                            cfr = probe_cfr_check(job.input_path)
+                        except FfprobeError as exc:
+                            raise UpscaleError(
+                                f"CFR pre-flight could not probe the rip "
+                                f"({exc}); refusing to upscale a rip whose "
+                                "clock cannot be verified"
+                            ) from exc
                         if cfr.verdict != "CFR":
                             reason = (
                                 "variable frame rate"
@@ -945,6 +989,64 @@ def run_pipeline(
                                 "rate; refusing to guess the mezzanine "
                                 f"clock ({exc})"
                             ) from exc
+                        # v0.2.35 C.3: cross-provenance guard. The snap's
+                        # denominator (the audio STREAM extent) and the
+                        # clock gate's reference are the same figure, so
+                        # a mis-measured extent co-moves through both -
+                        # a true 23.976 film whose stream extent under-
+                        # reports by ~11 s derives 24.02, snaps to 24,
+                        # and still passes the clock gate against the same
+                        # short figure. The container FORMAT duration is
+                        # an independent second provenance: derive the rate
+                        # from it too and compare the SNAP TOKENS. Same
+                        # token -> proceed (both truths agree on the rate
+        # class). Different tokens -> measurable disagreement between
+                        # two truths; refuse before GPU work (fail open).
+                        # One side unsnappable -> noise, not signal:
+                        # proceed on the audio-stream derivation of record
+                        # with a warning. Zero new probes: the 25%-skew
+                        # sanity already resolved the format figure; it
+                        # rides on AudioDurationProbe.format_seconds.
+                        format_seconds = getattr(
+                            audio_probe, "format_seconds", None)
+                        cross_rate_warning = None
+                        format_rate = None
+                        if format_seconds:
+                            format_rate = rip_total_frames / format_seconds
+                            try:
+                                format_token, _format_snapped = (
+                                    snap_to_canonical_rate(format_rate))
+                                if format_token != rip_fps:
+                                    raise UpscaleError(
+                                        f"stamp-rate provenance split: the "
+                                        f"audio-stream extent derives "
+                                        f"{derived_rate:.4f} fps "
+                                        f"(snaps {rip_fps}) but the "
+                                        f"container format duration "
+                                        f"({format_seconds:.1f} s) derives "
+                                        f"{format_rate:.4f} fps (snaps "
+                                        f"{format_token}) for "
+                                        f"{rip_total_frames} frames; "
+                                        "refusing to pick between two "
+                                        "clock classes - encoding the "
+                                        "original rip"
+                                    )
+                            except FfprobeError:
+                                # One-sided noise (odd attachment streams
+                                # pollute format durations): warn and
+                                # proceed on the audio-stream derivation.
+                                cross_rate_warning = (
+                                    f"{job.output_name}: stamp-rate "
+                                    f"cross-check unsnappable - derived "
+                                    f"{derived_rate:.4f} fps from the "
+                                    f"audio stream ({audio_probe.seconds:.1f} s) "
+                                    f"but {format_rate:.4f} fps from the "
+                                    f"container duration ({format_seconds:.1f} s) "
+                                    "matches no canonical rate; proceeded "
+                                    "on the audio-stream figure"
+                                )
+                        if cross_rate_warning:
+                            result.warnings.append(cross_rate_warning)
                         mezz_path, _mezz_stage_frames = run_dvd_upscale(
                             UpscalePlan(
                                 input_path=job.input_path,
@@ -979,30 +1081,102 @@ def run_pipeline(
                         # (run_dvd_upscale returned); retention (§4) needs
                         # it even when the gate below rejects the file.
                         job.upscale_mezzanine_path = mezz_path
-                        # v0.2.33 gate (design §3): exact integer frame-count
-                        # equality between mezzanine and rip - no tolerance
-                        # window. Under frame-exact chunking the mezzanine
-                        # contains the rip's frames by construction, so any
-                        # deviation is a real defect and must fail open to
-                        # the original rip with an honest warning. The
-                        # mezzanine count is probed fresh (the stage's own
-                        # return only echoes the plan total; the gate must
-                        # measure the file on disk).
-                        verify_mezzanine_frames(
-                            mezz_path, rip_total_frames,
-                            probe_frames=probe_frame_count,
-                        )
-                        # v0.2.34 clock gate (design §3), composed on the
-                        # orthogonal axis: the frames gate proved the COUNT;
-                        # this proves the CLOCK - the mezzanine's container
-                        # duration must match the selected audio stream's
-                        # measured extent within max(2 s, 0.1%). Same try,
-                        # same fail-open handler; the diagnostic (§4) gains
-                        # the clock fields via the probe_ctx locals below.
-                        verify_mezzanine_clock(
-                            mezz_path, audio_probe.seconds,
-                            probe_duration=probe_duration_seconds,
-                        )
+                        # v0.2.35 §2.1/§2.3 scope 2: the two gates emit a
+                        # named finalize step each, and a 15 s heartbeat
+                        # wraps BOTH calls - verify_mezzanine_frames is a
+                        # full -count_frames FFV1 decode (20-60 min on a
+                        # film) that emits no progress of its own; the
+                        # 2026-10-19 run sat silent ~65 min and read as
+                        # five false STALLs. The step tuples reuse the
+                        # SAME on_progress lambda the stage used (chunk N
+                        # of N + the finalize step name); the heartbeat
+                        # pings through it too (single-writer discipline:
+                        # no on_stage, no second UI writer).
+                        gate_heartbeat = ProgressHeartbeat(
+                            on_progress if on_progress else None,
+                            interval=_FINALIZE_HEARTBEAT_SECONDS)
+                        try:
+                            if on_progress:
+                                on_progress((
+                                    "upscale", job.tid, _FINALIZE_FRAC_GATE,
+                                    None,
+                                    {"chunk": _mezz_stage_frames or 1,
+                                     "chunks": _mezz_stage_frames or 1,
+                                     "step": FINALIZE_STEP_VERIFY_FRAMES},
+                                ))
+                            gate_heartbeat.start(
+                                _FINALIZE_FRAC_GATE,
+                                FINALIZE_STEP_VERIFY_FRAMES,
+                                int(_mezz_stage_frames or 1) - 1,
+                                int(_mezz_stage_frames or 1),
+                            )
+                            # v0.2.33 gate (design §3): exact integer frame-count
+                            # equality between mezzanine and rip - no tolerance
+                            # window. Under frame-exact chunking the mezzanine
+                            # contains the rip's frames by construction, so any
+                            # deviation is a real defect and must fail open to
+                            # the original rip with an honest warning. The
+                            # mezzanine count is probed fresh (the stage's own
+                            # return only echoes the plan total; the gate must
+                            # measure the file on disk).
+                            verify_mezzanine_frames(
+                                mezz_path, rip_total_frames,
+                                probe_frames=probe_frame_count,
+                            )
+                            if on_progress:
+                                on_progress((
+                                    "upscale", job.tid, _FINALIZE_FRAC_GATE,
+                                    None,
+                                    {"chunk": _mezz_stage_frames or 1,
+                                     "chunks": _mezz_stage_frames or 1,
+                                     "step": FINALIZE_STEP_VERIFY_CLOCK},
+                                ))
+                            gate_heartbeat.stop()
+                            gate_heartbeat = ProgressHeartbeat(
+                                on_progress if on_progress else None,
+                                interval=_FINALIZE_HEARTBEAT_SECONDS)
+                            gate_heartbeat.start(
+                                _FINALIZE_FRAC_GATE,
+                                FINALIZE_STEP_VERIFY_CLOCK,
+                                int(_mezz_stage_frames or 1) - 1,
+                                int(_mezz_stage_frames or 1),
+                            )
+                            # v0.2.34 clock gate (design §3), composed on the
+                            # orthogonal axis: the frames gate proved the COUNT;
+                            # this proves the CLOCK - the mezzanine's container
+                            # duration must match the selected audio stream's
+                            # measured extent within max(2 s, 0.1%). Same try,
+                            # same fail-open handler; the diagnostic (§4) gains
+                            # the clock fields via the probe_ctx locals below.
+                            verify_mezzanine_clock(
+                                mezz_path, audio_probe.seconds,
+                                probe_duration=probe_duration_seconds,
+                            )
+                            gate_heartbeat.stop()
+                            gate_heartbeat = None
+                            # v0.2.35 C.4 (Karen's parity ask): the SUCCESS path
+                            # records the provenance figures that justified the
+                            # stamp - same figures the rejection diagnostic
+                            # carries, in a run reason (no diagnostic JSON on
+                            # success; the retention artifact family stays
+                            # rejection-only per v0.2.33 §4).
+                            reason_bits = [
+                                f"{job.output_name}: upscale stamp {rip_fps} "
+                                f"(derived {derived_rate:.4f} from "
+                                f"{rip_total_frames} frames / "
+                                f"{audio_probe.seconds:.1f} s "
+                                + ("container" if audio_probe.from_format
+                                   else "audio stream")
+                            ]
+                            if format_seconds:
+                                reason_bits.append(
+                                    f"; format-duration cross-check "
+                                    f"{format_rate:.4f} agrees")
+                            reason_bits.append(")")
+                            result.reasons.append("".join(reason_bits))
+                        finally:
+                            if gate_heartbeat is not None:
+                                gate_heartbeat.stop()
                         video_input_path = mezz_path
                     except UpscaleError as exc:
                         stage(

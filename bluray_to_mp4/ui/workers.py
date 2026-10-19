@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import traceback
 
+import bluray_to_mp4
 from PySide6.QtCore import QThread, Signal
 
 from ..config import Settings
@@ -222,6 +223,9 @@ class RunWorker(QThread):
                         size_bytes=size_bytes,
                         target_gb_per_hour=float(target_gbph),
                         warnings=warnings,
+                        # v0.2.35 (§4.5 D.2.4): which build produced this
+                        # output - the History attribution seam.
+                        version=bluray_to_mp4.__version__,
                     ))
             for warning in monitor_warnings:
                 monitor_state.update(warning=warning)

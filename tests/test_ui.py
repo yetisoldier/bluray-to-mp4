@@ -1071,8 +1071,10 @@ def test_history_table_renders_size_and_gb_per_hour(qapp, monkeypatch):
 
     headers = [w.history_table.horizontalHeaderItem(c).text()
                for c in range(w.history_table.columnCount())]
+    # v0.2.35 (§4.5 D.2.4): the Ver column lands beside Target GB/hr -
+    # the column-add pattern's newest sibling.
     assert headers == ["Output", "Type", "Duration", "Size", "GB/hr",
-                      "Target GB/hr", "Notes"]
+                       "Target GB/hr", "Ver", "Notes"]
     assert w.history_table.item(0, 3).text() == "2.0 GB"
     assert w.history_table.item(0, 4).text() == "1.0"
     # v0.2.18: the run's Target GB/hr beside the achieved rate; a
@@ -1450,3 +1452,125 @@ def test_gbph_saved_value_clamped_on_read(qapp, monkeypatch):
     w2 = _filled_window(1.13)  # not a step multiple: snaps to 1.25
     assert w2.spin_gbph.value() == 1.25
     w2.close()
+
+
+# ----------------------------------------------------------------------
+# v0.2.35 (§2.1): the finalize step labels ride the existing chunk/step
+# line (single writer: _run_progress); the forecast surfaces must NOT
+# move on step-only finalize tuples (T-UI, mirroring the 6ca6216
+# single-writer fixture shape).
+
+def test_finalize_step_labels_do_not_move_forecast_surfaces(
+        qapp, monkeypatch):
+    """T-UI: a finalize-phase progress storm (clamped 0.999, eta=None,
+    step='verifying frame count (full decode)' + heartbeat pings) keeps
+    time_remaining/total_pill owned by _forecast_total - no stage-ETA
+    stomp - while progress_stage names the finalize step."""
+    import time
+
+    from bluray_to_mp4 import makemkv as mm
+    import bluray_to_mp4.ui.workers as workers_mod
+    from bluray_to_mp4.ui.main_window import MainWindow
+    from bluray_to_mp4.ui.workers import RunWorker
+
+    monkeypatch.setattr(mm, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(workers_mod, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+
+    plan = {
+        "disc_name": "Disc", "media_type": "dvd", "is_series": False,
+        "encoder": "nvenc", "outdir": "/tmp/x", "want_subtitles": True,
+        "jobs": [{"tid": 0, "output_name": "m.mp4",
+                  "duration_seconds": 2700}],
+        "tid_names": {},
+    }
+    w.run_worker = RunWorker(0, plan, Settings())
+    w._run_started_at = time.time()
+    w._stage_now = "upscale"
+    w._stage_eta = None
+    w._forecast_total()
+    assert "Total remaining" in w.time_remaining.text()
+
+    # The finalize storm: step-only tuples (0.999 clamp, eta None) and
+    # heartbeat pings with the same fields + heartbeat=True.
+    detail = {"chunk": 57, "chunks": 57,
+              "step": "verifying frame count (full decode)"}
+    ping = dict(detail)
+    ping["heartbeat"] = True
+    for frac, eta in [(0.999, None)] * 4 + [(0.999, None)] * 4:
+        w._run_progress("Upscaling: m", 0, frac, eta, dict(ping))
+
+    # The forecast surfaces stay forecast-owned: no stage-ETA stomp.
+    assert "Total remaining" in w.time_remaining.text()
+    assert "Remaining ~" not in w.time_remaining.text()
+    assert "Total remaining" in w.total_pill.text()
+    # The step line names the finalize phase (the operator sees WHERE
+    # the run is - the 65-minute-silence fix).
+    assert "verifying frame count (full decode)" in w.progress_stage.text()
+    w.close()
+
+
+# ----------------------------------------------------------------------
+# v0.2.35 §4.5/§8: the version surface. Single source: __version__.
+
+def test_version_single_source_ui_and_monitor(qapp, monkeypatch):
+    """T-D1: the window title, the header version pill, and the monitor
+    snapshot's version field all derive from bluray_to_mp4.__version__.
+    The flip form of the single-source assertion: patch __version__ and
+    every surface must follow (any future hardcoded copy fails here)."""
+    import bluray_to_mp4
+    import bluray_to_mp4.ui.main_window as mw_mod
+    import bluray_to_mp4.ui.workers as workers_mod
+    from bluray_to_mp4 import makemkv as mm
+    from bluray_to_mp4.monitor import MonitorState, state as monitor_state
+    from bluray_to_mp4.ui.main_window import MainWindow
+
+    monkeypatch.setattr(mm, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(workers_mod, "find_drives", lambda **kw: [])
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+
+    # The un-flipped surfaces read the real build (sanity + shape).
+    w = MainWindow(Settings())
+    w.show()
+    _pump(qapp, w.scan_worker)
+    ver = bluray_to_mp4.__version__
+    assert w.windowTitle() == f"Ripper v{ver}"
+    assert w.version_pill.text() == f"v{ver}"
+    assert w.version_pill.objectName() == "statusPill"
+    snap = MonitorState().snapshot()
+    assert snap["version"] == ver
+    w.close()
+
+    # The flip: a changed __version__ must move every surface through
+    # the same source (construction-time reads, so rebuild the window).
+    monkeypatch.setattr(bluray_to_mp4, "__version__", "9.9.9-flip")
+    w2 = MainWindow(Settings())
+    w2.show()
+    _pump(qapp, w2.scan_worker)
+    assert w2.windowTitle() == "Ripper v9.9.9-flip"
+    assert w2.version_pill.text() == "v9.9.9-flip"
+    snap2 = MonitorState().snapshot()
+    assert snap2["version"] == "9.9.9-flip"
+    # The History records the build too (workers passes __version__).
+    from bluray_to_mp4.monitor import JobRecord
+    rec = JobRecord(name="x.mp4", kind="movie", duration_seconds=1,
+                    encoder="x265", version=bluray_to_mp4.__version__)
+    assert rec.version == "9.9.9-flip"
+    w2.close()
+
+
+def test_version_pyproject_lockstep():
+    """T-D2: pyproject.toml's version equals bluray_to_mp4.__version__
+    (tomllib parse; stdlib on 3.11+) - packaging/runtime drift is a CI
+    failure, not a field surprise."""
+    import tomllib
+
+    import bluray_to_mp4
+
+    with open("pyproject.toml", "rb") as fh:
+        data = tomllib.load(fh)
+    assert data["project"]["version"] == bluray_to_mp4.__version__

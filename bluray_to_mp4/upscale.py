@@ -7,6 +7,7 @@ mezzanine and audio from the original MakeMKV rip.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import shlex
@@ -16,11 +17,20 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from .binaries import resolve_ffmpeg, resolve_realesrgan_ncnn
-from .ffprobe import FrameCountProbe, probe_frame_count
+from .binaries import (
+    resolve_ffmpeg,
+    resolve_ffprobe,
+    resolve_realesrgan_ncnn,
+)
+from .ffprobe import (
+    FrameCountProbe,
+    parse_frame_rate,
+    probe_frame_count,
+)
 from .makemkv import EncodeCancelled
 
 __all__ = [
@@ -31,11 +41,110 @@ __all__ = [
     "verify_mezzanine_frames",
     "verify_mezzanine_clock",
     "run_dvd_upscale",
+    "ProgressHeartbeat",
+    "FINALIZE_STEPS",
+    "FINALIZE_STEP_CONCAT",
+    "FINALIZE_STEP_VERIFY_FRAMES",
+    "FINALIZE_STEP_VERIFY_CLOCK",
 ]
 
 
 class UpscaleError(RuntimeError):
     """The optional AI-upscale stage failed and should fail open."""
+
+
+# v0.2.35 (design §2.1/§2.4): the finalize-phase step tokens. These are
+# shared vocabulary: run_dvd_upscale/pipeline emit them through the
+# progress detail dict, and monitor.classify_snapshot's FINALIZE_STEPS
+# compares against the same strings (re-exported here so the two
+# modules can never drift - a rename fails the P-A2/P-A4 pins visibly).
+FINALIZE_STEP_CONCAT = "concatenating mezzanine"
+FINALIZE_STEP_VERIFY_FRAMES = "verifying frame count (full decode)"
+FINALIZE_STEP_VERIFY_CLOCK = "verifying audio clock"
+FINALIZE_STEPS = frozenset({
+    FINALIZE_STEP_CONCAT,
+    FINALIZE_STEP_VERIFY_FRAMES,
+    FINALIZE_STEP_VERIFY_CLOCK,
+})
+
+# v0.2.35 (design §2.2): finalize emissions clamp the bar at 0.999 -
+# the mezzanine is not proven until the gates pass, and the CLI prints
+# a newline at frac >= 1.0 (a periodic 1.0 ping would spam one line per
+# tick through the whole decode gate).
+_FINALIZE_FRAC_CLAMP = 0.999
+
+# v0.2.35 (design §2.3): 15 s heartbeat interval - 12x inside the
+# 300 s monitor stale window with scheduler-jitter headroom; fixed
+# module constant, no config surface (design constraint).
+_FINALIZE_HEARTBEAT_SECONDS = 15.0
+
+
+class ProgressHeartbeat:
+    """Pings on_progress every `interval` seconds with the last
+    (frac, step, idx) until stop() (v0.2.35 design §2.3).
+
+    Keeps the monitor's updated_at fresh through finalize-phase
+    work that emits no progress of its own (ffprobe -count_frames
+    emits nothing during a 20-60 min full decode). Daemon thread;
+    every tick is wrapped so the thread never raises into the run.
+    Ticks carry the same fields a real report does plus
+    detail["heartbeat"] = True so consumers can tell a liveness ping
+    from a state change; clamped frac + unchanged step leave
+    progress_updated_at alone (progress genuinely did not move).
+    """
+
+    def __init__(self, on_progress, *, interval: float = _FINALIZE_HEARTBEAT_SECONDS):
+        self._on_progress = on_progress
+        self._interval = float(interval)
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._frac = _FINALIZE_FRAC_CLAMP
+        self._step: str | None = None
+        self._idx = 0
+        self._chunks = 0
+
+    def start(self, frac: float, step: str, idx: int, chunks: int) -> None:
+        self._frac = min(_FINALIZE_FRAC_CLAMP, max(0.0, float(frac)))
+        self._step = step
+        self._idx = int(idx)
+        self._chunks = int(chunks)
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="b2m-finalize-heartbeat", daemon=True)
+        self._thread.start()
+
+    def _ping(self) -> None:
+        on_progress = self._on_progress
+        if on_progress is None:
+            return
+        try:
+            on_progress(
+                self._frac,
+                None,
+                {
+                    "chunk": self._chunks,
+                    "chunks": self._chunks,
+                    "step": self._step,
+                    "heartbeat": True,
+                },
+            )
+        except Exception:
+            # A bookkeeping ping must never kill the run (design §2.3:
+            # "never raises"). The report path itself is the UI/monitor
+            # update seam and is exception-safe upstream; this guard is
+            # defense in depth for third-party consumers.
+            pass
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self._ping()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._thread = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +425,117 @@ def _write_concat_list(segments: list[Path]) -> str:
     return fh.name
 
 
+# v0.2.35 §3.3: the resume manifest version + the informational field
+# excluded from fingerprint comparison. Whole-file (sorted-key) JSON
+# equality decides reuse - failing closed on ANY plan difference.
+_RESUME_MANIFEST_VERSION = 1
+_RESUME_MANIFEST_NAME = "resume_manifest.json"
+_RESUME_MANIFEST_ATTEMPT_KEY = "attempt_started_at"
+
+
+def _resume_manifest_payload(plan: UpscalePlan, *, binary: str, model: str,
+                             esrgan_scale: int, segment_filter: str,
+                             total_frames: int, chunk_frames: int) -> dict:
+    """§3.3: the plan fingerprint a re-entered run must match exactly
+    (sorted-key JSON equality; chunk_seconds is deliberately absent -
+    chunk_frames + total_frames fully determine the bounds math, which
+    is what must match). attempt_started_at is informational and
+    excluded from the comparison."""
+    return {
+        "version": _RESUME_MANIFEST_VERSION,
+        "input_path": os.path.abspath(plan.input_path),
+        "mode": plan.mode,
+        "binary_sha_basename": {"binary": binary, "model": model},
+        "fps": plan.fps,
+        "total_frames": int(total_frames),
+        "chunk_frames": int(chunk_frames),
+        "deinterlace": bool(plan.deinterlace),
+        "target_height": int(plan.target_height),
+        "segment_filter": segment_filter,
+        "esrgan_scale": int(esrgan_scale),
+        _RESUME_MANIFEST_ATTEMPT_KEY: datetime.now().isoformat(),
+    }
+
+
+def _write_resume_manifest(workroot: Path, payload: dict) -> None:
+    try:
+        with (workroot / _RESUME_MANIFEST_NAME).open(
+                "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except OSError:
+        pass  # unreadable workroot: resume is best-effort; the run proceeds
+
+
+def _resume_manifest_matches(workroot: Path, payload: dict) -> bool:
+    """True iff the on-disk manifest equals `payload` ignoring the
+    informational attempt_started_at field (§3.3). Unreadable/corrupt/
+    absent -> False (fail closed -> wholesale recompute)."""
+    try:
+        with (workroot / _RESUME_MANIFEST_NAME).open(encoding="utf-8") as fh:
+            existing = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(existing, dict):
+        return False
+    candidate = dict(payload)
+    candidate.pop(_RESUME_MANIFEST_ATTEMPT_KEY, None)
+    existing_cmp = dict(existing)
+    existing_cmp.pop(_RESUME_MANIFEST_ATTEMPT_KEY, None)
+    return existing_cmp == candidate
+
+
+def _verify_segment(
+    segment: Path,
+    expected_count: int,
+    plan_fps: str,
+    *,
+    ffmpeg_probe,
+) -> bool:
+    """§3.4: strict, cheap reuse check for one chunk segment.
+
+    Four gates, all must pass: (1) decodability + exact decode count
+    via ffprobe -count_frames (no metadata fast path - nb_frames is
+    the exact lie class v0.2.33 retired for rips; uniform strict rule,
+    bounded cost: FFV1 decodes >1000 fps, ~2-3 s per film chunk);
+    (2) the count equals THIS chunk's expected count from bounds;
+    (3) the segment's stamp rate equals the plan fps (canonical token
+    comparison through parse_frame_rate on both sides - the count gate
+    alone is blind to the v0.2.34 clock-lie class); (4) nonzero size
+    (an interrupted mux can leave a plausible header on a sparse file).
+    Any probe failure/missing field -> False (recompute, never crash).
+    """
+    try:
+        if not segment.is_file() or segment.stat().st_size <= 0:
+            return False
+        probe_cmd = [
+            ffmpeg_probe,
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-count_frames",
+            "-show_entries", "stream=nb_read_frames,r_frame_rate",
+            "-of", "json",
+            str(segment),
+        ]
+        result = subprocess.run(
+            probe_cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        if result.returncode != 0:
+            return False
+        data = json.loads(result.stdout or "{}")
+        stream = data.get("streams", [{}])[0]
+        read_frames = int(stream.get("nb_read_frames") or 0)
+        if read_frames != int(expected_count):
+            return False
+        plan_token = parse_frame_rate(plan_fps)
+        seg_token = parse_frame_rate(
+            str(stream.get("r_frame_rate") or ""))
+        return bool(plan_token and seg_token and plan_token == seg_token)
+    except (OSError, ValueError, IndexError, KeyError, TypeError):
+        return False
+
+
 def verify_mezzanine_frames(
     mezzanine_path: str,
     rip_total_frames: int,
@@ -534,12 +754,45 @@ def run_dvd_upscale(
     if output.exists():
         output.unlink()
 
+    # v0.2.35 §3.3/§3.5: the resume fingerprint. Written fresh every
+    # attempt (after the pre-concat unlink above - concat is redone
+    # every attempt, so resume semantics end at the SEGMENT layer);
+    # compared against the workroot's existing manifest. A mismatch
+    # (different plan intent, or corrupt/unreadable) means the old
+    # chunks are garbage from another intent: wholesale rmtree, start
+    # clean - failing closed, same philosophy as the v0.2.12
+    # rip-reuse width tier.
+    manifest_payload = _resume_manifest_payload(
+        plan, binary=binary, model=model, esrgan_scale=esrgan_scale,
+        segment_filter=segment_filter, total_frames=total_frames,
+        chunk_frames=F,
+    )
+    resume_allowed = _resume_manifest_matches(workroot, manifest_payload)
+    if not resume_allowed and any(workroot.iterdir()):
+        shutil.rmtree(workroot, ignore_errors=True)
+        workroot.mkdir(parents=True, exist_ok=True)
+        _debug_line(workroot, "resume: fingerprint=mismatch -> workroot cleared")
+    _write_resume_manifest(workroot, manifest_payload)
+    resumed_count = 0
+
     def report(frac: float, step: str, idx: int) -> None:
         if on_progress is not None:
             on_progress(
                 min(1.0, max(0.0, frac)),
                 None,
                 {"chunk": idx + 1, "chunks": chunks, "step": step},
+            )
+
+    def report_finalize(step: str) -> None:
+        """v0.2.35 §2.1/§2.2: finalize-phase emission - the bar clamps
+        at 0.999 (the mezzanine is not yet proven) and the chunk line
+        reads the LAST chunk so the UI keeps its `chunk N of N` shape
+        while the step names the finalize work."""
+        if on_progress is not None:
+            on_progress(
+                _FINALIZE_FRAC_CLAMP,
+                None,
+                {"chunk": chunks, "chunks": chunks, "step": step},
             )
 
     segments: list[Path] = []
@@ -549,11 +802,28 @@ def run_dvd_upscale(
             chunk = workroot / f"chunk_{idx:04d}"
             in_dir = chunk / "in"
             out_dir = chunk / "out"
+            segment = chunk / "segment.mkv"
+            # v0.2.35 §3.4: the resume decision. Only a complete,
+            # VERIFIED segment.mkv earns reuse (§3.2: PNG dirs are
+            # never resume units - a partial out/ is indistinguishable
+            # from a complete one without deep inspection, and a
+            # segment whose truth was proven at verify time skips the
+            # PNG assertions by construction). in/out rmtree becomes
+            # CONDITIONAL: a resumed chunk never creates them.
+            if (
+                resume_allowed
+                and segment.is_file()
+                and _verify_segment(segment, count, plan.fps,
+                                    ffmpeg_probe=resolve_ffprobe("ffprobe"))
+            ):
+                segments.append(segment)
+                resumed_count += 1
+                report(len(segments) / chunks, "resumed chunk", idx)
+                continue
             shutil.rmtree(in_dir, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
             in_dir.mkdir(parents=True, exist_ok=True)
             out_dir.mkdir(parents=True, exist_ok=True)
-            segment = chunk / "segment.mkv"
             try:
                 segment.unlink()
             except FileNotFoundError:
@@ -698,38 +968,54 @@ def run_dvd_upscale(
             shutil.rmtree(out_dir, ignore_errors=True)
             report(len(segments) / chunks, "chunk complete", idx)
 
-        if len(segments) == 1:
-            shutil.move(str(segments[0]), output)
-        else:
-            concat = _write_concat_list(segments)
-            try:
-                _run_process(
-                    [
-                        ffmpeg,
-                        "-y",
-                        "-hide_banner",
-                        "-nostdin",
-                        "-f",
-                        "concat",
-                        "-safe",
-                        "0",
-                        "-i",
-                        concat,
-                        "-c",
-                        "copy",
-                        str(output),
-                    ],
-                    label="upscale mezzanine concat",
-                    cancel=cancel,
-                )
-            finally:
+        # v0.2.35 §3.7: one debug line per attempt summarizing the
+        # split - the log/debug lane for "did resume actually happen".
+        _debug_line(
+            workroot,
+            f"resume: reused={resumed_count} "
+            f"recompute={chunks - resumed_count} "
+            + ("fingerprint=match" if resumed_count else "fingerprint="
+               + ("match" if resume_allowed else "fresh")),
+        )
+        report_finalize(FINALIZE_STEP_CONCAT)
+        heartbeat = ProgressHeartbeat(
+            on_progress, interval=_FINALIZE_HEARTBEAT_SECONDS)
+        heartbeat.start(_FINALIZE_FRAC_CLAMP, FINALIZE_STEP_CONCAT, chunks - 1, chunks)
+        try:
+            if len(segments) == 1:
+                shutil.move(str(segments[0]), output)
+            else:
+                concat = _write_concat_list(segments)
                 try:
-                    os.remove(concat)
-                except OSError:
-                    pass
-        if not output.is_file() or output.stat().st_size == 0:
-            raise UpscaleError("upscale mezzanine was not created")
-        shutil.rmtree(workroot, ignore_errors=True)
+                    _run_process(
+                        [
+                            ffmpeg,
+                            "-y",
+                            "-hide_banner",
+                            "-nostdin",
+                            "-f",
+                            "concat",
+                            "-safe",
+                            "0",
+                            "-i",
+                            concat,
+                            "-c",
+                            "copy",
+                            str(output),
+                        ],
+                        label="upscale mezzanine concat",
+                        cancel=cancel,
+                    )
+                finally:
+                    try:
+                        os.remove(concat)
+                    except OSError:
+                        pass
+            if not output.is_file() or output.stat().st_size == 0:
+                raise UpscaleError("upscale mezzanine was not created")
+            shutil.rmtree(workroot, ignore_errors=True)
+        finally:
+            heartbeat.stop()
         return (str(output), total_frames)
     except EncodeCancelled:
         raise

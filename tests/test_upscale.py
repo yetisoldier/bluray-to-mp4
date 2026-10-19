@@ -838,3 +838,768 @@ def test_per_chunk_upscale_count_mismatch_raises(monkeypatch, tmp_path):
                 total_frames=3,
             )
         )
+
+
+# =====================================================================
+# v0.2.35: finalize-phase heartbeat (design §2) + per-chunk resume
+# (design §3). All synthetic; probes and processes are stubbed per the
+# suite convention.
+
+import json as _json
+import time
+
+from bluray_to_mp4.upscale import (
+    FINALIZE_STEP_CONCAT,
+    FINALIZE_STEPS,
+    ProgressHeartbeat,
+    compute_chunk_bounds,
+    compute_chunk_frames,
+)
+from bluray_to_mp4.makemkv import EncodeCancelled
+
+
+def _fake_probe_result(*, frames, rate="24000/1001"):
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = _json.dumps({
+            "streams": [{
+                "nb_read_frames": str(frames),
+                "r_frame_rate": rate,
+            }],
+        })
+
+    return _Result()
+
+
+def _stub_segment_probe(monkeypatch, *, good=True, frames=2,
+                        rate="24000/1001", fail=False):
+    """Stub _verify_segment's ffprobe probe. good=False still returns a
+    well-formed probe whose numbers mismatch the plan (count/fps lie);
+    fail=True simulates a probe crash (nonzero exit)."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if fail:
+            class _Bad:
+                returncode = 1
+                stdout = ""
+                stderr = "boom"
+            return _Bad()
+        if good:
+            return _fake_probe_result(frames=frames, rate=rate)
+        return _fake_probe_result(frames=frames, rate="30000/1001")
+
+    monkeypatch.setattr(upscale_mod.subprocess, "run", fake_run)
+    return calls
+
+
+def _write_manifest(workroot, **overrides):
+    payload = {
+        "version": 1,
+        "input_path": "/x/input.mkv",
+        "mode": "720p",
+        "binary_sha_basename": {
+            "binary": "/bin/realesrgan-ncnn-vulkan-stub",
+            "model": "realesrgan-x2plus",
+        },
+        "fps": "24000/1001",
+        "total_frames": 8,
+        "chunk_frames": 2,
+        "deinterlace": False,
+        "target_height": 720,
+        "segment_filter": "setsar=1",
+        "esrgan_scale": 2,
+        "attempt_started_at": "2026-10-19T12:00:00",
+    }
+    payload.update(overrides)
+    workroot.mkdir(parents=True, exist_ok=True)
+    (workroot / "resume_manifest.json").write_text(
+        _json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return payload
+
+
+class _Clock:
+    """Deterministic clock for heartbeat tests (design §5: 'controllable
+    clock; heartbeat interval patched to 0.05 s')."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+
+def _finalize_capable_run(monkeypatch, tmp_path, *, on_progress,
+                          total_frames=2, cancel=None, concat_hook=None,
+                          workroot_extra=None):
+    """A one-chunk run whose extraction/upscale/segment steps are
+    stubbed; the concat path calls concat_hook so tests can stretch the
+    wall clock across finalize."""
+    _stub_upscale_internals(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_run(cmd, *, label, cancel=None):
+        calls.append((label, cmd))
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(2):
+                (out_dir / f"frame_{1 + i:08d}.png").write_bytes(
+                    png_header(1280, 720)
+                )
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+        elif label.startswith("upscale mezzanine concat"):
+            Path(cmd[-1]).write_bytes(b"mezzanine")
+            if concat_hook is not None:
+                concat_hook()
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+    return calls
+
+
+def test_finalize_heartbeat_pings_during_concat(monkeypatch, tmp_path):
+    """U-A1: the heartbeat pings on_progress every interval through the
+    concat block; pings carry the clamped 0.999 frac, the
+    'concatenating mezzanine' step, and heartbeat=True, and the
+    emission before the block carries the same step label."""
+    events = []
+
+    def slow_concat():
+        # Advance the fake clock in ~interval steps inside the concat
+        # subprocess so the heartbeat thread fires >= 2 times.
+        for _ in range(6):
+            time.sleep(0.06)
+
+    _finalize_capable_run(
+        monkeypatch, tmp_path,
+        on_progress=None,  # unused by helper path; events via closure
+        concat_hook=slow_concat,
+    )
+
+    captured = []
+
+    def on_progress(frac, eta, detail=None):
+        captured.append((frac, eta, detail))
+
+    monkeypatch.setattr(
+        upscale_mod, "_FINALIZE_HEARTBEAT_SECONDS", 0.05)
+
+    # Re-run with the capturing on_progress: total_frames=2 -> one chunk
+    # -> the shutil.move path; use the concat path with 2 chunks.
+    _stub_upscale_internals(monkeypatch, tmp_path)
+
+    def fake_run(cmd, *, label, cancel=None):
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            vf = cmd[cmd.index("-vf") + 1]
+            between = vf.split("between(n,")[1]
+            first = int(between.split(",")[0])
+            last = int(between.split(",")[1].split(")")[0])
+            for i in range(first, last + 1):
+                (in_dir / f"frame_{start_number + (i - first):08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+        elif label.startswith("upscale mezzanine concat"):
+            Path(cmd[-1]).write_bytes(b"mezzanine")
+            for _ in range(3):
+                time.sleep(0.07)
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+
+    run_dvd_upscale(
+        UpscalePlan(
+            input_path=str(tmp_path / "input.mkv"),
+            output_path=str(tmp_path / "out.mkv"),
+            workdir=str(tmp_path / "work"),
+            mode="720p",
+            duration_seconds=1,
+            total_frames=4,
+            fps="24000/1001",
+            chunk_frames=2,
+        ),
+        on_progress=on_progress,
+    )
+
+    finalize_events = [e for e in captured
+                       if e[2] and e[2].get("step") == FINALIZE_STEP_CONCAT]
+    assert finalize_events, "concat step must be announced"
+    # The emission (not a ping) carries no heartbeat key and clamps frac.
+    announce = finalize_events[0]
+    assert announce[0] == pytest.approx(0.999)
+    assert "heartbeat" not in announce[2]
+    # The pings: clamped frac, same step, heartbeat=True, eta None.
+    pings = finalize_events[1:]
+    assert len(pings) >= 2, f"expected >=2 heartbeat pings, saw {len(pings)}"
+    for frac, eta, detail in pings:
+        assert frac == pytest.approx(0.999)
+        assert eta is None
+        assert detail["heartbeat"] is True
+        assert detail["step"] == FINALIZE_STEP_CONCAT
+        assert detail["chunks"] == detail["chunk"] == 2
+
+
+def test_heartbeat_stops_cleanly_on_cancel_and_success(monkeypatch, tmp_path):
+    """U-A2: the heartbeat thread never leaks - success joins it, and a
+    cancel raised inside concat propagates EncodeCancelled with the
+    thread joined too (no live b2m-finalize-heartbeat afterwards)."""
+    import threading as _threading
+
+    monkeypatch.setattr(
+        upscale_mod, "_FINALIZE_HEARTBEAT_SECONDS", 0.05)
+    _stub_upscale_internals(monkeypatch, tmp_path)
+
+    def boom(cmd, *, label, cancel=None):
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+        elif label.startswith("upscale mezzanine concat"):
+            time.sleep(0.09)
+            raise EncodeCancelled("cancelled during concat")
+
+    monkeypatch.setattr(upscale_mod, "_run_process", boom)
+
+    before = {t.name for t in _threading.enumerate()}
+    with pytest.raises(EncodeCancelled):
+        run_dvd_upscale(
+            UpscalePlan(
+                input_path=str(tmp_path / "input.mkv"),
+                output_path=str(tmp_path / "out.mkv"),
+                workdir=str(tmp_path / "work"),
+                mode="720p",
+                duration_seconds=1,
+                total_frames=4,
+                fps="24000/1001",
+                chunk_frames=2,
+            ),
+            on_progress=lambda *a, **k: None,
+        )
+    time.sleep(0.2)
+    # The heartbeat thread is gone after the cancel path (joined in
+    # the finally) - no leak into the next run.
+    assert not any(
+        t.name == "b2m-finalize-heartbeat" and t.is_alive()
+        for t in _threading.enumerate()
+    )
+
+    # Success path: run to completion; the thread must be joined too.
+    def calm(cmd, *, label, cancel=None):
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+        elif label.startswith("upscale mezzanine concat"):
+            Path(cmd[-1]).write_bytes(b"mezzanine")
+
+    monkeypatch.setattr(upscale_mod, "_run_process", calm)
+    run_dvd_upscale(
+        UpscalePlan(
+            input_path=str(tmp_path / "input.mkv"),
+            output_path=str(tmp_path / "ok.mkv"),
+            workdir=str(tmp_path / "work2"),
+            mode="720p",
+            duration_seconds=1,
+            total_frames=4,
+            fps="24000/1001",
+            chunk_frames=2,
+        ),
+        on_progress=lambda *a, **k: None,
+    )
+    time.sleep(0.2)
+    assert not any(
+        t.name == "b2m-finalize-heartbeat" and t.is_alive()
+        for t in _threading.enumerate()
+    )
+
+
+def test_heartbeat_never_sets_eta(monkeypatch, tmp_path):
+    """U-A3: every finalize emission and every heartbeat ping carries
+    eta=None - _forecast_total owns time_remaining; a heartbeat ETA
+    would flash a bogus estimate on the card (6ca6216 lesson)."""
+    etas = []
+
+    def on_progress(frac, eta, detail=None):
+        etas.append(eta)
+
+    monkeypatch.setattr(
+        upscale_mod, "_FINALIZE_HEARTBEAT_SECONDS", 0.05)
+    _stub_upscale_internals(monkeypatch, tmp_path)
+
+    def fake_run(cmd, *, label, cancel=None):
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            for i in range(2):
+                (in_dir / f"frame_{start_number + i:08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1]
+                           ) if "-o" in cmd else None
+            if out_dir is None:
+                return
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment")
+        elif label.startswith("upscale mezzanine concat"):
+            Path(cmd[-1]).write_bytes(b"mezzanine")
+            for _ in range(3):
+                time.sleep(0.07)
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+    run_dvd_upscale(
+        UpscalePlan(
+            input_path=str(tmp_path / "input.mkv"),
+            output_path=str(tmp_path / "out.mkv"),
+            workdir=str(tmp_path / "work"),
+            mode="720p",
+            duration_seconds=1,
+            total_frames=4,
+            fps="24000/1001",
+            chunk_frames=2,
+        ),
+        on_progress=on_progress,
+    )
+    assert etas, "expected progress events"
+    assert all(e is None for e in etas)
+
+
+# ---------------------------------------------------------------------
+# Feature B: per-chunk resume (design §3). The default plan everywhere
+# below: fps=24000/1001, chunk_frames=2, total_frames=8 -> 4 chunks.
+
+def _resume_plan(tmp_path, *, mode="720p", total_frames=8):
+    return UpscalePlan(
+        input_path=str(tmp_path / "input.mkv"),
+        output_path=str(tmp_path / "out.mkv"),
+        workdir=str(tmp_path / "work"),
+        mode=mode,
+        duration_seconds=1,
+        total_frames=total_frames,
+        fps="24000/1001",
+        chunk_seconds=120,
+        chunk_frames=2,
+    )
+
+
+def _resume_env(monkeypatch, tmp_path):
+    """Stubbed binaries + a counting fake _run_process that fakes the
+    full pipeline for whichever chunk it is asked to compute."""
+    _stub_upscale_internals(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_run(cmd, *, label, cancel=None):
+        calls.append((label, cmd))
+        if label.startswith("upscale frame extraction"):
+            in_dir = Path(cmd[-1]).parent
+            in_dir.mkdir(parents=True, exist_ok=True)
+            start_number = int(cmd[cmd.index("-start_number") + 1])
+            vf = cmd[cmd.index("-vf") + 1]
+            between = vf.split("between(n,")[1]
+            first = int(between.split(",")[0])
+            last = int(between.split(",")[1].split(")")[0])
+            for i in range(first, last + 1):
+                (in_dir / f"frame_{start_number + (i - first):08d}.png").write_bytes(
+                    png_header(640, 360)
+                )
+        elif label.startswith("Real-ESRGAN"):
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(Path(cmd[cmd.index("-i") + 1]).glob("*.png")):
+                (out_dir / frame.name).write_bytes(png_header(1280, 720))
+        elif label.startswith("upscale mezzanine segment"):
+            Path(cmd[-1]).write_bytes(b"segment-payload")
+        elif label.startswith("upscale mezzanine concat"):
+            Path(cmd[-1]).write_bytes(b"mezzanine")
+
+    monkeypatch.setattr(upscale_mod, "_run_process", fake_run)
+    return calls
+
+
+def _seed_segments(workroot, count=4, payload=b"segment-payload"):
+    """chunk_0000..chunk_{count-1}/segment.mkv files, all 'complete'."""
+    for idx in range(count):
+        chunk = workroot / f"chunk_{idx:04d}"
+        chunk.mkdir(parents=True, exist_ok=True)
+        (chunk / "segment.mkv").write_bytes(payload)
+
+
+def _stub_manifest_probe_ok(monkeypatch):
+    """probe answers a matching count (2) at the plan fps for every
+    segment; the manifest fingerprint must ALSO match (test seeds it)."""
+    def fake_run(cmd, **kw):
+        return _fake_probe_result(frames=2, rate="24000/1001")
+    monkeypatch.setattr(upscale_mod.subprocess, "run", fake_run)
+
+
+def _manifest_for(tmp_path, **overrides):
+    workroot = tmp_path / "work"
+    # Mirror _resume_manifest_payload exactly (sorted keys; the
+    # attempt_started_at key is informational and ignored in compare).
+    binary = str(tmp_path / "realesrgan-ncnn-vulkan-stub")
+    payload = {
+        "version": 1,
+        "input_path": str(tmp_path / "input.mkv"),
+        "mode": "720p",
+        "binary_sha_basename": {"binary": binary, "model": "realesrgan-x2plus"},
+        "fps": "24000/1001",
+        "total_frames": 8,
+        "chunk_frames": 2,
+        "deinterlace": False,
+        "target_height": 720,
+        "segment_filter": "setsar=1",
+        "esrgan_scale": 2,
+    }
+    payload.update(overrides)
+    workroot.mkdir(parents=True, exist_ok=True)
+    (workroot / "resume_manifest.json").write_text(
+        _json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return workroot
+
+
+def test_resume_reuses_verified_segments(monkeypatch, tmp_path):
+    """U-B1: a matching manifest + verified segments -> the loop reuses
+    them ('resumed chunk' steps) and _run_process is never called for
+    extraction/upscale/segment on those chunks; the concat still runs."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    workroot = _manifest_for(tmp_path)
+    _seed_segments(workroot, count=4)
+    _stub_manifest_probe_ok(monkeypatch)
+
+    events = []
+
+    result = run_dvd_upscale(
+        _resume_plan(tmp_path),
+        on_progress=lambda frac, eta, detail=None: events.append(
+            (frac, detail)),
+    )
+    assert result == (str(tmp_path / "out.mkv"), 8)
+    # Zero extraction/upscale/segment subprocess work happened.
+    work_labels = [label for label, _ in calls
+                   if not label.startswith("upscale mezzanine concat")]
+    assert work_labels == []
+    # Every chunk reported 'resumed chunk' with an advancing frac.
+    resumed = [d for _, d in events if d and d.get("step") == "resumed chunk"]
+    assert len(resumed) == 4
+    assert [d["chunk"] for d in resumed] == [1, 2, 3, 4]
+    # The finalize announcement still fires (concat step, clamped frac).
+    assert any(
+        d and d.get("step") == FINALIZE_STEP_CONCAT for _, d in events)
+    # The output mezzanine was rebuilt via concat.
+    assert (tmp_path / "out.mkv").read_bytes() == b"mezzanine"
+
+
+def test_resume_recomputes_on_count_mismatch(monkeypatch, tmp_path):
+    """U-B2: one segment probes the wrong decode count -> exactly that
+    chunk recomputes; siblings are still reused."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    workroot = _manifest_for(tmp_path)
+    _seed_segments(workroot, count=4)
+
+    def fake_run(cmd, **kw):
+        # chunk_0002's segment probes 3 frames instead of 2.
+        if "chunk_0002" in " ".join(cmd):
+            return _fake_probe_result(frames=3, rate="24000/1001")
+        return _fake_probe_result(frames=2, rate="24000/1001")
+
+    monkeypatch.setattr(upscale_mod.subprocess, "run", fake_run)
+
+    run_dvd_upscale(_resume_plan(tmp_path))
+    extract_idx = [i for i, (label, _) in enumerate(calls)
+                   if label.startswith("upscale frame extraction")]
+    assert len(extract_idx) == 1, "exactly one chunk must recompute"
+    # The recomputed chunk is chunk 3 (index 2): between(n,4,5).
+    vf = calls[extract_idx[0]][1]
+    assert "between(n,4,5)" in vf[vf.index("-vf") + 1]
+
+
+def test_resume_recomputes_on_fps_mismatch(monkeypatch, tmp_path):
+    """U-B3: a segment stamped at the wrong clock (30000/1001 vs plan
+    24000/1001) recomputes - the count gate alone is blind to the
+    v0.2.34 clock-lie class."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    workroot = _manifest_for(tmp_path)
+    _seed_segments(workroot, count=4)
+
+    def fake_run(cmd, **kw):
+        if "chunk_0001" in " ".join(cmd):
+            return _fake_probe_result(frames=2, rate="30000/1001")
+        return _fake_probe_result(frames=2, rate="24000/1001")
+
+    monkeypatch.setattr(upscale_mod.subprocess, "run", fake_run)
+
+    run_dvd_upscale(_resume_plan(tmp_path))
+    extract_idx = [i for i, (label, _) in enumerate(calls)
+                   if label.startswith("upscale frame extraction")]
+    assert len(extract_idx) == 1
+    vf = calls[extract_idx[0]][1]
+    assert "between(n,2,3)" in vf[vf.index("-vf") + 1]
+
+
+def test_resume_fingerprint_mismatch_clears_workroot(monkeypatch, tmp_path):
+    """U-B4: a manifest from a different plan intent (mode 720p_anime)
+    -> the whole workroot is rmtree'd and every chunk recomputes; the
+    debug line records the fingerprint decision."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    # Manifest for the anime mode; the plan runs live-action.
+    workroot = _manifest_for(tmp_path, mode="720p_anime")
+    _seed_segments(workroot, count=4)
+    _stub_manifest_probe_ok(monkeypatch)
+    marker = workroot / "old_garbage.txt"
+    marker.write_text("stale from another intent")
+
+    debug_lines = []
+    monkeypatch.setattr(
+        upscale_mod, "_debug_line",
+        lambda workroot, text: debug_lines.append(text))
+
+    run_dvd_upscale(_resume_plan(tmp_path))
+    # The old workroot contents are gone (wholesale clear), including
+    # the marker - not silently reused.
+    assert not marker.exists()
+    # All 4 chunks were extracted (full recompute).
+    extract = [label for label, _ in calls
+               if label.startswith("upscale frame extraction")]
+    assert len(extract) == 4
+    # The debug lane records the fingerprint decision (§3.7).
+    assert any("fingerprint=mismatch" in line for line in debug_lines)
+
+
+def test_resume_corrupt_manifest_fails_closed(monkeypatch, tmp_path):
+    """U-B5: a truncated/corrupt manifest is a mismatch -> wholesale
+    recompute, no crash."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    workroot = tmp_path / "work"
+    workroot.mkdir(parents=True, exist_ok=True)
+    (workroot / "resume_manifest.json").write_text(
+        '{"version": 1, "mode": "720p", "fps": "24000/1')  # truncated
+    _seed_segments(workroot, count=4)
+    _stub_manifest_probe_ok(monkeypatch)
+
+    result = run_dvd_upscale(_resume_plan(tmp_path))
+    assert result == (str(tmp_path / "out.mkv"), 8)
+    extract = [label for label, _ in calls
+               if label.startswith("upscale frame extraction")]
+    assert len(extract) == 4
+
+
+def test_resume_decode_failure_recomputes(monkeypatch, tmp_path):
+    """U-B6: the segment probe itself fails (ffprobe nonzero exit) ->
+    that chunk recomputes; a healthy sibling still resumes."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    workroot = _manifest_for(tmp_path)
+    _seed_segments(workroot, count=4)
+
+    def fake_run(cmd, **kw):
+        if "chunk_0003" in " ".join(cmd):
+            class _Bad:
+                returncode = 1
+                stdout = ""
+                stderr = "ffprobe exploded"
+            return _Bad()
+        return _fake_probe_result(frames=2, rate="24000/1001")
+
+    monkeypatch.setattr(upscale_mod.subprocess, "run", fake_run)
+
+    run_dvd_upscale(_resume_plan(tmp_path))
+    extract = [label for label, _ in calls
+               if label.startswith("upscale frame extraction")]
+    assert len(extract) == 1
+    vf = calls[
+        [i for i, (l, _) in enumerate(calls)
+         if l.startswith("upscale frame extraction")][0]][1]
+    assert "between(n,6,7)" in vf[vf.index("-vf") + 1]
+
+
+def test_interrupted_mid_chunk_recomputes_that_chunk(monkeypatch, tmp_path):
+    """U-B7: an interruption mid-chunk leaves partial out/ PNGs but no
+    segment.mkv - the PNGs are NEVER resume units (§3.2): the chunk
+    recomputes from extract, and the partial out/ is cleared."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    workroot = _manifest_for(tmp_path)
+    _seed_segments(workroot, count=3)  # chunks 0-2 complete
+    # Chunk 3 was interrupted after upscaled PNGs, before segment mux.
+    partial_out = workroot / "chunk_0003" / "out"
+    partial_out.mkdir(parents=True, exist_ok=True)
+    (partial_out / "frame_00000007.png").write_bytes(png_header(1280, 720))
+    (partial_out / "frame_00000008.png").write_bytes(png_header(1280, 720))
+    _stub_manifest_probe_ok(monkeypatch)
+
+    seen_segments = []
+    _orig_run = upscale_mod._run_process
+
+    def spy_run(cmd, *, label, cancel=None):
+        # Capture the segment payload at mux time - the success path
+        # rmtree's the workroot afterwards (U-B8), so post-run reads
+        # would see nothing. The spy wraps the ORIGINAL fake (which
+        # writes the payload), reading the file AFTER it ran.
+        _orig_run(cmd, label=label, cancel=cancel)
+        if label.startswith("upscale mezzanine segment"):
+            seg_path = Path(cmd[-1])
+            seen_segments.append((seg_path.parent.name,
+                                   seg_path.read_bytes()))
+
+    monkeypatch.setattr(upscale_mod, "_run_process", spy_run)
+
+    run_dvd_upscale(_resume_plan(tmp_path))
+    extract = [label for label, _ in calls
+               if label.startswith("upscale frame extraction")]
+    assert len(extract) == 1  # only chunk 4 recomputed
+    # The recomputed chunk muxed a FRESH segment (its partial out/ PNGs
+    # were never resume material - §3.2).
+    assert ("chunk_0003", b"segment-payload") in seen_segments
+
+
+def test_success_still_removes_workroot(monkeypatch, tmp_path):
+    """U-B8: a completed run rmtree's the workroot even when chunks were
+    resumed - the resume value is spent once the mezzanine is built and
+    gated (regression pin on §3.5/§7.1)."""
+    _resume_env(monkeypatch, tmp_path)
+    workroot = _manifest_for(tmp_path)
+    _seed_segments(workroot, count=4)
+    _stub_manifest_probe_ok(monkeypatch)
+
+    run_dvd_upscale(_resume_plan(tmp_path))
+    assert not workroot.exists()
+
+
+def test_output_mezzanine_unlinked_even_on_full_resume(monkeypatch, tmp_path):
+    """U-B9: a stale output mezzanine from an interrupted concat is
+    replaced - concat is redone every attempt (§3.5); resume semantics
+    end at the segment layer."""
+    calls = _resume_env(monkeypatch, tmp_path)
+    workroot = _manifest_for(tmp_path)
+    _seed_segments(workroot, count=4)
+    _stub_manifest_probe_ok(monkeypatch)
+    stale = tmp_path / "out.mkv"
+    stale.write_bytes(b"truncated stale mezzanine from the killed run")
+
+    run_dvd_upscale(_resume_plan(tmp_path))
+    concat_calls = [c for c in calls
+                    if c[0].startswith("upscale mezzanine concat")]
+    assert len(concat_calls) == 1
+    assert stale.read_bytes() == b"mezzanine"
+
+
+def test_verify_segment_size_and_token_rules(tmp_path, monkeypatch):
+    """Direct pins on _verify_segment (§3.4): zero-byte file refuses
+    even before probing; a wrong-count probe refuses; a wrong-rate
+    probe refuses; a probe crash refuses; the happy path accepts."""
+    from bluray_to_mp4.upscale import _verify_segment
+
+    def probe(good):
+        def fake_run(cmd, **kw):
+            if good:
+                return _fake_probe_result(frames=2, rate="24000/1001")
+            class _Bad:
+                returncode = 1
+                stdout = ""
+                stderr = "x"
+            return _Bad()
+        monkeypatch.setattr(upscale_mod.subprocess, "run", fake_run)
+
+    seg = tmp_path / "segment.mkv"
+    seg.write_bytes(b"data")
+    probe(True)
+    assert _verify_segment(seg, 2, "24000/1001", ffmpeg_probe="ffprobe")
+    # Expected count mismatch.
+    assert not _verify_segment(
+        seg, 3, "24000/1001", ffmpeg_probe="ffprobe")
+    # Wrong rate token.
+    probe(False)
+    assert not _verify_segment(
+        seg, 2, "24000/1001", ffmpeg_probe="ffprobe")
+    # Zero-byte file (interrupted mux edge) never verifies.
+    seg.write_bytes(b"")
+    probe(True)
+    assert not _verify_segment(
+        seg, 2, "24000/1001", ffmpeg_probe="ffprobe")
+    # Missing file.
+    assert not _verify_segment(
+        tmp_path / "nope.mkv", 2, "24000/1001", ffmpeg_probe="ffprobe")
+
+
+def test_manifest_payload_ignores_attempt_started_at(tmp_path):
+    """§3.3 pin: the informational attempt_started_at field is excluded
+    from fingerprint comparison - a new attempt matches an old manifest
+    even though its timestamp differs."""
+    from bluray_to_mp4.upscale import (
+        _RESUME_MANIFEST_ATTEMPT_KEY,
+        _resume_manifest_matches,
+        _resume_manifest_payload,
+    )
+
+    plan = UpscalePlan(
+        input_path=str(tmp_path / "input.mkv"),
+        output_path=str(tmp_path / "out.mkv"),
+        workdir=str(tmp_path / "work"),
+        mode="720p",
+        duration_seconds=1,
+        total_frames=8,
+        fps="24000/1001",
+    )
+    payload = _resume_manifest_payload(
+        plan, binary="/bin/r", model="realesrgan-x2plus",
+        esrgan_scale=2, segment_filter="setsar=1",
+        total_frames=8, chunk_frames=2,
+    )
+    workroot = tmp_path / "work"
+    workroot.mkdir(parents=True)
+    (workroot / "resume_manifest.json").write_text(
+        _json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    # Same payload but a different attempt timestamp -> still a match.
+    payload[_RESUME_MANIFEST_ATTEMPT_KEY] = "1999-01-01T00:00:00"
+    assert _resume_manifest_matches(workroot, payload)
+    # A single meaningful field off (fps) -> mismatch.
+    payload["fps"] = "25"
+    assert not _resume_manifest_matches(workroot, payload)

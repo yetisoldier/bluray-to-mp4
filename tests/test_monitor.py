@@ -314,3 +314,39 @@ def test_python_module_entry_routes_watch_monitor(monkeypatch):
 
     assert module_main.main() == 0
     assert called == [True]
+
+
+def test_job_record_version_round_trip(server):
+    """T-D3 (v0.2.35 §4.5 D.4): a JobRecord built with a version
+    serializes through /history with the field present; a
+    default-constructed record serializes "" (pre-v0.2.35 records stay
+    renderable as an empty Ver cell, never a crash or a fabricated
+    attribution)."""
+    _, base, state = server
+    state.job_done(JobRecord(
+        name="Movie (2019).mp4", kind="movie",
+        duration_seconds=7200, encoder="x265",
+        version="0.2.35"))
+    state.job_done(JobRecord(name="Legacy.mp4", kind="movie",
+                            duration_seconds=3600, encoder="x265"))
+    code, history = _get(base + "/history?token=***", token="s3cret")
+    assert code == 200
+    # History is newest-first: the second job_done lands at index 0.
+    assert history["jobs"][0]["version"] == ""   # the legacy record
+    assert history["jobs"][1]["version"] == "0.2.35"
+
+
+def test_snapshot_and_health_carry_version(server):
+    """v0.2.35 §4.5 D.2.3: BOTH /status and /health carry the build's
+    version as a top-level field (both serve the snapshot); the value
+    equals bluray_to_mp4.__version__ - the single source."""
+    import bluray_to_mp4
+
+    _, base, state = server
+    state.begin("Disc", "dvd", series_mode=False, encoder="x265",
+                jobs_total=1)
+    code, health = _get(base + "/health")
+    assert code == 200
+    assert health["version"] == bluray_to_mp4.__version__
+    code, status = _get(base + "/status", token="s3cret")
+    assert status["version"] == bluray_to_mp4.__version__
