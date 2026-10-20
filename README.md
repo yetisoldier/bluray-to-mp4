@@ -1,13 +1,18 @@
 # bluray-to-mp4
 
+<p align="center"><em>Turn your Blu-ray and DVD discs into high-quality MP4s—no technical expertise required.</em></p>
+
+<p align="center">[Windows x64] [NVENC Optimized] [Private Use]</p>
+
+> [!IMPORTANT]
+> **Private Use Only:** This tool is for personal backups of discs you own. Keep the tool and its
+> output private; circumvention law varies by jurisdiction.
+
 A novice-friendly Windows desktop app that turns Blu-ray and DVD discs you
 own into MP4 files, private and personal-use only. Insert a disc, press
 Scan, review what it picked, press Start. You never need to learn what a
 "PGS stream" is: the app recommends which tracks to keep with plain-English
 reasons, and every recommendation has a dropdown you can override.
-
-> Personal backups of discs you own only. Keep the tool and its output
-> private; circumvention law varies by jurisdiction.
 
 **Current version: v0.2.36** (Windows x64, exe included)
 
@@ -16,17 +21,17 @@ reasons, and every recommendation has a dropdown you can override.
 1. Download `bluray-to-mp4-windows-x64.zip` from the
    [latest release](../../releases) and extract it anywhere
    (e.g. `C:\Tools\bluray-to-mp4`)
-2. Optional, one-time per PC: right-click `install-cert.ps1` in the app
-   folder and choose "Run with PowerShell" so Windows stops warning about
-   an unknown publisher (see Signing below)
+2. **Trust the Publisher:** Right-click `install-cert.ps1` in the app
+   folder $\rightarrow$ "Run with PowerShell". ✅ *Windows will no longer show "Unknown Publisher" warnings.*
 3. Install [MakeMKV](https://www.makemkv.com/download/) with a current key
    (the app drives its command-line engine)
 4. Insert a disc
-5. Run `bluray-to-mp4.exe`, pick the drive, press **Scan**
+5. Run `bluray-to-mp4.exe`, pick the drive, press **Scan**. ✅ *You should see a list of titles and recommended tracks.*
 6. On the **Review** page, check the recommended audio and subtitle picks;
-   use the dropdowns to change any of them
-7. Press **Start**. Watch live progress on the Encode page, or from another
-   machine on the LAN
+   use the dropdowns to change any of them.
+7. Press **Start**. ✅ *The Encode page will show live progress and ETAs.*
+
+Stuck? → [Troubleshooting](#-troubleshooting)
 
 ## The workflow
 
@@ -45,12 +50,21 @@ pick is flagged with a warning sign and an "English not confirmed" note so
 you can check it yourself. Picks are per-title and reset on a fresh scan.
 
 **Run.** Rip (MakeMKV) then encode (ffmpeg). Blu-ray targets **~2 GB/hour at
-1080p HEVC** (validated on a real disc at 1.9 GB/hr); DVD targets **1.0
-GB/hour at native SD resolution** (the v0.2.16 default; no upscaling, the
-1.5 GB/hr output looked identical at half the size). Audio is AAC 5.1.
+1080p HEVC**; DVD targets **1.0 GB/hour at native SD resolution**. Audio is AAC 5.1.
 Encoding uses NVIDIA NVENC fast mode when a GPU and compatible driver are
 present, x265 software quality mode otherwise. Interlaced sources are
 deinterlaced.
+
+## 📦 Output Targets
+The app automatically optimizes settings based on the disc type:
+
+| Disc Type | Target Resolution | Target Size | Audio / Subs |
+|---|---|---|---|
+| **Blu-ray** | 1080p HEVC | ~2 GB / hour | AAC 5.1 / Embedded OCR |
+| **DVD** | Native SD | ~1.0 GB / hour | AAC 5.1 / Embedded OCR |
+
+> [!TIP]
+> **NVENC Fast Mode:** If an NVIDIA GPU is detected, the app uses hardware acceleration to speed up encoding by ~10x.
 
 **Subtitles.** Image-based subtitles (PGS on Blu-ray, VobSub on DVD) are
 OCR'd to text by the bundled Subtitle Edit. The result is embedded **inside
@@ -73,6 +87,16 @@ everything still works offline.
 
 **Done.** The History page records each output with its size and achieved
 GB/hour, so every run self-grades against the size target.
+
+## ⚙️ How it works
+Get from disc to MP4 in a few simple steps:
+
+```mermaid
+graph LR
+  A[Scan] -- "MakeMKV rip" --> B[Review]
+  B -- "Novice-friendly picks" --> C[Run]
+  C -- "FFmpeg encode + OCR" --> D[Finished MP4]
+```
 
 ### Honest validation status (2026-10-04)
 
@@ -166,7 +190,7 @@ setting changes.
   beta: the beta key expires roughly monthly. When it does, the app tells
   you; grab the current key from the
   [MakeMKV forum](https://www.makemkv.com/forum/viewtopic.php?f=5) and
-  register it in the MakeMKV GUI. A purchased key is permanent.
+  register it in MakeMKV GUI. A purchased key is permanent.
 - **NVIDIA GPU** (optional): enables NVENC fast mode, roughly 10x faster
   than software. Without one, the app falls back to x265 quality mode
   automatically.
@@ -226,15 +250,14 @@ Force an encoder with `--encoder nvenc` or `--encoder x265` (default: auto).
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| Drive list spins forever / Setup check times out | A leftover `makemkvcon` process is holding the drive. End it in Task Manager. The app's message tells you this too (60s timeout since v0.2.16). |
-| "Evaluation period has expired" | MakeMKV beta key expired. Get the current key from the [forum](https://www.makemkv.com/forum/viewtopic.php?f=5) and register it in MakeMKV. |
-| "Failed to open disc" | Check the drive letter, clean the disc, confirm it is a video disc. |
-| Encode is slow | No NVENC detected (the Setup screen says why: driver/hardware vs software-only ffmpeg). Update the NVIDIA driver, or accept x265 mode. |
-| "Driver does not support the required nvenc API version" | You are on a pre-v0.2.4 build; current builds bundle ffmpeg n8.1 (SDK 13.0), which works on driver 590+. |
-| No subtitles next to / inside the MP4 | The run log says which step was skipped. OCR output that looks sparse is flagged with a warning; check the SRT sidecar in a text editor. |
-| Monitor unreachable from LAN | Check the "LAN monitoring" checkbox is on. Windows Firewall prompts on first launch; allow it on private networks. |
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| "Evaluation period has expired" | MakeMKV beta key expired | Get the current key from the [forum](https://www.makemkv.com/forum/viewtopic.php?f=5) and register it in MakeMKV. |
+| Drive list spins / Setup times out | Orphaned `makemkvcon` process | Open Task Manager and end all `makemkvcon` tasks. |
+| No subtitles in the MP4 | OCR failed or skipped | Check the run log. If OCR failed, the MP4 is still saved, but subs are missing. |
+| Encode is very slow | No NVIDIA GPU detected | The app is using x265 software mode. Update drivers or use a GPU-enabled PC. |
+
+Full guide → [docs/troubleshooting.md](docs/troubleshooting.md)
 
 ## Development
 
