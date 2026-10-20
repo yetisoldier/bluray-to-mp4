@@ -2,6 +2,44 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.36] - 2026-10-19
+
+### Fixed
+
+- **Hotfix: the finalize-phase heartbeat shipped dead on every
+  production path (v0.2.35's headline fix did not actually work).**
+  The pipeline's gate block handed the raw single-tuple `on_progress`
+  callback into `ProgressHeartbeat`, whose pings call it with three
+  arguments — every tick raised `TypeError`, silently swallowed by the
+  heartbeat's exception guard, so during the 20–65 minute frame-count
+  gate the monitor still froze and false-reported stuck. The exact
+  failure this release exists to kill. The gate block now wraps its
+  callback in the same 3-arg→tuple adapter the concat call site one
+  screen up already used. Found by Karen's v0.2.35 validation
+  (verdict FAIL, one Critical) via fault-injection FI-7, which also
+  proved the v0.2.35 suite could not lose this defect: 96/96 stayed
+  green with the gate heartbeat deleted entirely, because no test
+  drove the real gate block with a production-shaped callback. A new
+  test does exactly that and fails on the dead shape (0 pings land).
+- **The finalize step tuples said "chunk 163509 of 163509" instead of
+  "chunk 57 of 57"** — they carried the stage's total frame count in
+  the chunk fields; they now carry the actual chunk count, derived
+  from the same chunking the mezzanine was built with.
+- **The success-path provenance reason no longer claims "agrees" for a
+  cross-check that snapped nothing.** The C.4 audit clause was gated on
+  the mere presence of a container-format duration, so a run could
+  read "format-duration cross-check 26.3025 agrees" while its own
+  warning said the same figure matched no canonical rate. The "agrees"
+  wording is now gated on the format side actually snapping to the
+  same canonical token; non-agreement is recorded with honest wording.
+
+### Docs
+
+- Design doc §3.6's claim that gate-trip paths leave the resume workroot
+  was false as shipped (the success rmtree runs before the pipeline's
+  gates); the sentence is corrected — only an interruption mid-stage
+  leaves the workroot, which is the resume path that matters.
+
 ## [0.2.35] - 2026-10-19
 
 ### Fixed

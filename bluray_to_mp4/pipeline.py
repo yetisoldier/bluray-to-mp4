@@ -75,6 +75,8 @@ from .upscale import (
     UpscaleError,
     UpscalePlan,
     _FINALIZE_HEARTBEAT_SECONDS,
+    compute_chunk_bounds,
+    compute_chunk_frames,
     run_dvd_upscale,
     verify_mezzanine_clock,
     verify_mezzanine_frames,
@@ -1011,11 +1013,19 @@ def run_pipeline(
                             audio_probe, "format_seconds", None)
                         cross_rate_warning = None
                         format_rate = None
+                        # v0.2.36 D2: the snap decision's own token for
+                        # the format side - None when the format figure
+                        # is absent or unsnappable. The C.4 reason clause
+                        # compares against this, not against the mere
+                        # PRESENCE of format_seconds (v0.2.35 could say
+                        # 'agrees' for an unsnappable figure).
+                        _cross_token = None
                         if format_seconds:
                             format_rate = rip_total_frames / format_seconds
                             try:
                                 format_token, _format_snapped = (
                                     snap_to_canonical_rate(format_rate))
+                                _cross_token = format_token
                                 if format_token != rip_fps:
                                     raise UpscaleError(
                                         f"stamp-rate provenance split: the "
@@ -1081,6 +1091,19 @@ def run_pipeline(
                         # (run_dvd_upscale returned); retention (§4) needs
                         # it even when the gate below rejects the file.
                         job.upscale_mezzanine_path = mezz_path
+                        # v0.2.36 D3: the finalize tuple's chunk fields
+                        # must carry the CHUNK COUNT (57 on this disc),
+                        # not the stage's total frame count - the UI's
+                        # `chunk N of N` line reads these two fields
+                        # directly. The stage's second return is TOTAL
+                        # frames; the chunk count is derived from the
+                        # same plan inputs the stage itself uses, so
+                        # the numbers cannot drift from the chunking
+                        # the mezzanine was actually built with.
+                        _mezz_chunk_frames = compute_chunk_frames(
+                            120, rip_fps)
+                        _mezz_chunks = len(compute_chunk_bounds(
+                            rip_total_frames, _mezz_chunk_frames))
                         # v0.2.35 §2.1/§2.3 scope 2: the two gates emit a
                         # named finalize step each, and a 15 s heartbeat
                         # wraps BOTH calls - verify_mezzanine_frames is a
@@ -1092,23 +1115,35 @@ def run_pipeline(
                         # of N + the finalize step name); the heartbeat
                         # pings through it too (single-writer discipline:
                         # no on_stage, no second UI writer).
+                        # v0.2.36 D1: the heartbeat's callback MUST be
+                        # the same 3-arg->tuple adapter the stage call
+                        # site uses - the pipeline-level on_progress is
+                        # single-tuple shaped (workers.py/cli.py unpack
+                        # update[:3]), so a raw on_progress here raises
+                        # TypeError inside every _ping and the 15 s
+                        # heartbeat shipped DEAD on every production
+                        # path (Karen's FI-7 fault injection: 96/96 green
+                        # with the gate heartbeat deleted - nothing
+                        # drove this block with a production callback).
                         gate_heartbeat = ProgressHeartbeat(
-                            on_progress if on_progress else None,
+                            (lambda frac, eta, detail=None: on_progress(
+                                ("upscale", job.tid, frac, eta, detail)
+                            )) if on_progress else None,
                             interval=_FINALIZE_HEARTBEAT_SECONDS)
                         try:
                             if on_progress:
                                 on_progress((
                                     "upscale", job.tid, _FINALIZE_FRAC_GATE,
                                     None,
-                                    {"chunk": _mezz_stage_frames or 1,
-                                     "chunks": _mezz_stage_frames or 1,
+                                    {"chunk": _mezz_chunks,
+                                     "chunks": _mezz_chunks,
                                      "step": FINALIZE_STEP_VERIFY_FRAMES},
                                 ))
                             gate_heartbeat.start(
                                 _FINALIZE_FRAC_GATE,
                                 FINALIZE_STEP_VERIFY_FRAMES,
-                                int(_mezz_stage_frames or 1) - 1,
-                                int(_mezz_stage_frames or 1),
+                                _mezz_chunks - 1,
+                                _mezz_chunks,
                             )
                             # v0.2.33 gate (design §3): exact integer frame-count
                             # equality between mezzanine and rip - no tolerance
@@ -1127,19 +1162,21 @@ def run_pipeline(
                                 on_progress((
                                     "upscale", job.tid, _FINALIZE_FRAC_GATE,
                                     None,
-                                    {"chunk": _mezz_stage_frames or 1,
-                                     "chunks": _mezz_stage_frames or 1,
+                                    {"chunk": _mezz_chunks,
+                                     "chunks": _mezz_chunks,
                                      "step": FINALIZE_STEP_VERIFY_CLOCK},
                                 ))
                             gate_heartbeat.stop()
                             gate_heartbeat = ProgressHeartbeat(
-                                on_progress if on_progress else None,
+                                (lambda frac, eta, detail=None: on_progress(
+                                    ("upscale", job.tid, frac, eta, detail)
+                                )) if on_progress else None,
                                 interval=_FINALIZE_HEARTBEAT_SECONDS)
                             gate_heartbeat.start(
                                 _FINALIZE_FRAC_GATE,
                                 FINALIZE_STEP_VERIFY_CLOCK,
-                                int(_mezz_stage_frames or 1) - 1,
-                                int(_mezz_stage_frames or 1),
+                                _mezz_chunks - 1,
+                                _mezz_chunks,
                             )
                             # v0.2.34 clock gate (design §3), composed on the
                             # orthogonal axis: the frames gate proved the COUNT;
@@ -1154,12 +1191,23 @@ def run_pipeline(
                             )
                             gate_heartbeat.stop()
                             gate_heartbeat = None
-                            # v0.2.35 C.4 (Karen's parity ask): the SUCCESS path
-                            # records the provenance figures that justified the
-                            # stamp - same figures the rejection diagnostic
-                            # carries, in a run reason (no diagnostic JSON on
-                            # success; the retention artifact family stays
-                            # rejection-only per v0.2.33 §4).
+                            # v0.2.35 C.4 + v0.2.36 D2 (Karen's honesty
+                            # finding): the SUCCESS path records the
+                            # provenance figures that justified the
+                            # stamp - same figures the rejection
+                            # diagnostic carries, in a run reason (no
+                            # diagnostic JSON on success; the retention
+                            # artifact family stays rejection-only per
+                            # v0.2.33 §4). The cross-check clause is
+                            # gated on ACTUAL agreement - the format
+                            # side must have snapped (format_token is
+                            # not None) to the SAME canonical token as
+                            # the audio-stream derivation. v0.2.35
+                            # gated on `if format_seconds:` only, so a
+                            # 26.3-fps unsnappable format figure read
+                            # as '... agrees' in the same run whose
+                            # warning said it matched no canonical rate
+                            # (P-C4's live numbers).
                             reason_bits = [
                                 f"{job.output_name}: upscale stamp {rip_fps} "
                                 f"(derived {derived_rate:.4f} from "
@@ -1168,10 +1216,21 @@ def run_pipeline(
                                 + ("container" if audio_probe.from_format
                                    else "audio stream")
                             ]
-                            if format_seconds:
+                            if (format_rate is not None
+                                    and _cross_token == rip_fps):
                                 reason_bits.append(
                                     f"; format-duration cross-check "
                                     f"{format_rate:.4f} agrees")
+                            elif format_rate is not None:
+                                # The only non-agreement shape that can
+                                # reach the SUCCESS path: the format figure
+                                # snapped NOTHING (a snap-token mismatch
+                                # refuses the run upstream). Name it
+                                # honestly - never 'agrees'.
+                                reason_bits.append(
+                                    f"; format-duration cross-check "
+                                    f"{format_rate:.4f} matched no "
+                                    "canonical rate")
                             reason_bits.append(")")
                             result.reasons.append("".join(reason_bits))
                         finally:

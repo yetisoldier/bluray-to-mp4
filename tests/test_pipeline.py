@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -2852,3 +2853,237 @@ def test_dead_import_absent():
     from bluray_to_mp4 import ffprobe
     assert hasattr(ffprobe, "video_frame_rate"), (
         "the helper stays in ffprobe.py (v0.2.34 §1.4: not deleted)")
+
+
+# ----------------------------------------------------------------------
+# v0.2.36 hotfix: the gate-block heartbeat shipped DEAD on every
+# production path (D1), the finalize chunk fields carried total frames
+# instead of the chunk count (D3), and the C.4 'agrees' clause printed
+# agreement for a figure that snapped nothing (D2). Karen's fault
+# injection FI-7 proved the v0.2.35 suite could not lose the dead
+# heartbeat: 96/96 stayed green with the gate heartbeat deleted
+# entirely, because every existing test handed the pipeline an
+# event-list on_progress and never drove the REAL gate block with a
+# production-shaped callback.
+
+def _production_shaped_on_progress(monitor_state=None):
+    """D1's required fixture: a PRODUCTION-shaped on_progress - the
+    single-tuple 5-slot contract every real consumer unpacks
+    (workers.py `def on_progress(update)`, cli.py `def progress(update)`)
+    - that feeds a real MonitorState exactly the way the UI worker does.
+    Any heartbeat ping that arrives with the 3-arg _ping shape raises
+    TypeError (exactly what production did), and because _ping swallows
+    exceptions the monitor silently stops moving - the defect this
+    hotfix exists to kill. The returned callback unpacks update[:3] so
+    a raw on_progress(frac, None, detail) call blows up the same way
+    production did."""
+    from bluray_to_mp4.monitor import MonitorState
+
+    state = monitor_state if monitor_state is not None else MonitorState()
+    state.begin(disc_name="Disc", disc_type="dvd",
+                series_mode=False, encoder="x265", jobs_total=1)
+    state._finalize_ticks = 0
+
+    def on_progress(update):
+        # Production shape (workers.py:139 / cli.py:226): single tuple,
+        # unpack update[:3] - 3-arg heartbeat pings TypeError here.
+        kind, tid, frac = update[:3]
+        eta = update[3] if len(update) > 3 else None
+        detail = update[4] if len(update) > 4 else None
+        extra = {}
+        if isinstance(detail, dict):
+            extra = {
+                "chunk_current": detail.get("chunk"),
+                "chunk_total": detail.get("chunks"),
+                "step": detail.get("step"),
+            }
+            if detail.get("heartbeat"):
+                state._finalize_ticks += 1
+        state.update(progress=frac, eta_seconds=eta, **extra)
+        return None
+
+    return on_progress, state
+
+
+def test_gate_heartbeat_alive_on_production_shaped_callback(
+        tmp_path, monkeypatch):
+    """D1: the REAL gate block, driven with a production-shaped
+    (single-tuple) on_progress, must land monitor updates DURING a slow
+    frame-count gate - the heartbeat must ping through the same tuple
+    adapter the stage call site uses. FI-7 flip: with the adapter
+    removed every _ping raised TypeError (swallowed by _ping's `except
+    Exception: pass`), the monitor froze for the whole 20-65 min gate,
+    and this suite stayed green - this test must FAIL against the dead
+    heartbeat shape (and it also pins the D3 chunk fields on the way
+    through, since each ping carries them)."""
+    gate_started = threading.Event()
+
+    def slow_frames_gate(mezz, rip_total, *, probe_frames):
+        gate_started.set()
+        # Simulate a slow-but-not-stuck decode: hold ~0.35 s (>> 2
+        # heartbeat ticks at the patched 0.05 s interval). The heartbeat
+        # must keep the monitor alive across this window.
+        time.sleep(0.35)
+
+    monkeypatch.setattr(pipeline_mod, "_FINALIZE_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(pipeline_mod, "verify_mezzanine_frames",
+                        slow_frames_gate)
+    monkeypatch.setattr(pipeline_mod, "verify_mezzanine_clock",
+                        lambda *a, **k: None)
+
+    on_progress, state = _production_shaped_on_progress()
+    _run_dvd_pipeline(
+        monkeypatch, tmp_path,
+        upscale_env=lambda mp, tp: _dvd_upscale_env(mp, tp),
+        on_progress=on_progress,
+    )
+
+    # The gate ran with a production consumer attached.
+    assert gate_started.is_set()
+    snap = state.snapshot()
+    # D1: the heartbeat genuinely pinged through the production-shaped
+    # callback DURING the gate - more than one heartbeat tick landed
+    # (the gate held >= 2 intervals at the patched 0.05 s cadence). On
+    # the dead v0.2.35 shape every _ping raised TypeError inside _ping's
+    # `except Exception: pass`, zero ticks landed, and the monitor froze
+    # for the whole 20-65 min decode - FI-7's injected fault.
+    assert state._finalize_ticks >= 2, (
+        f"gate heartbeat delivered only {state._finalize_ticks} ping(s) "
+        "through the production-shaped callback - it is dead on this "
+        "shape (D1 regression)")
+    # D3 rides along on every ping: the step + chunk fields the monitor
+    # last saw are a finalize step and the CHUNK count (the run
+    # completes both gates, so the last step is the clock gate's -
+    # either finalize token proves the tuple carried a real step).
+    assert snap["step"] in (
+        pipeline_mod.FINALIZE_STEP_VERIFY_FRAMES,
+        pipeline_mod.FINALIZE_STEP_VERIFY_CLOCK)
+    assert snap["chunk_total"] == 57, (
+        "D3: the finalize tuple's chunks field must carry the CHUNK "
+        "count (163,509 frames / 2877-frame chunks = 57), not the "
+        "stage's total frame count")
+    assert snap["chunk_current"] == 57
+
+
+def test_finalize_chunks_field_carries_chunk_count_not_total_frames(
+        tmp_path, monkeypatch):
+    """D3 pin: the two finalize emissions carry the CHUNK COUNT (57 =
+    len(compute_chunk_bounds(163509, 2877))), never the stage's second
+    return (total frames = 163,509) - the UI reads 'chunk N of N' from
+    these two fields and would have shown 'chunk 163509 of 163509 -
+    verifying frame count'."""
+    monkeypatch.setattr(pipeline_mod, "verify_mezzanine_frames",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_mod, "verify_mezzanine_clock",
+                        lambda *a, **k: None)
+
+    events = []
+    _run_dvd_pipeline(
+        monkeypatch, tmp_path,
+        upscale_env=lambda mp, tp: _dvd_upscale_env(mp, tp),
+        on_progress=events.append,
+    )
+    finalize = [e for e in events if e[0] == "upscale" and len(e) > 4
+                and isinstance(e[4], dict)
+                and e[4].get("step") in (
+                    pipeline_mod.FINALIZE_STEP_VERIFY_FRAMES,
+                    pipeline_mod.FINALIZE_STEP_VERIFY_CLOCK)]
+    assert len(finalize) >= 2, "both finalize step emissions required"
+    for e in finalize:
+        assert e[4]["chunks"] == 57, (
+            f"finalize chunks must be the chunk count, got {e[4]['chunks']}")
+        assert e[4]["chunk"] == 57
+    # And nothing anywhere carries the 163,509 total in a chunk field.
+    for e in events:
+        if len(e) > 4 and isinstance(e[4], dict) and "chunks" in e[4]:
+            assert e[4]["chunks"] != _MAMMA_MIA_HWA_FRAMES
+
+
+def test_c4_reason_agrees_only_on_actual_agreement(
+        tmp_path, monkeypatch):
+    """D2 pin, agreement branch: when the format side snaps to the SAME
+    canonical token (163,509 / 6,818.4 s film, format 6,819.8 s -> both
+    24000/1001), the success reason carries 'format-duration
+    cross-check ... agrees'. v0.2.35 printed 'agrees' whenever
+    format_seconds existed; this pins the honest branch shape."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS)
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds",
+        lambda path, audio_index, *, binary="ffprobe": AudioDurationProbe(
+            _MAMMA_MIA_HWA_AUDIO_SECONDS, from_format=False,
+            stream_ordinal=audio_index or 0, format_seconds=6819.8))
+    plans = []
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale",
+        lambda plan, *, on_progress=None, cancel=None: (
+            plans.append(plan),
+            (plan.output_path, plan.total_frames))[1])
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    parity = [r for r in result.reasons
+              if "upscale stamp 24000/1001" in r]
+    assert parity, "success-path provenance reason required"
+    assert "23.9806" in parity[0]
+    assert "format-duration cross-check" in parity[0]
+    assert "agrees" in parity[0]
+    # 163,509 / 6,819.8 = 23.9756
+    assert "23.9756" in parity[0]
+
+
+def test_c4_reason_unsnappable_format_never_says_agrees(
+        tmp_path, monkeypatch):
+    """D2 pin, non-agreement branch (the P-C4 live numbers that caught
+    the lie): the format side derives 26.3 fps (unsnappable), the run
+    proceeds on the audio-stream figure with a warning - and the C.4
+    reason must NOT say 'agrees'. v0.2.35's `if format_seconds:` gate
+    printed 'format-duration cross-check 26.3025 agrees' in the same
+    run whose warning said the figure matched no canonical rate."""
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(
+        monkeypatch, total_frames=_MAMMA_MIA_HWA_FRAMES,
+        audio_duration=_MAMMA_MIA_HWA_AUDIO_SECONDS)
+    # 163,509 / 6,216 s = 26.30 -> matches no canonical rate.
+    monkeypatch.setattr(
+        pipeline_mod, "probe_audio_duration_seconds",
+        lambda path, audio_index, *, binary="ffprobe": AudioDurationProbe(
+            _MAMMA_MIA_HWA_AUDIO_SECONDS, from_format=False,
+            stream_ordinal=audio_index or 0, format_seconds=6216.0))
+    plans = []
+    monkeypatch.setattr(
+        pipeline_mod, "run_dvd_upscale",
+        lambda plan, *, on_progress=None, cancel=None: (
+            plans.append(plan),
+            (plan.output_path, plan.total_frames))[1])
+    monkeypatch.setattr(
+        pipeline_mod, "execute_encode", lambda *a, **k: None)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    warned = [w for w in result.warnings if "cross-check unsnappable" in w]
+    assert warned, "one-sided noise must warn, not refuse"
+    parity = [r for r in result.reasons
+              if "upscale stamp 24000/1001" in r]
+    assert parity, "the provenance reason still records the figures"
+    # The honesty pin: 'agrees' must never appear in the same run that
+    # warns the format figure snapped nothing.
+    assert "agrees" not in parity[0], (
+        "C.4 reason claims 'agrees' while the format side is "
+        "unsnappable - the v0.2.35 dishonesty (D2)")
+    # Honest wording instead: the figure is recorded as matching no
+    # canonical rate (26.3025), never as trusted agreement.
+    assert "matched no canonical rate" in parity[0]
+    assert "26.3" in parity[0]
