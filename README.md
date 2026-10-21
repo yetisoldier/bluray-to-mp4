@@ -50,7 +50,9 @@ pick is flagged with a warning sign and an "English not confirmed" note so
 you can check it yourself. Picks are per-title and reset on a fresh scan.
 
 **Run.** Rip (MakeMKV) then encode (ffmpeg). Blu-ray targets **~2 GB/hour at
-1080p HEVC**; DVD targets **1.0 GB/hour at native SD resolution**. Audio is AAC 5.1.
+1080p HEVC**; DVD targets **1.0 GB/hour at native SD resolution**. When AI
+upscaling is enabled for DVD content, the target increases to **1.5 GB/hour** to
+accommodate the higher-fidelity 720p result. Audio is AAC 5.1.
 Encoding uses NVIDIA NVENC fast mode when a GPU and compatible driver are
 present, x265 software quality mode otherwise. Interlaced sources are
 deinterlaced.
@@ -62,6 +64,7 @@ The app automatically optimizes settings based on the disc type:
 |---|---|---|---|
 | **Blu-ray** | 1080p HEVC | ~2 GB / hour | AAC 5.1 / Embedded OCR |
 | **DVD** | Native SD | ~1.0 GB / hour | AAC 5.1 / Embedded OCR |
+| **DVD (AI Upscale)** | 720p HEVC | ~1.5 GB / hour | AAC 5.1 / Embedded OCR |
 
 > [!TIP]
 > **NVENC Fast Mode:** If an NVIDIA GPU is detected, the app uses hardware acceleration to speed up encoding by ~10x.
