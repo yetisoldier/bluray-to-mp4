@@ -166,6 +166,37 @@ achieved GB/hour, so you can spot-check the size target without opening a
 calculator. (History is in-memory for this session; persistence is on the
 roadmap.)
 
+## 🚀 DVD AI Upscaling (v0.2.19+)
+
+For DVD content, you can optionally upscale the video to 720p using local AI
+(Real-ESRGAN). This is a high-fidelity process that removes MPEG-2 blocking and
+reconstructs edges, resulting in a significantly cleaner 720p image than
+conventional scaling.
+
+**How to use:**
+On the **Review** page, locate the **AI upscale** dropdown next to the size target.
+Choose:
+- **Off** (Default): Standard SD encode.
+- **720p**: General-purpose AI upscale (best for live-action).
+- **720p (anime)**: Specialized model for cel-shaded content (best for anime).
+
+**Customer Benefits:**
+- **Interruption Resilience:** The app uses chunk-based processing. If a run is
+  interrupted, it resumes from the last completed chunk rather than starting over.
+- **Precision Timing:** A frame-exact gate ensures the upscaled result matches
+  the original source frame-for-frame.
+- **Sync Guarantee:** The app rejects any audio/video drift before the final
+  encode, ensuring the result remains perfectly in sync.
+- **Fail-Open Safety:** If the AI stage fails, the app automatically falls back
+  to encoding the original SD rip so you still get a working file.
+
+**Honest Limitations:**
+- **Runtime:** AI upscaling is computationally intensive. A full-length
+  movie can take several hours (e.g., 5-7h for live-action on an RTX 3090 Ti).
+- **Visuals:** While it dramatically improves clarity, it is not a "magic"
+  remaster; some AI-flavored artifacts (such as waxy faces in medium shots)
+  may occur.
+
 ## Remote monitoring
 
 A read-only HTTP status server ships **on by default** (`0.0.0.0:8765`),
