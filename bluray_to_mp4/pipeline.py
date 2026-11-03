@@ -14,7 +14,9 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -284,11 +286,31 @@ def execute_encode(
     proc = subprocess.Popen(
         [binary, *args, "-progress", "pipe:1", "-nostats"],
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,  # v0.2.37 (L3): was DEVNULL
         text=True,
         encoding="utf-8",
         errors="replace",
     )
+    # v0.2.37 (L3): keep the encode failure diagnosable - drain stderr on a
+    # daemon thread into a bounded tail (same idiom as upscale._run_process)
+    # so EncodeError names the actual ffmpeg reason (bad filter, codec,
+    # disk full, NVENC driver failure), matching rip/OCR/mux parity.
+    stderr_tail: deque[str] = deque(maxlen=50)
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        try:
+            for line in proc.stderr:
+                stderr_tail.append(line.rstrip())
+        finally:
+            try:
+                proc.stderr.close()
+            except OSError:
+                pass
+
+    drain = threading.Thread(
+        target=_drain_stderr, daemon=True, name="b2m-ffmpeg-stderr")
+    drain.start()
     total_us = max(duration_seconds, 1) * 1_000_000
     started = time.time()
     assert proc.stdout is not None
@@ -315,8 +337,11 @@ def execute_encode(
     finally:
         proc.stdout.close()
         rc = proc.wait()
+        drain.join(timeout=1)
     if rc != 0 and not (cancel is not None and cancel()):
-        raise EncodeError(f"ffmpeg exited with code {rc}")
+        detail = [line for line in stderr_tail if line][-6:]
+        suffix = f": {' | '.join(detail)[:600]}" if detail else ""
+        raise EncodeError(f"ffmpeg exited with code {rc}{suffix}")
     elif cancel is not None and cancel() and rc != 0:
         raise EncodeCancelled("cancelled by user")
 
@@ -462,6 +487,22 @@ def _resolve_gbph(value: float | None, media_type: str | None) -> float | None:
     return None if value is None or abs(value - default) < 1e-9 else value
 
 
+def _gbph_with_upscale_default(value: float | None, upscale_mode: str) -> float | None:
+    """v0.2.37 (M1): the DVD AI-upscale size target (DVD_UPSCALE_GB_PER_HOUR)
+    is a DEFAULT, never an override.
+
+    Applies only when the caller supplied no explicit target (None) and the
+    normalized upscale mode is on. Any supplied value - including one that
+    _resolve_gbph will collapse to the media-type default - passes through
+    untouched, so an explicit user value always wins over the upscale
+    default in BOTH the CLI and GUI lanes. The GUI always supplies an
+    explicit spin value, so this helper only ever defaults CLI-shaped runs.
+    """
+    if value is None and upscale_mode != "off":
+        return DVD_UPSCALE_GB_PER_HOUR
+    return value
+
+
 def run_pipeline(
     index: int,
     outdir: str,
@@ -515,6 +556,10 @@ def run_pipeline(
     target_gb_per_hour (v0.2.18, Review-page size target): explicit value
     wins over the media-type default; None (or a value equal to the
     disc's default) leaves EncodePlan on its built-in default.
+    v0.2.37 (M1): with `dvd_upscale_mode != "off"` and no explicit value
+    (None), the DVD-upscale default `DVD_UPSCALE_GB_PER_HOUR` (1.5)
+    applies instead of the DVD default; a supplied value always wins
+    over that upscale default.
 
     dvd_upscale_mode (v0.2.19): DVD-only optional upscale contract:
     "off", "720p", or "720p_anime". Non-DVD scans force this to "off".
@@ -567,6 +612,18 @@ def run_pipeline(
         result.reasons.append(
             "DVD AI upscale planned: "
             + ("720p anime" if upscale_mode == "720p_anime" else "720p")
+        )
+
+    # v0.2.37 (M1): 1.5 GB/hour is the DEFAULT for upscaled DVD, applied
+    # only when no explicit target was supplied; an explicit value always
+    # wins. Applied once here so BOTH EncodePlan sites (the plan lane and
+    # the final encode lane) resolve the identical value.
+    if target_gb_per_hour is None and upscale_mode != "off":
+        target_gb_per_hour = _gbph_with_upscale_default(
+            target_gb_per_hour, upscale_mode)
+        result.reasons.append(
+            "DVD AI upscale size target: 1.5 GB/hour (the default for "
+            "upscaled DVD; an explicit size target always wins over it)"
         )
 
     if guess.is_series:
@@ -850,8 +907,21 @@ def run_pipeline(
                         on_progress=_rip_progress if on_progress else None,
                         on_info=_rip_info if on_stage else None,
                         cancel=cancel,
+                        # v0.2.37 (M3): constrain the no-summary recovery
+                        # to THIS job's file; a preserved leftover from
+                        # another job must never be handed back.
+                        expected_names=[os.path.basename(job.input_path)],
                     )
-                    job.input_path = saved[0] if saved else job.input_path
+                    # Prefer the exact expected path when the returned
+                    # list carries one (normcase: Windows case-insensitive
+                    # volumes); otherwise trust MakeMKV's own MSG:3307
+                    # report order exactly as before.
+                    job.input_path = next(
+                        (p for p in saved
+                         if os.path.normcase(p)
+                         == os.path.normcase(job.input_path)),
+                        saved[0] if saved else job.input_path,
+                    )
 
                 stage(f"Probing {os.path.basename(job.input_path)} ...")
                 streams = probe_streams(job.input_path)
@@ -1271,7 +1341,16 @@ def run_pipeline(
                         media_type=disc.media_type or "bluray",
                         encoder=result.encoder,
                         audio_sid=nth_ordinal(streams, audio),
-                        deinterlace=deinterlace,
+                        # v0.2.37 (L4): encoding FROM the mezzanine must not
+                        # re-deinterlace - the mezzanine was deinterlaced at
+                        # extraction (UpscalePlan.deinterlace /
+                        # upscale._prepare_filter); a second yadif only
+                        # softens the AI output. The fail-open lane
+                        # (video_input_path None: original rip) and the
+                        # no-upscale lane keep the probed flag.
+                        deinterlace=(
+                            deinterlace if video_input_path is None else False
+                        ),
                         target_gb_per_hour=_resolve_gbph(
                             target_gb_per_hour, disc.media_type),
                     )

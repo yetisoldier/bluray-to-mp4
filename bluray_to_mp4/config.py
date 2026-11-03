@@ -59,6 +59,17 @@ class Settings:
             for name in ("monitor_enabled", "monitor_host", "monitor_port",
                          "monitor_token", "monitor_cfg_version"):
                 setattr(settings, name, getattr(defaults, name))
+        # v0.2.37 (L2): self-heal a corrupt monitor port at load. An
+        # unparseable or out-of-range value resets to the shipped default
+        # (8765), not a clamped edge value: the config carried no
+        # legitimate intent to preserve, and the default is where the
+        # port-walk already starts healthiest.
+        try:
+            settings.monitor_port = int(settings.monitor_port)
+        except (TypeError, ValueError):
+            settings.monitor_port = cls().monitor_port
+        if not 0 <= settings.monitor_port <= 65535:
+            settings.monitor_port = cls().monitor_port
         return settings
 
     def save(self) -> None:

@@ -191,6 +191,70 @@ def test_rip_titles_no_summary_empty_outdir_still_raises(tmp_path):
         rip_titles(0, [0], str(out), runner=fake_runner(script))
 
 
+# ---------------------------------------------------------------------
+# v0.2.37 (M3): the no-summary recovery lane must return only files
+# THIS rip could have produced. The v0.2.12 purge preserves other
+# planned jobs' leftover rips, so "every .mkv in outdir" can name a
+# neighbor's episode (EXP-5: "Ep 10.mkv" sorted before the fresh
+# "Ep 2.mkv" and was encoded under Ep 2's name).
+
+_NO_SUMMARY_SCRIPT = [
+    'MSG:1005,0,1,"MakeMKV started","%1 started","MakeMKV v2.0.0"',
+    'MSG:3307,0,2,"File 00803.mpls was added","File %1 added","00803.mpls","1"',
+    "PRGV:65536,65536,65536",
+]
+
+
+def test_rip_titles_recovery_filters_to_expected_names(tmp_path):
+    """EXP-5 shape: the outdir holds a leftover "Ep 10.mkv" plus this
+    rip's fresh "Ep 2.mkv", and the runner emitted NO 3307 .mkv lines
+    and NO summary - recovery must return exactly Ep 2.mkv, never the
+    alphabetically-first leftover."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "Ep 10.mkv").write_bytes(b"leftover from another job")
+    (out / "Ep 2.mkv").write_bytes(b"fresh rip of title 2")
+
+    saved = rip_titles(
+        0, [2], str(out), runner=fake_runner(_NO_SUMMARY_SCRIPT),
+        expected_names=["Ep 2.mkv"],
+    )
+    assert saved == [str(out / "Ep 2.mkv")]
+
+
+def test_rip_titles_recovery_fails_closed_when_expected_missing(tmp_path):
+    """Fail closed: the expected file is absent and only another job's
+    leftover exists - raise MakeMkvError naming expected vs found
+    instead of silently handing back the wrong episode."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "Ep 10.mkv").write_bytes(b"leftover from another job")
+
+    with pytest.raises(MakeMkvError) as exc:
+        rip_titles(
+            0, [2], str(out), runner=fake_runner(_NO_SUMMARY_SCRIPT),
+            expected_names=["Ep 2.mkv"],
+        )
+    message = str(exc.value)
+    assert "Ep 2.mkv" in message    # expected
+    assert "Ep 10.mkv" in message   # found
+
+
+def test_rip_titles_recovery_expected_names_case_insensitive(tmp_path):
+    """Basename matching is normcase-based (Windows-honest): expected
+    "Ep 2.mkv" matches an on-disk "EP 2.MKV" (the listing filter already
+    lowercases the extension check; the basename comparison is normcase)."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "EP 2.MKV").write_bytes(b"fresh rip of title 2")
+
+    saved = rip_titles(
+        0, [2], str(out), runner=fake_runner(_NO_SUMMARY_SCRIPT),
+        expected_names=["Ep 2.mkv"],
+    )
+    assert saved == [str(out / "EP 2.MKV")]
+
+
 def test_make_runner_timeout_kills_and_reaps_child(monkeypatch):
     """QW-3: wait(timeout) expiring must kill the still-running child
     (no second orphan makemkvcon), reap it, and re-raise the timeout so

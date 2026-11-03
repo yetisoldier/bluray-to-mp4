@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -220,6 +221,30 @@ def test_cli_parser_smoke():
     assert args.dvd_upscale == "720p"
     assert parser.parse_args(["scan", "0"]).index == 0
     assert parser.parse_args(["drives"]).func is not None
+
+
+# v0.2.37 (M1): the CLI gains --gb-per-hour, the same explicit size-target
+# override the GUI spinbox already supplies (same 0.5-4.0 range); absent,
+# it stays None so the engine's default resolution is untouched.
+
+def test_cli_parser_gb_per_hour_flag():
+    args = build_parser().parse_args(
+        ["run", "0", "--out", "x", "--gb-per-hour", "2.5"])
+    assert args.gb_per_hour == 2.5
+
+    # Absent flag -> None (the upscale default lane still applies).
+    args = build_parser().parse_args(["run", "0", "--out", "x"])
+    assert args.gb_per_hour is None
+
+
+def test_cli_parser_gb_per_hour_rejects_out_of_range_and_non_number():
+    # Range matches the UI spinbox; reject (exit 2), never clamp.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["run", "0", "--out", "x", "--gb-per-hour", "9"])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["run", "0", "--out", "x", "--gb-per-hour", "abc"])
 
 
 # ----------------------------------------------------------------------
@@ -465,6 +490,61 @@ def test_execute_encode_eta_contract(tmp_path, monkeypatch):
     assert seen[0] == (pytest.approx(0.001), None)  # no ETA below 2%
     assert seen[1][0] == pytest.approx(0.5)
     assert seen[1][1] is not None  # ETA present once past 2%
+
+
+# ----------------------------------------------------------------------
+# v0.2.37 (L3): encode failures carry ffmpeg's stderr tail. The fake
+# ffmpeg is `sys.executable -c` (cross-platform; no /bin/sh, no skip).
+
+def test_execute_encode_error_carries_stderr_tail():
+    """A failing encode names the ACTUAL ffmpeg reason: 'exited with
+    code 3' prefix preserved, plus the stderr tail ('disk full')."""
+    from bluray_to_mp4.pipeline import EncodeError
+
+    with pytest.raises(EncodeError) as exc:
+        execute_encode(
+            ["-c", "import sys; sys.stderr.write('Conversion failed: "
+             "disk full\\n'); sys.exit(3)"],
+            duration_seconds=10, binary=sys.executable,
+        )
+    message = str(exc.value)
+    assert "exited with code 3" in message
+    assert "disk full" in message
+
+
+def test_execute_encode_error_without_stderr_keeps_prefix():
+    """A silent ffmpeg failure keeps the exact legacy message - the
+    prefix contract (existing match= patterns, user muscle memory)."""
+    from bluray_to_mp4.pipeline import EncodeError
+
+    with pytest.raises(EncodeError) as exc:
+        execute_encode(
+            ["-c", "import sys; sys.exit(2)"],
+            duration_seconds=10, binary=sys.executable,
+        )
+    assert str(exc.value) == "ffmpeg exited with code 2"
+
+
+def test_execute_encode_stderr_pipe_keeps_stdout_progress_parsing():
+    """stderr capture must not disturb the stdout -progress parsing:
+    a fake writing out_time_us= lines to stdout AND a stderr note
+    still reports progress and exits cleanly."""
+    seen = []
+    execute_encode(
+        ["-c",
+         "import sys\n"
+         "sys.stdout.write('out_time_us=10000\\n')\n"
+         "sys.stdout.write('out_time_us=5000000\\n')\n"
+         "sys.stdout.write('progress=end\\n')\n"
+         "sys.stdout.flush()\n"
+         "sys.stderr.write('frame= 1 fps=0.0\\n')\n"],
+        duration_seconds=10, binary=sys.executable,
+        on_progress=lambda frac, eta: seen.append((frac, eta)),
+    )
+    assert len(seen) == 2
+    assert seen[0] == (pytest.approx(0.001), None)
+    assert seen[1][0] == pytest.approx(0.5)
+    assert seen[1][1] is not None
 
 
 # ----------------------------------------------------------------------
@@ -1616,6 +1696,61 @@ def test_gbph_none_keeps_media_type_default(tmp_path):
             == dvd_defaulted.jobs[0].encode_args)
 
 
+# ---------------------------------------------------------------------
+# v0.2.37 (M1): the DVD AI-upscale size target is a DEFAULT, never an
+# override. A bare `--dvd-upscale` run (no size-target input anywhere)
+# plans and encodes at the documented 1.5 GB/hour; an explicit value -
+# including one _resolve_gbph collapses to the media-type default -
+# always wins over the 1.5 default in BOTH the CLI and GUI lanes.
+
+def test_cli_upscale_defaults_to_1_5_gbph(tmp_path):
+    """FR-M1a: a CLI-shaped run (`dvd_upscale_mode` set, no
+    target_gb_per_hour) plans the 1.5 GB/hour budget, not the DVD 1.0
+    default, and records an honest reason line."""
+    from bluray_to_mp4.encode import estimate_video_bitrate_kbps
+
+    result = run_pipeline(
+        0, str(tmp_path / "dvd"), encoder="x265", dry_run=True,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines()),
+        dvd_upscale_mode="720p",
+    )
+    args = result.jobs[0].encode_args
+    assert _b_v_kbps(args) == estimate_video_bitrate_kbps(
+        target_gb_per_hour=1.5, audio_channels=6)
+    # Observability: the CLI prints reasons, so the applied default
+    # must name itself (and that an explicit value beats it).
+    reason = next(
+        (r for r in result.reasons if "1.5 GB/hour" in r), None)
+    assert reason is not None
+    assert "default" in reason
+
+
+@pytest.mark.parametrize("value", [0.5, 1.0, 2.0, 3.5])
+def test_upscale_default_never_overrides_explicit(tmp_path, value):
+    """FR-M1c (explicit always wins): any supplied target crosses the
+    upscale default untouched. 1.0 is the collapse-edge: the caller-
+    supplied DVD-default value honors _resolve_gbph's collapse contract
+    and wins over the 1.5 upscale default - the plan is the DVD 1.0
+    budget, NOT 1.5."""
+    from bluray_to_mp4.encode import estimate_video_bitrate_kbps
+
+    result = run_pipeline(
+        0, str(tmp_path / "dvd"), encoder="x265", dry_run=True,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines()),
+        dvd_upscale_mode="720p",
+        target_gb_per_hour=value,
+    )
+    assert _b_v_kbps(result.jobs[0].encode_args) == (
+        estimate_video_bitrate_kbps(
+            target_gb_per_hour=value, audio_channels=6))
+    # The 1.0 edge case must resolve to the DVD 1.0 plan, not 1.5.
+    if value == 1.0:
+        assert _b_v_kbps(result.jobs[0].encode_args) == estimate_video_bitrate_kbps(
+            target_gb_per_hour=1.0, audio_channels=6)
+    # No default-applied reason was added for an explicit value.
+    assert not any("default for upscaled DVD" in r for r in result.reasons)
+
+
 def test_dvd_upscale_dry_run_plans_mezzanine_video_input(tmp_path):
     """v0.2.19: DVD AI-upscale dry-runs expose the future mezzanine
     video input while keeping audio mapped from the original rip."""
@@ -1698,6 +1833,45 @@ def test_dvd_upscale_real_run_uses_mezzanine_video_input(tmp_path, monkeypatch):
     assert result.jobs[0].upscale_mezzanine_path == plan.output_path
 
 
+def test_upscale_default_both_encode_plan_sites_agree(tmp_path, monkeypatch):
+    """v0.2.37 (M1) FR-M1a on the real-run lane: with upscale on and NO
+    explicit target, BOTH EncodePlan sites resolve the identical 1.5
+    GB/hour budget - the plan/dry-run lane and the final-encode lane
+    (captured via the real execute_encode seam)."""
+    from bluray_to_mp4.encode import estimate_video_bitrate_kbps
+
+    _stub_probe(
+        monkeypatch, width=720, height=480,
+        sample_aspect_ratio="32:27", display_aspect_ratio="16:9",
+        subtitle_count=0,
+    )
+    _stub_frame_preflight(monkeypatch)
+    captures = {"encode": []}
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        return (plan.output_path, plan.total_frames)
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        captures["encode"].append(args)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+    )
+    assert result.jobs and result.jobs[0].completed
+    expected = estimate_video_bitrate_kbps(
+        target_gb_per_hour=1.5, audio_channels=6)
+    assert _b_v_kbps(captures["encode"][0]) == expected
+    # The plan lane (rebuilt in-place on the job during the real run)
+    # agrees with the final-encode lane byte-for-byte on the budget.
+    assert _b_v_kbps(result.jobs[0].encode_args) == expected
+
+
 def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):
     from bluray_to_mp4.upscale import UpscaleError
 
@@ -1725,6 +1899,78 @@ def test_dvd_upscale_failure_falls_open_to_original_rip(tmp_path, monkeypatch):
     assert inputs == [result.jobs[0].input_path]
     assert any("DVD AI upscale failed" in w for w in result.warnings)
     assert any("encoded the original DVD rip instead" in w for w in result.warnings)
+
+
+# v0.2.37 (L4): the mezzanine was ALREADY deinterlaced at extraction
+# (UpscalePlan.deinterlace -> upscale._prepare_filter); encoding FROM it
+# must not apply a second yadif. The fail-open lane (original rip) keeps
+# the probed flag.
+
+def test_upscale_mezzanine_encode_does_not_double_deinterlace(
+        tmp_path, monkeypatch):
+    """Interlaced source (force_deinterlace=True) + successful upscale:
+    the final encode consumes the mezzanine and contains no yadif at
+    all - the AI output is progressive FFV1 already."""
+    _stub_probe(
+        monkeypatch, width=720, height=480,
+        sample_aspect_ratio="32:27", display_aspect_ratio="16:9",
+        subtitle_count=0,
+    )
+    _stub_frame_preflight(monkeypatch)
+    captures = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        return (plan.output_path, plan.total_frames)
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        captures.append(args)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p",
+        force_deinterlace=True,
+    )
+    assert result.jobs and result.jobs[0].completed
+    # Encoding FROM the mezzanine: no yadif anywhere in the args.
+    assert "yadif" not in captures[0]
+    # ...and the video input really was the mezzanine (the lane under test).
+    inputs = [captures[0][i + 1] for i, arg in enumerate(captures[0]) if arg == "-i"]
+    assert inputs[0].replace("\\", "/").endswith(".upscale/title_00_720p.mkv")
+
+
+def test_upscale_failopen_encode_keeps_deinterlace(tmp_path, monkeypatch):
+    """Fail-open lane (upscale failed -> encoding the original rip):
+    the probed/forced deinterlace flag still applies - yadif stays."""
+    from bluray_to_mp4.upscale import UpscaleError
+
+    _stub_probe(monkeypatch, width=720, subtitle_count=0)
+    _stub_frame_preflight(monkeypatch)
+    captures = []
+
+    def fake_upscale(plan, *, on_progress=None, cancel=None):
+        raise UpscaleError("simulated engine failure")
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        captures.append(args)
+
+    monkeypatch.setattr(pipeline_mod, "run_dvd_upscale", fake_upscale)
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_DVD_SCAN.splitlines() + _rip_tail(outdir)),
+        dvd_upscale_mode="720p_anime",
+        force_deinterlace=True,
+    )
+    assert result.jobs and result.jobs[0].completed
+    vf = captures[0][captures[0].index("-vf") + 1]
+    assert "yadif" in vf
 
 
 def test_upscale_unsnappable_rate_refuses_before_gpu(tmp_path, monkeypatch):
@@ -2303,6 +2549,94 @@ def test_gbph_override_reaches_real_run_encode_args(tmp_path, monkeypatch):
     assert result.jobs and all(j.completed for j in result.jobs)
     dry = _movie_run(tmp_path / "dry", target_gb_per_hour=3.0)
     assert _b_v_kbps(captured[0]) == _b_v_kbps(dry.jobs[0].encode_args)
+
+
+# =====================================================================
+# v0.2.37 (M3): the no-summary MakeMKV recovery lane, wired through the
+# pipeline, must never hand a preserved leftover from another planned
+# job to the encoder. EXP-5 shape at the pipeline layer: a two-episode
+# series where episode 2's rip survived an interrupted earlier run
+# (the v0.2.12 purge preserves it) and sorts BEFORE episode 10's fresh
+# product, so the old "take saved[0]" picked the wrong episode.
+
+
+def _tinfo27_names(scan_text):
+    """tid -> TINFO:27 filename map from a MakeMKV robot scan."""
+    return {
+        int(m.group(1)): m.group(2)
+        for m in re.finditer(r'TINFO:(\d+),27,0,"([^"]+)"', scan_text)
+    }
+
+
+# Series scan with EXP-5's trap: job 0's expected file name
+# ("...E10...") sorts AFTER job 1's preserved leftover ("...E02..."),
+# so the old unconditional recovery picked the leftover first.
+_EXP5_SERIES_SCAN = SERIES_DISC_OUTPUT.replace(
+    'TINFO:0,27,0,"Breaking_Bad_S01E01_t00.mkv"',
+    'TINFO:0,27,0,"Breaking_Bad_S01E10_t00.mkv"',
+)
+
+
+def _silent_rip_runner(scan_text, outdir):
+    """Runner reproducing MakeMKV 2.0.0's silent-success DVD shape:
+    rip calls write the rip's product to disk but emit NO MSG:3307 .mkv
+    lines and NO "N titles saved" summary."""
+    names = _tinfo27_names(scan_text)
+
+    def run(binary, args):
+        if "mkv" in args:  # the rip command (scan uses "info")
+            for tid in (int(t) for t in args[4].split(",")):
+                mkv = Path(outdir) / ".rip" / names[tid]
+                mkv.parent.mkdir(parents=True, exist_ok=True)
+                mkv.write_bytes(b"fresh rip product")
+            yield (
+                'MSG:1005,0,1,"MakeMKV started","%1 started",'
+                '"MakeMKV v2.0.0"'
+            )
+            yield "PRGV:65536,65536,65536"
+        else:
+            yield from scan_text.splitlines()
+    return run
+
+
+def test_pipeline_encodes_the_expected_episode_not_a_leftover(
+        tmp_path, monkeypatch):
+    """FR-M3: with only episode 2's leftover preserved in .rip and a
+    silent-success rip, the pipeline encodes episode 10's OWN product -
+    the recovery lane filtered to expected_names - never the leftover
+    that sorts before it."""
+    _stub_probe(monkeypatch)
+    captured = []
+
+    def fake_encode(args, *, duration_seconds, binary="ffmpeg",
+                    on_progress=None, cancel=None):
+        captured.append(args)
+
+    monkeypatch.setattr(pipeline_mod, "execute_encode", fake_encode)
+    outdir = tmp_path / "out"
+    names = _tinfo27_names(_EXP5_SERIES_SCAN)
+    expected0 = os.path.join(str(outdir), ".rip", names[0])
+    leftover = os.path.join(str(outdir), ".rip", names[1])
+    # Pre-create only the OTHER episode's rip (v0.2.12 purge preserves
+    # it); the current job's file is absent, forcing the re-rip lane.
+    Path(leftover).parent.mkdir(parents=True, exist_ok=True)
+    Path(leftover).write_bytes(b"leftover from a killed earlier run")
+
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=_silent_rip_runner(_EXP5_SERIES_SCAN, outdir),
+    )
+    # The leftover's name lexically sorts before the fresh product's:
+    # the EXP-5 trap is live (saved[0] would have been the leftover).
+    assert sorted([names[0], names[1]])[0] == names[1]
+    assert result.jobs and all(j.completed for j in result.jobs)
+    assert result.errors == []
+    # Job 0's encode input is exactly the file its scan named.
+    inputs = [args[args.index("-i") + 1] for args in captured]
+    assert inputs[0] == expected0
+    assert inputs[0] != leftover
+    # Companion: episode 2's own encode input is its own product.
+    assert inputs[1] == os.path.join(str(outdir), ".rip", names[1])
 
 
 # =====================================================================

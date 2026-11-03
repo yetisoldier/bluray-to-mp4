@@ -2,6 +2,82 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.37] - 2026-11-03
+
+### Fixed
+
+- **CLI `--dvd-upscale` finally encodes at the documented 1.5 GB/hour
+  size target (M1).** The pairing existed only in the UI (the spinbox
+  bump); a CLI upscale run silently resolved to the DVD 1.0 GB/h default
+  - 39% below the documented budget - and `DVD_UPSCALE_GB_PER_HOUR` was
+  a dead constant. The 1.5 GB/h pairing is now a pipeline-level DEFAULT
+  applied when no explicit target was supplied, on every interface, and
+  the CLI gains `--gb-per-hour` (0.5-4.0, the GUI spinbox's range) to
+  set an explicit target. **An explicit value always wins over the
+  upscale default** - including an explicit 1.0, which still honors the
+  collapse-to-media-default contract and encodes at 1.0, and `_resolve_gbph`
+  itself is untouched.
+- **`/health` now serves only a liveness payload (M2; security-relevant).**
+  The unauthenticated endpoint used to serve the FULL status snapshot -
+  disc name, current output filename, stage, progress, ETA, and warnings
+  containing absolute local paths - to any LAN peer on a monitor that
+  binds 0.0.0.0 by default, defeating the token's purpose. `/health` (and
+  `/`) now return exactly `{"ok": true, "busy": <bool>, "version":
+  "<build>"}`; every run detail stays behind the token at `/status` and
+  `/history` (which keep their 401s).
+- **The MakeMKV no-summary recovery lane can no longer encode a leftover
+  episode from another planned job (M3).** When MakeMKV finishes without
+  per-file 3307 lines or a saved-count summary (the observed 2.0.0 DVD
+  shape), recovery used to return every `.mkv` in the output dir - but
+  the v0.2.12 purge deliberately preserves other planned jobs' rips, so
+  the pipeline could take alphabetically-first leftover (e.g. "Ep 10.mkv")
+  and encode it under Ep 2's name, silently. `rip_titles` now accepts
+  `expected_names` (the scan's TINFO:27 filenames); the recovery returns
+  only those and fails CLOSED with an expected-vs-found diagnostic when
+  none match. Without `expected_names`, the legacy recovery is unchanged.
+- **Deliberately subtitle-less runs no longer show a false "subtitle
+  missing (unknown reason)" warning (L1).** The "Include subtitles"
+  toggle off, or an explicit "(no subtitles)" Review-page pick, is
+  intended behavior - the synthesized warning fired only for runs that
+  actually wanted subtitles; pipeline-generated warnings still pass
+  through.
+- **A corrupt monitor port can no longer crash startup with a
+  non-OSError (L2).** A hand-edited config carrying 65536+ hit an
+  AssertionError (empty candidate range) and a negative port hit
+  OverflowError at bind - both escaping every `except OSError` handler.
+  The port self-heals to the 8765 default at config load, is
+  defensively clamped at the port-walk entry, and the bare `assert`
+  became an honest OSError.
+- **Encode failures now carry ffmpeg's stderr tail (L3).** The encode
+  stage discarded stderr entirely, so failures reported only an exit
+  code while rip/OCR/mux all name their reason. `EncodeError` now keeps
+  its `ffmpeg exited with code N` prefix and appends the last stderr
+  lines (bad filter, codec, disk full, NVENC driver failure).
+- **Encoding FROM an AI mezzanine no longer double-deinterlaces (L4).**
+  The final encode applied a second `yadif` to the already-deinterlaced
+  progressive mezzanine, softening every frame of the AI output; the
+  fail-open lane (original rip) keeps the probed flag.
+- **The Setup screen only credits the headless `seconv` binary (L6).**
+  A GUI-only Subtitle Edit install lit the Subtitle Edit row green even
+  though the OCR wrapper refuses the GUI binary at run time (fail-open,
+  no subs). The row now resolves seconv only, probing the standalone
+  install dirs for the converter itself.
+
+### Known/deferred
+
+- L5 (cancel path drops partial results from History/monitor) and L7
+  (24-vs-24000/1001 snap-window overlap; documented C.3 residual) are
+  deferred by design - each needs its own design pass (see the v0.2.37
+  architecture spec §5).
+- Informational items noted, untouched: dead geometry helpers (I1), the
+  rip summary counter cleanup (I2, folded into M3), the forecast "~2h"
+  comment vs 20-minute fallback (I4), stage-prefix case mix (I5), the
+  stale monitor `step` field (I6), dry-run NVENC probe (I7), the
+  documented private-repo token posture incl. console print, `==`
+  compare, and query-string auth (I8/I9), `parse_line` int() robustness
+  (I10), CLI drives/scan timeouts (I11), frames-gate rerun cost (I12),
+  and Windows long-path handling (I15).
+
 ## [0.2.36] - 2026-10-19
 
 ### Fixed

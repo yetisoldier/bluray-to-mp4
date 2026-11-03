@@ -335,6 +335,7 @@ def rip_titles(
     on_info: Callable[[str], None] | None = None,
     timeout: float | None = None,
     cancel: Callable[[], bool] | None = None,
+    expected_names: list[str] | None = None,
 ) -> list[str]:
     """Rip the given title ids to MKV files in outdir; return created paths.
 
@@ -344,6 +345,14 @@ def rip_titles(
     the long BD+ open phase, when PRGV legitimately sits at 0. cancel()
     -> True terminates makemkvcon (default runner) or stops consuming
     output mid-rip and raises EncodeCancelled.
+
+    `expected_names` (v0.2.37, M3): basenames this rip is allowed to
+    produce (from the scan's TINFO:27 filenames). The no-summary recovery
+    lane filters the outdir listing to these names (normcase-compared)
+    and fails closed - raising MakeMkvError naming expected vs found -
+    when none match, so a preserved leftover from another job can never
+    be returned (and encoded) in place of this rip's product. None keeps
+    the legacy unconditional recovery.
     """
     run = runner or make_runner(timeout)
     # Options must precede the command word (usage.txt:
@@ -362,7 +371,6 @@ def rip_titles(
         f"--minlength={minlength}",
     ]
     saved: list[str] = []
-    saved_count = 0  # titles-saved count from RIP_COMPLETED lines
     failures: list[str] = []
     for line in run(binary, args):
         if cancel is not None and cancel():
@@ -387,29 +395,27 @@ def rip_titles(
                 if params[0].lower().endswith(".mkv"):
                     saved.append(params[0])
             elif code in RIP_COMPLETED_CODES and params:
-                if params[0].isdigit():
-                    if int(params[0]) == 0 and not failures:
-                        raise MakeMkvError(
-                            "MakeMKV finished but saved 0 titles.")
-                    saved_count = max(saved_count, int(params[0]))
+                if params[0].isdigit() and int(params[0]) == 0 and not failures:
+                    raise MakeMkvError(
+                        "MakeMKV finished but saved 0 titles.")
         elif kind == "PRGV" and on_progress is not None:
             current, _total, maximum = payload
             on_progress(current / maximum if maximum else 0.0, payload)
     if not saved:
         if failures:
             raise TitleRipError(failures[0])
-        # v0.2.16 (validation run 9, 14:52): this recovery used to be
-        # gated on MakeMKV 2.0.0's MSG:5004 "N titles saved" summary
-        # line, which the DVD run never emitted - so a 100% rip raised
-        # "finished without producing any files" while the .mkv sat in
-        # the output dir. With no saved-file MSG:3307 .mkv entries and
-        # no title failures, recover .mkv files from outdir
-        # UNCONDITIONALLY: the pipeline's run-start purge guarantees
-        # the dir was empty except this run's output, so every .mkv
-        # there is this rip's product. An empty outdir (no summary
-        # line AND no files) is still a genuine failure. The v0.2.15
-        # saved_count>0 path is subsumed: summary-or-not, found files
-        # return; a saved_count with no .mkv on disk still raises.
+        # v0.2.16 (validation run 9, 14:52): MakeMKV 2.0.0's DVD shape
+        # emits neither MSG:3307 .mkv entries nor a "N titles saved"
+        # summary, so a 100% rip raised "finished without producing any
+        # files" while the .mkv sat in the output dir - recover .mkv files
+        # from outdir. An empty outdir is still a genuine failure.
+        # v0.2.37 (M3): the v0.2.12 purge PRESERVES other planned jobs'
+        # leftover rips, so "every .mkv in outdir" is NOT this rip's
+        # product. When expected_names is given, the recovery returns only
+        # those (normcase-compared basenames) and fails CLOSED - naming
+        # expected vs found - rather than handing the pipeline a
+        # neighbor's episode (EXP-5: "Ep 10.mkv" sorted before the fresh
+        # "Ep 2.mkv" and was encoded under Ep 2's name).
         found = []
         if os.path.isdir(str(outdir)):
             found = [
@@ -417,6 +423,25 @@ def rip_titles(
                 for name in sorted(os.listdir(str(outdir)))
                 if name.lower().endswith(".mkv")
             ]
+        if expected_names is not None:
+            # normcase + lowercase fold: normcase is the repo's Windows-honest
+            # path-equality idiom, but it is a no-op on POSIX - and the
+            # recovery's case-insensitive contract (validation spec §6:
+            # "Ep 2.mkv" must match an on-disk "EP 2.MKV") gates this suite
+            # on BOTH platforms, so the fold is applied explicitly too
+            # (byte-identical to normcase alone on the Windows release target).
+            wanted = {os.path.normcase(n).lower() for n in expected_names}
+            matched = [
+                p for p in found
+                if os.path.normcase(os.path.basename(p)).lower() in wanted
+            ]
+            if matched:
+                return matched
+            raise MakeMkvError(
+                "makemkvcon finished without producing any of the expected "
+                f"file(s) [{', '.join(expected_names)}]; the output dir holds: "
+                + (", ".join(os.path.basename(p) for p in found)
+                   or "no .mkv files"))
         if found:
             return found
         raise MakeMkvError("makemkvcon finished without producing any files.")

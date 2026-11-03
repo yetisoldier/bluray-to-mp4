@@ -30,6 +30,24 @@ def _excerpt(text: str, limit: int = 200) -> str:
     return joined[:limit] + "..." if len(joined) > limit else joined
 
 
+def _gb_per_hour_arg(text: str) -> float:
+    """argparse type for --gb-per-hour: range-checked explicit size target.
+
+    Range matches the UI's spinbox (0.5-4.0 GB/hour). Rejects rather than
+    clamps: a typo'd target must fail loudly at the boundary, not silently
+    become a different encode.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--gb-per-hour must be a number, got {text!r}")
+    if not 0.5 <= value <= 4.0:
+        raise argparse.ArgumentTypeError(
+            f"--gb-per-hour must be between 0.5 and 4.0 GB/hour, got {value}")
+    return value
+
+
 # ffmpeg stderr: "Stream #0:2[0x...]: Subtitle: pgs (...)" -> (subtitle, pgs)
 _FF_STREAM_RE = re.compile(r"Stream #0:\d+.*?: (Video|Audio|Subtitle): ([\w.-]+)")
 
@@ -247,6 +265,7 @@ def cmd_run(args) -> int:
         year=args.year,
         tmdb_key=args.tmdb_key,
         dvd_upscale_mode=args.dvd_upscale,
+        target_gb_per_hour=args.gb_per_hour,
         on_stage=stage,
         on_progress=progress if not args.dry_run else None,
     )
@@ -524,6 +543,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["off", "720p", "720p_anime"],
         default="off",
         help="DVD-only AI upscale before encode: off, 720p, or 720p_anime",
+    )
+    p_run.add_argument(
+        "--gb-per-hour",
+        type=_gb_per_hour_arg,
+        default=None,
+        metavar="GBPH",
+        help="size target in GB per hour of video (0.5-4.0). Defaults: "
+             "2.0 Blu-ray, 1.0 DVD, 1.5 when --dvd-upscale is on. An "
+             "explicit value always wins over the upscale default.",
     )
     p_run.add_argument("--tmdb-key", default="",
                         help="TMDB v3 API key for episode-title/year autofill "

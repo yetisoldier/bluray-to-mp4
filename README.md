@@ -14,7 +14,7 @@ Scan, review what it picked, press Start. You never need to learn what a
 "PGS stream" is: the app recommends which tracks to keep with plain-English
 reasons, and every recommendation has a dropdown you can override.
 
-**Current version: v0.2.36** (Windows x64, exe included)
+**Current version: v0.2.37** (Windows x64, exe included)
 
 ## Quick start
 
@@ -177,18 +177,16 @@ conventional scaling.
 On the **Review** page, locate the **AI upscale** dropdown next to the size target.
 Choose:
 - **Off** (Default): Standard SD encode.
-- **720p**: General-purpose AI upscale (best for live-action).
+- **720p**: General-purpose AI upscale using the RealESRGAN x2plus engine (best for live-action).
 - **720p (anime)**: Specialized model for cel-shaded content (best for anime).
 
 **Customer Benefits:**
 - **Interruption Resilience:** The app uses chunk-based processing. If a run is
-  interrupted, it resumes from the last completed chunk rather than starting over.
+  interrupted, it resumes from the last completed chunk rather than starting over (v0.2.35).
 - **Precision Timing:** A frame-exact gate ensures the upscaled result matches
-  the original source frame-for-frame.
-- **Sync Guarantee:** The app rejects any audio/video drift before the final
-  encode, ensuring the result remains perfectly in sync.
-- **Fail-Open Safety:** If the AI stage fails, the app automatically falls back
-  to encoding the original SD rip so you still get a working file.
+  the original source frame-for-frame (v0.2.33).
+- **Sync Guarantee:** The app derives the stamp rate from decode truth and rejects any audio/video drift before the final encode, ensuring the result remains perfectly in sync (v0.2.27, v0.2.31, v0.2.34).
+- **Fail-Open Safety:** If the AI stage fails or the rip's clock cannot be verified, the app automatically falls back to encoding the original SD rip so you still get a working file.
 
 **Honest Limitations:**
 - **Runtime:** AI upscaling is computationally intensive. A full-length
@@ -208,6 +206,14 @@ curl -H "Authorization: Bearer <token>" http://<windows-pc>:8765/status
 curl -H "Authorization: Bearer <token>" http://<windows-pc>:8765/history
 curl http://<windows-pc>:8765/health        # token-free liveness ping
 ```
+
+```json
+{"ok": true, "busy": false, "version": "0.2.37"}
+```
+
+Disc names, output filenames, progress, and warnings are only in
+`/status` and `/history`, which require the token. The `/health` ping is
+token-free by design and exposes nothing else.
 
 The default token is in `bluray_to_mp4/config.py`; override it in
 `%USERPROFILE%\.bluray-to-mp4\config.json`. Windows Firewall will prompt on
@@ -270,17 +276,22 @@ bluray-to-mp4 scan 0                     # analyze disc 0, show recommendations
 bluray-to-mp4 run 0 --out "D:\Movies" --dry-run    # preview the full plan
 bluray-to-mp4 run 0 --out "D:\Movies"    # rip + encode for real
 bluray-to-mp4 run 0 --out "D:\Movies" --dvd-upscale 720p    # DVD-only AI upscale
+bluray-to-mp4 run 0 --out "D:\Movies" --dvd-upscale 720p --gb-per-hour 1.5   # size-target override (0.5-4.0)
 bluray-to-mp4 probe-stream 0             # experimental: stream-from-disc
-                                         # investigation (v0.2.17, in progress)
+                                          # investigation (v0.2.17, in progress)
 ```
 
 Series override when the disc label is unhelpful:
+
 
 ```
 bluray-to-mp4 run 0 --out "D:\TV" --series-name "Breaking Bad" --season 1 --start-episode 5
 ```
 
 Force an encoder with `--encoder nvenc` or `--encoder x265` (default: auto).
+Size-target defaults: 2.0 GB/hour Blu-ray, 1.0 DVD, 1.5 DVD AI-upscale;
+`--gb-per-hour` (0.5–4.0) sets an explicit target that always wins over the
+upscale default.
 
 ## Troubleshooting
 

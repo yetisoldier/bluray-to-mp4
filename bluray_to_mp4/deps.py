@@ -261,17 +261,22 @@ def check_subtitle_edit() -> DependencyCheck:
         "seconv",
         env_var="B2M_SUBTITLE_EDIT",
         search_dirs=binaries._subtitle_edit_dirs(),
-        exe_names=["seconv.exe", "seconv", "SubtitleEdit.exe", "SubtitleEdit"],
+        exe_names=["seconv.exe", "seconv"],
     )
     if found:
         return DependencyCheck(
             "Subtitle Edit", True, f"found at {found}", SUBTITLE_EDIT_URL,
             required=False,
         )
-    # Common Windows install location fallback.
+    # v0.2.37 (L6): the OCR wrapper REFUSES the Subtitle Edit GUI binary at
+    # run time (subtitles._refuse_gui_binary - the SE 5.x GUI has no
+    # unattended mode), so a green Setup row must be about seconv - the
+    # headless converter - not the GUI exe. Standalone SE installs ship
+    # seconv.exe next to SubtitleEdit.exe, so probe those dirs for the
+    # converter itself.
     for candidate in (
-        r"C:\Program Files\Subtitle Edit\SubtitleEdit.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Subtitle Edit\SubtitleEdit.exe"),
+        r"C:\Program Files\Subtitle Edit\seconv.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Subtitle Edit\seconv.exe"),
     ):
         if os.path.exists(candidate):
             return DependencyCheck(

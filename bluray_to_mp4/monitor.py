@@ -4,10 +4,11 @@ A dependency-free (stdlib http.server) read-only status service that runs
 inside the app (and optionally beside CLI runs). The same store is fed by
 pipeline callbacks and the UI, so any run is monitorable remotely:
 
-    GET /health   -> {"ok": true, "busy": ...}
-    GET /status   -> full live state: current stage, per-title progress,
-                     ETA, warnings, last completed outputs
-    GET /history  -> recent completed jobs (newest first)
+    GET /health   -> {"ok": true, "busy": <bool>, "version": "<build>"}
+                     (token-free liveness ping; nothing else is exposed)
+    GET /status   -> full live state (token required): current stage,
+                     per-title progress, ETA, warnings, last errors
+    GET /history  -> recent completed jobs (token required)
 
 Requests must carry the configured token as a Bearer header or ?token=
 query parameter unless the token is empty (local-only default). The
@@ -318,6 +319,22 @@ class MonitorState:
             payload["health"] = classify_snapshot(payload)
             return payload
 
+    def liveness(self) -> dict:
+        """v0.2.37 (M2): the unauthenticated /health payload - a pure
+        liveness ping. Exactly three whitelisted fields; the full snapshot
+        (disc name, output filenames, warnings with absolute paths) stays
+        behind the token at /status. Whitelist on purpose: adding a field
+        here is a deliberate, reviewable act, never a snapshot growth
+        accident. `busy` and `version` are the documented ping semantics
+        (module docstring since v0.1.x; v0.2.35 D.2.3 build identity).
+        """
+        with self._lock:
+            return {
+                "ok": True,
+                "busy": self.busy,
+                "version": _pkg.__version__,
+            }
+
     def history(self, limit: int = 50) -> list[dict]:
         with self._lock:
             return [
@@ -366,7 +383,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
         path = self.path.split("?", 1)[0].rstrip("/")
         if path in ("", "/health"):
-            self._send(200, {"ok": True, **self.server.state.snapshot()})  # type: ignore[attr-defined]
+            # v0.2.37 (M2): a real liveness ping - three whitelisted
+            # fields, no auth, nothing else. Run detail requires the token.
+            self._send(200, self.server.state.liveness())  # type: ignore[attr-defined]
             return
         if not self._authorized():
             self._send(401, {"error": "missing or invalid token"})
@@ -465,12 +484,24 @@ def start_server_with_fallback(
             host=host, port=port, token=token, monitor_state=monitor_state)
         return server, base, server.server_address[1]
 
+    # v0.2.37 (L2): a hand-edited/corrupt config can carry any integer (or
+    # worse). Clamp the configured port into the legal range BEFORE the
+    # walk so an out-of-range value can never assemble an empty candidate
+    # range (AssertionError) or reach bind() (OverflowError) - neither is
+    # an OSError, so both escaped every handler (validation EXP-9).
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 8765
+    port = max(0, min(port, 65535))
+
     first_error: OSError | None = None
     attempts = max(0, int(fallback_attempts))
     # v0.2.29 (Karen's validation): clamp the walk to 65535 - binding
     # above that raises OverflowError, which is NOT an OSError, so it
     # would escape both this handler and the UI's except OSError and
     # crash startup for a configured port near the top of the range.
+    # v0.2.37 (L2): the configured-port edges above now clamp too.
     for candidate in range(port, min(port + attempts + 1, 65536)):
         try:
             server, base = start_server(
@@ -483,8 +514,12 @@ def start_server_with_fallback(
         except OSError as exc:
             if first_error is None:
                 first_error = exc
-    assert first_error is not None
-    raise first_error
+    if first_error is not None:
+        raise first_error
+    # Structurally unreachable after the clamp (range is provably
+    # non-empty): keep an honest OSError instead of a bare assert so a
+    # future edit can never leak a non-OSError through this contract.
+    raise OSError(f"no monitor port candidate from configured port {port}")
 
 
 def stop_server() -> bool:

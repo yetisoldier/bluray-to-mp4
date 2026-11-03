@@ -22,6 +22,12 @@ def _get(url: str, token: str | None = None):
         return resp.status, json.loads(resp.read().decode())
 
 
+def _get_body(url: str) -> tuple[int, str]:
+    """(status, raw body text) for unauthenticated body-string assertions."""
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        return resp.status, resp.read().decode()
+
+
 @pytest.fixture
 def server():
     state = MonitorState()
@@ -38,12 +44,27 @@ def server():
 
 
 def test_health_open_status_token_gated(server):
+    """v0.2.37 (M2): /health serves ONLY the three-field liveness
+    whitelist {ok, busy, version} - the full snapshot moved behind the
+    token at /status (the old /health full-snapshot shape leaked disc
+    names, output filenames, and warnings without auth)."""
+    import bluray_to_mp4
+
     _, base, state = server
     state.begin("Test Disc", "bluray", series_mode=True, encoder="nvenc", jobs_total=4)
 
-    # /health is always open and carries the busy flag
+    # /health is always open: the minimal liveness contract, and nothing else
     code, payload = _get(base + "/health")
-    assert code == 200 and payload["ok"] and payload["busy"]
+    assert code == 200
+    assert set(payload) == {"ok", "busy", "version"}
+    assert payload["ok"] is True
+    assert payload["busy"] is True
+    assert payload["version"] == bluray_to_mp4.__version__
+
+    # "/" behaves identically (same handler branch by design)
+    code, root = _get(base + "/")
+    assert code == 200 and set(root) == {"ok", "busy", "version"}
+    assert root["busy"] is True
 
     # /status requires the token
     with pytest.raises(Exception):
@@ -56,6 +77,39 @@ def test_health_open_status_token_gated(server):
     # ?token= query works too (handy from a browser or curl)
     code, status = _get(base + "/status?token=s3cret")
     assert code == 200 and "progress" in status
+
+
+def test_health_leaks_no_run_detail(server):
+    """v0.2.37 (M2) FR-M2: with a run in flight (job name + warning with
+    an absolute path in the state), the unauthenticated /health payload
+    carries none of the run-detail fields and neither sensitive string
+    appears anywhere in the raw response body - run detail stays behind
+    the token at /status (which still 401s without it)."""
+    _, base, state = server
+    state.begin("SECRET_DISC_NAME", "bluray",
+                series_mode=False, encoder="nvenc", jobs_total=4)
+    state.update(current_job="Private Title (2019).mp4")
+    state.update(warning="C:\\Users\\e\\output\\Private Title (2019).mp4 "
+                         "retained for inspection")
+
+    code, payload = _get(base + "/health")
+    assert code == 200
+    sensitive_keys = {
+        "disc", "current_job", "stage", "progress", "eta_seconds",
+        "warnings", "started_at", "updated_at", "jobs_done", "jobs_total",
+        "step", "chunk_current", "chunk_total", "last_error",
+    }
+    assert not sensitive_keys & set(payload)
+
+    code, body = _get_body(base + "/health")
+    assert code == 200
+    assert "SECRET_DISC_NAME" not in body
+    assert "Private Title (2019).mp4" not in body
+    assert "C:\\Users" not in body  # 0.2.37 (M2): no absolute paths either
+
+    # Run detail stays token-gated (companion pin, kept from v0.2.35).
+    with pytest.raises(Exception):
+        _get(base + "/status")
 
 
 def test_progress_and_history(server):
@@ -300,6 +354,55 @@ def test_start_server_with_fallback_clamps_walk_at_65535(monkeypatch):
             host="127.0.0.1", port=65535, token="s3cret",
             fallback_attempts=3)
     assert calls == [65535]
+
+
+def test_port_walk_handles_out_of_range_configured_ports(monkeypatch):
+    """v0.2.37 (L2), validation EXP-9: a hand-edited/corrupt config can
+    carry any integer. Ports >= 65536 used to assemble an EMPTY
+    candidate range (bare assert -> AssertionError) and negative ports
+    reached bind() (OverflowError) - neither is an OSError, so both
+    escaped every handler. The entry clamp makes every configured port
+    walk from a legal candidate and surface OSError only."""
+    import bluray_to_mp4.monitor as mon
+
+    calls = []
+
+    def fake_start_server(**kwargs):
+        calls.append(kwargs["port"])
+        raise OSError(10013, "forbidden")  # every candidate is taken
+
+    monkeypatch.setattr(mon, "active_server", None)
+    monkeypatch.setattr(mon, "start_server", fake_start_server)
+
+    # 65536 / 70000: the walk starts at the clamped 65535 (a non-empty
+    # candidate list) and the surfaced exception is that OSError - no
+    # AssertionError can escape.
+    for bad in (65536, 70000):
+        calls.clear()
+        with pytest.raises(OSError, match="forbidden"):
+            start_server_with_fallback(
+                host="127.0.0.1", port=bad, token="s3cret",
+                fallback_attempts=5)
+        assert calls == [65535]
+
+    calls.clear()
+    # -1 clamps to 0: the walk starts at 0 and OverflowError is gone.
+    with pytest.raises(OSError, match="forbidden"):
+        start_server_with_fallback(
+            host="127.0.0.1", port=-1, token="s3cret",
+            fallback_attempts=2)
+    assert calls == [0, 1, 2]
+
+    # Real-bind smoke: a live server binds the clamped top-of-range port.
+    monkeypatch.undo()  # restore the real start_server for the live bind
+    try:
+        server, base, port = start_server_with_fallback(
+            host="127.0.0.1", port=70000, token="s3cret")
+        assert server.server_address[1] == 65535
+        assert port == 65535
+    finally:
+        mon.stop_server()
+        mon.active_server = None  # mirror per-test isolation
 
 
 def test_python_module_entry_routes_watch_monitor(monkeypatch):

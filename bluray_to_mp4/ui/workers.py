@@ -23,12 +23,15 @@ from ..pipeline import run_pipeline
 from ..series import detect_series
 
 
-def _job_warnings(result, job) -> list[str]:
+def _job_warnings(result, job, *, want_subtitles: bool = True) -> list[str]:
     """Warnings that belong to this completed output.
 
-    OCR/mux warnings are job-prefixed by the pipeline. If subtitles were
-    requested but no sidecar exists, synthesize a visible warning so both
-    live status and History stay honest after a killed OCR child.
+    OCR/mux/upscale warnings are job-prefixed by the pipeline and pass
+    through. Only when subtitles were actually WANTED for this title does
+    a missing sidecar synthesize a visible warning (killed OCR child
+    honesty). v0.2.37 (L1): a deliberately subtitle-less run - the
+    "Include subtitles" toggle off, or an explicit "(no subtitles)"
+    Review-page pick - is intended behavior, not a warning.
     """
     if job.srt_path:
         return []
@@ -36,7 +39,14 @@ def _job_warnings(result, job) -> list[str]:
         w for w in getattr(result, "warnings", [])
         if w.startswith(job.output_name)
     ]
-    return warnings or ["subtitle missing (unknown reason)"]
+    if warnings:
+        return warnings
+    if not want_subtitles:
+        return []
+    selection = getattr(job, "selection", None)
+    if getattr(selection, "subtitle_user_declined", False):
+        return []
+    return ["subtitle missing (unknown reason)"]
 
 
 class ScanWorker(QThread):
@@ -204,7 +214,12 @@ class RunWorker(QThread):
             monitor_warnings: list[str] = []
             for job in result.jobs:
                 if job.completed:
-                    warnings = _job_warnings(result, job)
+                    # v0.2.37 (L1): the run's "Include subtitles" choice
+                    # gates the synthesized missing-sidecar warning.
+                    warnings = _job_warnings(
+                        result, job,
+                        want_subtitles=bool(self.plan.get("want_subtitles", True)),
+                    )
                     monitor_warnings.extend(warnings)
                     # QW-6 (Bob audit): the output is on disk now - record
                     # its size so History can show size + achieved GB/hour

@@ -69,6 +69,31 @@ def test_toggle_choice_persists(tmp_path, monkeypatch):
     assert reloaded.monitor_enabled is False  # choice sticks (v2 file)
 
 
+def test_corrupt_monitor_port_self_heals(tmp_path, monkeypatch):
+    """v0.2.37 (L2): a hand-edited/corrupt config's monitor port
+    self-heals to the shipped default (8765) at load - reset, not
+    clamp-to-edge, since a corrupt value carries no legitimate intent;
+    valid values are honored verbatim."""
+    monkeypatch.setattr(cfg, "CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    for port_value, expected in (
+        (70000, 8765),   # above the range
+        (-1, 8765),      # negative
+        ("bogus", 8765),  # unparseable
+        (9999, 9999),    # valid values survive untouched
+    ):
+        (tmp_path / "config.json").write_text(
+            json.dumps({
+                "monitor_cfg_version": cfg.MONITOR_CFG_VERSION,
+                "monitor_port": port_value,
+            }),
+            encoding="utf-8",
+        )
+        s = Settings.load()
+        assert s.monitor_port == expected, f"port {port_value!r} -> {expected}"
+
+
 def test_lan_ip_helper_returns_something():
     from bluray_to_mp4.monitor import lan_ip
     ip = lan_ip()
