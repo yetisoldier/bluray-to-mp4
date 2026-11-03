@@ -58,8 +58,15 @@ def test_check_subtitle_edit_probes_seconv_not_gui_in_install_dirs(
     assert calls[0] == ["seconv.exe", "seconv"]
     assert not any("SubtitleEdit" in str(name) for name in calls[0])
     # The first probed install-dir candidate is a seconv path (not the
-    # GUI exe); the loop returns at the first hit.
-    assert probed == [r"C:\Program Files\Subtitle Edit\seconv.exe"]
+    # GUI exe); the loop returns at the first hit. Filter to SE-relevant
+    # paths: os.path.exists is monkeypatched globally and pytest's own
+    # lazy imports call it during the test body (stdlib file paths on
+    # Windows CI), so the raw call stream is not deterministic.
+    se_probes = [
+        p for p in probed
+        if "Subtitle Edit" in str(p) or "seconv" in str(p).lower()
+    ]
+    assert se_probes == [r"C:\Program Files\Subtitle Edit\seconv.exe"]
 
 
 def test_check_subtitle_edit_not_found_reports_ocr_disabled(monkeypatch):
