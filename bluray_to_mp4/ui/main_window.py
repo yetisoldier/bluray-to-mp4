@@ -270,7 +270,7 @@ class MainWindow(QMainWindow):
             "About Ripper",
             f"Ripper v{bluray_to_mp4.__version__}\n"
             "Package: bluray-to-mp4\n\n"
-            "Local disc-to-MP4 ripper with recommendations and monitoring.\n"
+            "Local disc-to-MKV ripper with recommendations and monitoring.\n"
             "ffmpeg/ffprobe and Subtitle Edit are bundled; only MakeMKV is a\n"
             "separate install.\n\n"
             "Published by YetiWurks LLC\n"

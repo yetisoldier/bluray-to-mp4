@@ -71,13 +71,13 @@ def test_check_subtitle_edit_probes_seconv_not_gui_in_install_dirs(
 
 def test_check_subtitle_edit_not_found_reports_ocr_disabled(monkeypatch):
     """Nothing found: the row stays red and keeps the honest
-    fail-open message (OCR disabled, MP4s still work)."""
+    fail-open message (OCR disabled, MKVs still work)."""
     _patch_find_program(monkeypatch, None)
     monkeypatch.setattr(os.path, "exists", lambda path: False)
 
     check = deps.check_subtitle_edit()
     assert check.ok is False
-    assert "subtitle OCR disabled (MP4s still work)" in check.detail
+    assert "subtitle OCR disabled (MKVs still work)" in check.detail
 
 
 def test_check_subtitle_edit_gui_only_install_is_not_green(monkeypatch):
@@ -93,4 +93,4 @@ def test_check_subtitle_edit_gui_only_install_is_not_green(monkeypatch):
 
     check = deps.check_subtitle_edit()
     assert check.ok is False
-    assert "subtitle OCR disabled (MP4s still work)" in check.detail
+    assert "subtitle OCR disabled (MKVs still work)" in check.detail

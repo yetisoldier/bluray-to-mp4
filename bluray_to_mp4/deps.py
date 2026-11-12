@@ -285,7 +285,7 @@ def check_subtitle_edit() -> DependencyCheck:
             )
     return DependencyCheck(
         "Subtitle Edit", False,
-        "not found - subtitle OCR disabled (MP4s still work); reinstall the "
+        "not found - subtitle OCR disabled (MKVs still work); reinstall the "
         "latest release zip to get the bundled copy",
         SUBTITLE_EDIT_URL, required=False,
     )

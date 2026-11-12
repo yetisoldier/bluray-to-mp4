@@ -518,7 +518,7 @@ def cmd_probe_stream(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bluray-to-mp4",
-        description="Rip personal Blu-ray/DVD discs to MP4 with smart track choices.",
+        description="Rip personal Blu-ray/DVD discs to MKV with smart track choices.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
