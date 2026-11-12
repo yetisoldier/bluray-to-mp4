@@ -339,7 +339,7 @@ def test_movie_run_plan_preserves_reviewed_title(qapp, monkeypatch, tmp_path):
     w._start_run()
 
     plan = w.run_worker.plan
-    expected = "Mamma Mia! Here We Go Yet Again (2019).mp4"
+    expected = "Mamma Mia! Here We Go Yet Again (2019).mkv"
     assert plan["movie_name"] == "Mamma Mia! Here We Go Yet Again"
     assert plan["jobs"][0]["output_name"] == expected
     w.close()
@@ -588,7 +588,7 @@ def test_episode_title_edit_overrides_name(qapp, monkeypatch):
 
     # Simulate a user editing episode 2's title
     row1 = w.outputs_table.item(1, 1)
-    row1.setText("Breaking Bad - S01E02 - Cat in the Bag!.mp4")
+    row1.setText("Breaking Bad - S01E02 - Cat in the Bag!.mkv")
     qapp.processEvents()
     # The override is stored against the real tid
     assert 0 not in w._title_overrides  # row 0 untouched
@@ -599,7 +599,7 @@ def test_episode_title_edit_overrides_name(qapp, monkeypatch):
     # by sanitize); the edited title cell keeps the SxxEyy prefix and swaps
     # only the title portion.
     assert w.outputs_table.item(1, 1).text() == \
-        "Breaking Bad Season 1 Disc 1 - S01E02 - Cat in the Bag!.mp4"
+        "Breaking Bad Season 1 Disc 1 - S01E02 - Cat in the Bag!.mkv"
     first = w.outputs_table.item(0, 1).text()
     assert "S01E01" in first  # untouched row unchanged
     w.close()

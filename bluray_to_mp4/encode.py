@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .container import FFMPEG_FORMAT
+
 __all__ = ["EncodePlan", "build_encode_args", "estimate_video_bitrate_kbps"]
 
 GB = 1_000_000_000
@@ -134,5 +136,9 @@ def build_encode_args(plan: EncodePlan) -> list[str]:
     if filters:
         args += ["-vf", ",".join(filters)]
 
-    args += ["-movflags", "+faststart", "-f", "mp4", plan.output_path]
+    # v0.2.38: Matroska is the only output container. -movflags
+    # +faststart is MP4-only (it front-loads the moov atom for
+    # progressive download); the matroska muxer would silently ignore
+    # it, so it is dropped rather than cargo-culted.
+    args += ["-f", FFMPEG_FORMAT, plan.output_path]
     return args

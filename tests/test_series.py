@@ -45,19 +45,19 @@ def test_episode_names_plex_standard():
     )
     tids = [tid for tid, _ in names]
     assert tids == [0, 1, 2, 3]
-    assert names[0][1] == "Breaking Bad - S01E01 - Pilot.mp4"
+    assert names[0][1] == "Breaking Bad - S01E01 - Pilot.mkv"
     # Untitled episodes fall back to numbered labels; trailing dots are
     # stripped because Windows filenames cannot end with a dot.
-    assert names[1][1] == "Breaking Bad - S01E02 - Cat's in the Bag.mp4"
-    assert names[2][1] == "Breaking Bad - S01E03 - Episode 3.mp4"
+    assert names[1][1] == "Breaking Bad - S01E02 - Cat's in the Bag.mkv"
+    assert names[2][1] == "Breaking Bad - S01E03 - Episode 3.mkv"
 
 
 def test_episode_names_start_offset():
     names = episode_output_names(
         "Breaking Bad", 2, start_episode=5, episode_tids=[0, 1]
     )
-    assert names[0][1] == "Breaking Bad - S02E05 - Episode 5.mp4"
-    assert names[1][1] == "Breaking Bad - S02E06 - Episode 6.mp4"
+    assert names[0][1] == "Breaking Bad - S02E05 - Episode 5.mkv"
+    assert names[1][1] == "Breaking Bad - S02E06 - Episode 6.mkv"
 
 
 def test_sanitize_removes_windows_illegal_chars():
@@ -67,10 +67,12 @@ def test_sanitize_removes_windows_illegal_chars():
 
 
 def test_movie_output_name():
-    assert movie_output_name("Blade Runner 2049", year=2017) == "Blade Runner 2049 (2017).mp4"
-    assert movie_output_name("Up") == "Up.mp4"
+    assert movie_output_name("Blade Runner 2049", year=2017) == "Blade Runner 2049 (2017).mkv"
+    assert movie_output_name("Up") == "Up.mkv"
 
 
 def test_subtitle_sidecar():
-    assert subtitle_sidecar("Show - S01E01.mp4") == "Show - S01E01.srt"
-    assert subtitle_sidecar("Movie (2019).MP4") == "Movie (2019).srt"
+    assert subtitle_sidecar("Show - S01E01.mkv") == "Show - S01E01.srt"
+    # Case-insensitive rewrite (flags=re.I, preserved through v0.2.38's
+    # seam-derived pattern): an uppercase-MKV name still rewrites.
+    assert subtitle_sidecar("Movie (2019).MKV") == "Movie (2019).srt"

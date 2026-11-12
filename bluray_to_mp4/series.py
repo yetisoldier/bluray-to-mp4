@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .container import VIDEO_EXT
 from .models import Disc, Title
 
 __all__ = ["SeriesGuess", "detect_series", "episode_output_names", "main_feature"]
@@ -80,7 +81,7 @@ def episode_output_names(
 ) -> list[tuple[int, str]]:
     """Build (tid, output filename) pairs in episode order.
 
-    Format: "Series - S01E05 - Episode Title.mp4" (Plex/Jellyfin standard).
+    Format: "Series - S01E05 - Episode Title.mkv" (Plex/Jellyfin standard).
     Priority per episode: explicit user edit (title_overrides) > fetched
     title (episode_titles) > disc-derived base name > numbered fallback.
     """
@@ -98,7 +99,7 @@ def episode_output_names(
             or base_names.get(tid)
             or f"Episode {n}"
         )
-        fname = f"{sanitize_filename(series_name)} - S{season:02d}E{n:02d} - {sanitize_filename(label)}.mp4"
+        fname = f"{sanitize_filename(series_name)} - S{season:02d}E{n:02d} - {sanitize_filename(label)}{VIDEO_EXT}"
         out.append((tid, fname))
         n += 1
     return out

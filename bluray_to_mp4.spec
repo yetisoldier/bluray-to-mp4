@@ -31,6 +31,7 @@ if os.path.isdir(_tools_dir):
 hiddenimports = [
     "bluray_to_mp4",
     "bluray_to_mp4.cli",
+    "bluray_to_mp4.container",
     "bluray_to_mp4.makemkv",
     "bluray_to_mp4.models",
     "bluray_to_mp4.recommend",

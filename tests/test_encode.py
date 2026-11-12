@@ -23,7 +23,7 @@ def test_bitrate_budget_dvd_default_10gb_per_hour():
 def test_nvenc_plan_bluray():
     plan = EncodePlan(
         input_path="in.mkv",
-        output_path="out.mp4",
+        output_path="out.mkv",
         duration_seconds=7590,
         media_type="bluray",
         encoder="nvenc",
@@ -36,15 +36,15 @@ def test_nvenc_plan_bluray():
     assert f"{plan.target_video_kbps}k" == "3863k"
     assert args[args.index("-b:v") + 1] == "3863k"
     assert "scale=-2:1080" in joined
-    assert "-movflags" in args and "+faststart" in args[args.index("-movflags") + 1]
-    assert args[-1] == "out.mp4" and args[args.index("-f") + 1] == "mp4"
+    assert "-movflags" not in args  # v0.2.38: inert on matroska, dropped
+    assert args[-1] == "out.mkv" and args[args.index("-f") + 1] == "matroska"
     assert "aac" in args
 
 
 def test_x265_plan_dvd_keeps_sd_resolution():
     plan = EncodePlan(
         input_path="in.mkv",
-        output_path="out.mp4",
+        output_path="out.mkv",
         duration_seconds=2880,
         media_type="dvd",
         encoder="x265",
@@ -54,6 +54,10 @@ def test_x265_plan_dvd_keeps_sd_resolution():
     assert "libx265" in args
     # No upscaling for DVD sources.
     assert "scale" not in joined
+    # U1: BOTH encoder legs emit the MKV container tail - matroska,
+    # and the MP4-only movflags pair is gone everywhere.
+    assert args[-1] == "out.mkv" and args[args.index("-f") + 1] == "matroska"
+    assert "-movflags" not in args
     assert plan.gb_per_hour == 1.0
     assert plan.target_video_kbps == 1707
 
@@ -62,7 +66,7 @@ def test_two_input_plan_maps_video_from_mezzanine_audio_from_original():
     plan = EncodePlan(
         input_path="original.mkv",
         video_input_path="upscaled.mkv",
-        output_path="out.mp4",
+        output_path="out.mkv",
         duration_seconds=5400,
         media_type="dvd",
         encoder="nvenc",
@@ -79,7 +83,7 @@ def test_two_input_plan_maps_video_from_mezzanine_audio_from_original():
 def test_deinterlace_single_vf():
     plan = EncodePlan(
         input_path="in.mkv",
-        output_path="out.mp4",
+        output_path="out.mkv",
         duration_seconds=5400,
         media_type="bluray",
         encoder="nvenc",
@@ -92,7 +96,7 @@ def test_deinterlace_single_vf():
 
     sd = EncodePlan(
         input_path="in.mkv",
-        output_path="out.mp4",
+        output_path="out.mkv",
         duration_seconds=5400,
         media_type="dvd",
         encoder="x265",

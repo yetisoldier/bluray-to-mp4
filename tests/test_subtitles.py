@@ -15,7 +15,7 @@ from bluray_to_mp4.subtitles import (
     _ocr_quality_note,
     extract_subtitles,
     mux_language,
-    mux_srt_into_mp4,
+    mux_srt_into_video,
     run_subtitle_ocr,
 )
 
@@ -519,9 +519,11 @@ def test_se_resolved_gui_binary_refused(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# v0.2.16: embedded MP4 subtitles - the sidecar SRT is muxed into the
-# finished MP4 as a soft mov_text track (temp-then-replace, so a failed
-# mux can never destroy the encode; the sidecar always stays on disk).
+# v0.2.16: embedded subtitles - the sidecar SRT is muxed into the
+# finished video (temp-then-replace, so a failed mux can never destroy
+# the encode; the sidecar always stays on disk). v0.2.38: the target is
+# MKV and the codec is subrip (mov_text was MP4-only); the original
+# bitmap track rides alongside via the fail-open ladder below.
 
 
 def test_mux_language_eng_and_und():
@@ -533,11 +535,11 @@ def test_mux_language_eng_and_und():
     assert mux_language("deu") == "und"
 
 
-def test_mux_srt_into_mp4_command_shape(tmp_path):
+def test_mux_srt_into_video_command_shape(tmp_path):
     """ffmpeg argv: both inputs, -map 0 before -map 1, -c copy plus
-    -c:s mov_text, language=eng metadata, temp .muxing.mp4 output that
+    -c:s subrip, language=eng metadata, temp .muxing.mkv output that
     is atomically replaced onto the video path; sidecar untouched."""
-    video = tmp_path / "Movie (2019).mp4"
+    video = tmp_path / "Movie (2019).mkv"
     video.write_bytes(b"ORIGINAL ENCODE")
     srt = tmp_path / "Movie (2019).srt"
     srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHi\n", encoding="utf-8")
@@ -546,12 +548,12 @@ def test_mux_srt_into_mp4_command_shape(tmp_path):
     def runner(cmd):
         cmds.append(cmd)
         out = cmd[-1]
-        assert out.endswith(".muxing.mp4") and out.startswith(str(video))
+        assert out.endswith(".muxing.mkv") and out.startswith(str(video))
         with open(out, "wb") as fh:
             fh.write(b"ENCODE + MOVED MOVSUB")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    result = mux_srt_into_mp4(
+    result = mux_srt_into_video(
         str(video), str(srt), language="eng", runner=runner,
     )
     assert result == str(video)
@@ -559,21 +561,21 @@ def test_mux_srt_into_mp4_command_shape(tmp_path):
     assert cmd[cmd.index("-i") + 1] == str(video)
     assert cmd[cmd.index("-i", cmd.index("-i") + 1) + 1] == str(srt)
     maps = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
-    assert maps == ["0", "1"]  # every MP4 stream, then the SRT appended
+    assert maps == ["0", "1"]  # every MKV stream, then the SRT appended
     assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
-    assert "-c:s" in cmd and cmd[cmd.index("-c:s") + 1] == "mov_text"
+    assert "-c:s" in cmd and cmd[cmd.index("-c:s") + 1] == "subrip"
     assert "-metadata:s:s:0" in cmd
     assert cmd[cmd.index("-metadata:s:s:0") + 1] == "language=eng"
     # The temp replaced the original atomically; sidecar still there.
     assert video.read_bytes() == b"ENCODE + MOVED MOVSUB"
     assert srt.exists()
-    assert not (tmp_path / (video.name + ".muxing.mp4")).exists()
+    assert not (tmp_path / (video.name + ".muxing.mkv")).exists()
 
 
-def test_mux_srt_failure_preserves_original_mp4(tmp_path):
-    """returncode 1 -> SubtitleOcrError; the MP4 stays bit-identical,
-    no .muxing.mp4 temp is left behind, and the sidecar survives."""
-    video = tmp_path / "Movie.mp4"
+def test_mux_srt_failure_preserves_original_video(tmp_path):
+    """returncode 1 -> SubtitleOcrError; the video stays bit-identical,
+    no .muxing.mkv temp is left behind, and the sidecar survives."""
+    video = tmp_path / "Movie.mkv"
     original = b"ORIGINAL ENCODE - MUST SURVIVE"
     video.write_bytes(original)
     srt = tmp_path / "Movie.srt"
@@ -581,31 +583,256 @@ def test_mux_srt_failure_preserves_original_mp4(tmp_path):
 
     def runner(cmd):
         return subprocess.CompletedProcess(
-            cmd, 1, "", "Could not find tag for codec mov_text"
+            cmd, 1, "", "Could not find tag for codec subrip"
         )
 
     with pytest.raises(SubtitleOcrError, match="muxing failed"):
-        mux_srt_into_mp4(str(video), str(srt), runner=runner)
+        mux_srt_into_video(str(video), str(srt), runner=runner)
     assert video.read_bytes() == original
-    assert not (tmp_path / (video.name + ".muxing.mp4")).exists()
+    assert not (tmp_path / (video.name + ".muxing.mkv")).exists()
     assert srt.exists()
 
 
 def test_mux_srt_missing_ffmpeg_message(tmp_path, monkeypatch):
     """runner=None + subprocess.run raising FileNotFoundError -> the
-    hint-rich 'ffmpeg not found for subtitle muxing' error; MP4 kept."""
+    hint-rich 'ffmpeg not found for subtitle muxing' error; video kept."""
     def missing_run(cmd, **kw):
         raise FileNotFoundError("No such file or directory: 'ffmpeg'")
 
     monkeypatch.setattr("bluray_to_mp4.subtitles.subprocess.run", missing_run)
-    video = tmp_path / "Movie.mp4"
+    video = tmp_path / "Movie.mkv"
     original = b"ORIGINAL ENCODE"
     video.write_bytes(original)
     srt = tmp_path / "Movie.srt"
     srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHi\n", encoding="utf-8")
     with pytest.raises(SubtitleOcrError, match="ffmpeg not found for subtitle muxing"):
-        mux_srt_into_mp4(str(video), str(srt))
+        mux_srt_into_video(str(video), str(srt))
     assert video.read_bytes() == original
+
+
+# ---------------------------------------------------------------------
+# v0.2.38: bitmap (PGS/VobSub) passthrough alongside the OCR'd text
+# track. MKV holds image subtitles natively and ffmpeg ships no bitmap
+# encoder, so the original track is stream-copied from the ripped MKV
+# as output subtitle track 1 (-c:s:1 copy); the OCR'd subrip stays
+# track 0. The leg is fail-open: any bitmap failure retries the exact
+# text-only mux with one honest note.
+
+
+def test_mux_bitmap_two_track_command_shape(tmp_path):
+    """§5.2 two-track pin: three inputs, the bitmap track mapped by its
+    ABSOLUTE index in the rip (2:2), per-stream codecs -c:s:0 subrip +
+    -c:s:1 copy (a blanket -c:s would demand a PGS->subrip encode that
+    does not exist), the same language tag on both tracks, no
+    disposition flags, single attempt on success."""
+    video = tmp_path / "Movie (2019).mkv"
+    video.write_bytes(b"ORIGINAL ENCODE")
+    srt = tmp_path / "Movie (2019).srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHi\n", encoding="utf-8")
+    rip = tmp_path / "rip.mkv"
+    rip.write_bytes(b"RIP WITH PGS")
+    cmds = []
+
+    def runner(cmd):
+        cmds.append(cmd)
+        out = cmd[-1]
+        assert out.endswith(".muxing.mkv") and out.startswith(str(video))
+        with open(out, "wb") as fh:
+            fh.write(b"ENCODE + TEXT + BITMAP")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    result = mux_srt_into_video(
+        str(video), str(srt), language="eng",
+        bitmap_src=str(rip), bitmap_index=2,
+        bitmap_codec="hdmv_pgs_subtitle", runner=runner,
+    )
+    assert result == str(video)
+    assert len(cmds) == 1  # success: no retry, note-free
+    cmd = cmds[0]
+    inputs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-i"]
+    assert inputs == [str(video), str(srt), str(rip)]
+    maps = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert maps == ["0", "1", "2:2"]  # map order fixes output order
+    assert cmd[cmd.index("-c") + 1] == "copy"
+    assert cmd[cmd.index("-c:s:0") + 1] == "subrip"
+    assert cmd[cmd.index("-c:s:1") + 1] == "copy"
+    # The exact token "-c:s" (blanket, would hit the bitmap track) must
+    # NOT appear alongside the per-stream specifiers.
+    assert "-c:s" not in cmd
+    assert cmd[cmd.index("-metadata:s:s:0") + 1] == "language=eng"
+    assert cmd[cmd.index("-metadata:s:s:1") + 1] == "language=eng"
+    # No disposition flags anywhere: today's player auto-selection is
+    # bit-preserved.
+    assert not any(a.startswith("-disposition") for a in cmd)
+    assert video.read_bytes() == b"ENCODE + TEXT + BITMAP"
+    assert rip.read_bytes() == b"RIP WITH PGS"  # source rip untouched
+
+
+def test_mux_bitmap_leg_failure_degrades_to_text_only(tmp_path):
+    """Fail-open ladder: a failed bitmap leg deletes its temp, leaves
+    the pre-mux encode bit-identical, appends ONE honest note, retries
+    the exact v0.2.37 text-only shape, and returns normally on leg-2
+    success - today's artifact plus one honest warning, never more."""
+    video = tmp_path / "Movie.mkv"
+    original = b"ORIGINAL ENCODE - MUST SURVIVE"
+    video.write_bytes(original)
+    srt = tmp_path / "Movie.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHi\n", encoding="utf-8")
+    rip = tmp_path / "rip.mkv"
+    rip.write_bytes(b"RIP WITH PGS")
+    cmds = []
+
+    def runner(cmd):
+        cmds.append(cmd)
+        if len(cmds) == 1:
+            # Leg 1 fails with nonzero rc; the pre-mux encode is
+            # verifiably intact BEFORE the retry runs.
+            assert video.read_bytes() == original
+            return subprocess.CompletedProcess(cmd, 1, "", "map not found")
+        out = cmd[-1]
+        assert out.endswith(".muxing.mkv") and out.startswith(str(video))
+        with open(out, "wb") as fh:
+            fh.write(b"ENCODE + TEXT ONLY")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    notes: list[str] = []
+    result = mux_srt_into_video(
+        str(video), str(srt), language="eng",
+        bitmap_src=str(rip), bitmap_index=2,
+        bitmap_codec="hdmv_pgs_subtitle", runner=runner, notes=notes,
+    )
+    assert result == str(video)
+    assert len(cmds) == 2  # exactly one retry attempt
+    leg1, leg2 = cmds
+    # Leg 1 was the two-track shape; leg 2 is today's text-only shape.
+    assert "2:2" in leg1
+    maps2 = [leg2[i + 1] for i, a in enumerate(leg2) if a == "-map"]
+    assert maps2 == ["0", "1"]
+    assert leg2[leg2.index("-c:s") + 1] == "subrip"
+    assert leg2 == [
+        leg2[0], "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+        "-i", str(video), "-i", str(srt),
+        "-map", "0", "-map", "1",
+        "-c", "copy", "-c:s", "subrip",
+        "-metadata:s:s:0", "language=eng",
+        str(video) + ".muxing.mkv",
+    ]
+    assert len(notes) == 1
+    assert "Original bitmap subtitles (hdmv_pgs_subtitle) could not be carried" in notes[0]
+    assert "the MKV embeds the OCR'd SRT only." in notes[0]
+    # The successful text-only retry replaced the video; no temp left.
+    assert video.read_bytes() == b"ENCODE + TEXT ONLY"
+    assert not (tmp_path / (video.name + ".muxing.mkv")).exists()
+    assert srt.exists()
+
+
+def test_mux_bitmap_leg_both_fail_raises_and_preserves(tmp_path):
+    """Ladder end: leg-1 AND leg-2 failure -> SubtitleOcrError with
+    today's 'subtitle muxing failed' wording, temp removed, the
+    pre-mux encode bit-identical (v0.2.16 contract, test-pinned)."""
+    video = tmp_path / "Movie.mkv"
+    original = b"ORIGINAL ENCODE - MUST SURVIVE"
+    video.write_bytes(original)
+    srt = tmp_path / "Movie.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHi\n", encoding="utf-8")
+    rip = tmp_path / "rip.mkv"
+    rip.write_bytes(b"RIP WITH PGS")
+    cmds = []
+
+    def runner(cmd):
+        cmds.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, "", "boom")
+
+    notes: list[str] = []
+    with pytest.raises(SubtitleOcrError, match="subtitle muxing failed: boom"):
+        mux_srt_into_video(
+            str(video), str(srt), language="eng",
+            bitmap_src=str(rip), bitmap_index=2,
+            bitmap_codec="hdmv_pgs_subtitle", runner=runner, notes=notes,
+        )
+    assert len(cmds) == 2
+    assert len(notes) == 1  # the leg-1 degradation note was still recorded
+    assert "could not be carried" in notes[0]
+    assert video.read_bytes() == original
+    assert not (tmp_path / (video.name + ".muxing.mkv")).exists()
+
+
+def test_mux_bitmap_leg_empty_stderr_still_retries(tmp_path):
+    """Ladder trigger regression: a leg-1 failure with a NONZERO rc but
+    EMPTY stderr must still trigger the text-only retry - the retry
+    hinges on the predicate verdict, never on ffmpeg having said
+    something. (Found by self-review: a digest-truthiness gate would
+    have silently raised on the bitmap leg instead of degrading.)"""
+    video = tmp_path / "Movie.mkv"
+    original = b"ORIGINAL ENCODE"
+    video.write_bytes(original)
+    srt = tmp_path / "Movie.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHi\n", encoding="utf-8")
+    rip = tmp_path / "rip.mkv"
+    rip.write_bytes(b"RIP")
+    cmds = []
+
+    def runner(cmd):
+        cmds.append(cmd)
+        if len(cmds) == 1:
+            return subprocess.CompletedProcess(cmd, 1, "", "")  # rc!=0, no stderr
+        with open(cmd[-1], "wb") as fh:
+            fh.write(b"ENCODE + TEXT ONLY")
+        return subprocess.CompletedProcess(cmd, 0, "", "", )
+
+    notes: list[str] = []
+    result = mux_srt_into_video(
+        str(video), str(srt), language="eng",
+        bitmap_src=str(rip), bitmap_index=2,
+        bitmap_codec="dvd_subtitle", runner=runner, notes=notes,
+    )
+    assert result == str(video)
+    assert len(cmds) == 2
+    assert video.read_bytes() == b"ENCODE + TEXT ONLY"
+    assert len(notes) == 1
+    # Empty digest: the honest note still names the loss and the shape.
+    assert "Original bitmap subtitles (dvd_subtitle) could not be carried " \
+        "(); the MKV embeds the OCR'd SRT only." == notes[0]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {},  # nothing passed at all: the exact v0.2.37 caller shape
+    {"bitmap_src": "rip.mkv"},  # src without index: incomplete pair
+    {"bitmap_src": "rip.mkv", "bitmap_index": 2},  # codec default "" -> out of gate
+    {"bitmap_src": "rip.mkv", "bitmap_index": 2, "bitmap_codec": "subrip"},
+])
+def test_mux_bitmap_gate_excludes_non_bitmap_codecs(tmp_path, kwargs):
+    """The bitmap gate is the single policy point: a codec outside
+    BITMAP_COPY_CODECS - including the TEXT codec 'subrip' and the ''
+    default - or an incomplete bitmap_src/index pair must yield the
+    exact two-input text-only shape in ONE attempt, with no note."""
+    video = tmp_path / "Movie (2019).mkv"
+    video.write_bytes(b"ORIGINAL ENCODE")
+    srt = tmp_path / "Movie (2019).srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHi\n", encoding="utf-8")
+    cmds = []
+
+    def runner(cmd):
+        cmds.append(cmd)
+        with open(cmd[-1], "wb") as fh:
+            fh.write(b"ENCODE + TEXT ONLY")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    notes: list[str] = []
+    result = mux_srt_into_video(
+        str(video), str(srt), language="eng", runner=runner, notes=notes,
+        **kwargs,
+    )
+    assert result == str(video)
+    assert len(cmds) == 1  # single attempt: no bitmap leg, no retry
+    cmd = cmds[0]
+    inputs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-i"]
+    assert inputs == [str(video), str(srt)]
+    maps = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert maps == ["0", "1"]
+    assert cmd[cmd.index("-c:s") + 1] == "subrip"
+    assert not any(a.startswith("-c:s:") for a in cmd)
+    assert notes == []  # success is silent: no new runtime noise
 
 
 # ---------------------------------------------------------------------

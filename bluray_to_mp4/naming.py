@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from .container import VIDEO_EXT
+
 __all__ = ["sanitize_filename", "movie_output_name", "subtitle_sidecar"]
 
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -28,13 +30,13 @@ def sanitize_filename(name: str, *, maxlen: int = 150) -> str:
 
 
 def movie_output_name(title: str, *, year: int | None = None) -> str:
-    """'Movie Title (2019).mp4' - Plex/Jellyfin movie naming standard."""
+    """'Movie Title (2019).mkv' - Plex/Jellyfin movie naming standard."""
     base = sanitize_filename(title)
     if year:
-        return f"{base} ({year}).mp4"
-    return f"{base}.mp4"
+        return f"{base} ({year}){VIDEO_EXT}"
+    return f"{base}{VIDEO_EXT}"
 
 
 def subtitle_sidecar(video_path: str) -> str:
-    """'Show - S01E01.mp4' -> 'Show - S01E01.srt'."""
-    return re.sub(r"\.mp4$", ".srt", video_path, flags=re.I)
+    """'Show - S01E01.mkv' -> 'Show - S01E01.srt'."""
+    return re.sub(re.escape(VIDEO_EXT) + "$", ".srt", video_path, flags=re.I)

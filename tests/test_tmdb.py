@@ -116,9 +116,9 @@ def test_pipeline_series_uses_tmdb_titles(tmp_path):
     )
     assert result.is_series
     names = [j.output_name for j in result.jobs]
-    assert names[0] == "Breaking Bad - S01E01 - Pilot.mp4"
-    assert names[1] == "Breaking Bad - S01E02 - Cat's in the Bag.mp4"
-    assert names[3] == "Breaking Bad - S01E04 - Cancer Man.mp4"
+    assert names[0] == "Breaking Bad - S01E01 - Pilot.mkv"
+    assert names[1] == "Breaking Bad - S01E02 - Cat's in the Bag.mkv"
+    assert names[3] == "Breaking Bad - S01E04 - Cancer Man.mkv"
     assert any("TMDB" in r for r in result.reasons)
 
 
@@ -133,7 +133,7 @@ def test_pipeline_movie_uses_tmdb_year(tmp_path):
         mkv_runner=fake_runner(MOVIE_DISC_OUTPUT.splitlines()),
         tmdb_key="k", tmdb_fetcher=fetcher,
     )
-    assert result.jobs[0].output_name == "Blade Runner 2049 (2017).mp4"
+    assert result.jobs[0].output_name == "Blade Runner 2049 (2017).mkv"
     assert any("TMDB" in r for r in result.reasons)
 
 
@@ -158,5 +158,5 @@ def test_pipeline_without_key_skips_lookup_entirely(tmp_path):
         0, str(tmp_path), encoder="x265", dry_run=True,
         mkv_runner=fake_runner(MOVIE_DISC_OUTPUT.splitlines()),
     )
-    assert result.jobs[0].output_name == "Blade Runner 2049.mp4"
+    assert result.jobs[0].output_name == "Blade Runner 2049.mkv"
     assert not any("TMDB" in w for w in result.warnings)

@@ -66,7 +66,7 @@ from .series import detect_series, episode_output_names, main_feature
 from .subtitles import (
     SubtitleOcrError,
     mux_language,
-    mux_srt_into_mp4,
+    mux_srt_into_video,
     run_subtitle_ocr,
 )
 from .tmdb import TmdbError, lookup_movie, season_episode_titles
@@ -964,7 +964,7 @@ def run_pipeline(
                 if sub_ord is not None and sub is None:
                     result.warnings.append(
                         f"{job.output_name}: selected subtitle stream missing from "
-                        "ripped MKV; the MP4 ships without subtitles."
+                        "ripped MKV; the MKV ships without subtitles."
                     )
 
                 video_input_path = None
@@ -1377,15 +1377,29 @@ def run_pipeline(
                             codec_name=sub.codec_name,  # v0.2.16: VobSub -> .mkv
                         )
                         job.srt_path = ocr.srt_path
-                        # v0.2.16: embed the OCR'd subtitles INSIDE the MP4
-                        # as a soft mov_text track (sidecar .srt stays on
-                        # disk for editing). The mux temp-then-replaces, so
+                        # v0.2.16: embed the OCR'd subtitles INSIDE the
+                        # output video (sidecar .srt stays on disk for
+                        # editing). v0.2.38: the embed target is MKV - the
+                        # OCR'd SRT embeds as a soft subrip track (mov_text
+                        # was MP4-only), and the original PGS/VobSub bitmap
+                        # track is stream-copied in alongside it when the
+                        # rip carries one. The mux temp-then-replaces, so
                         # a failure leaves the finished encode bit-identical.
-                        mux_srt_into_mp4(
+                        # The bitmap gate itself lives in
+                        # mux_srt_into_video (the single policy point):
+                        # sub.codec_name is passed unconditionally and the
+                        # BITMAP_COPY_CODECS check decides.
+                        mux_notes: list[str] = []
+                        mux_srt_into_video(
                             video_out, ocr.srt_path,
                             language=mux_language(sub.lang),
+                            bitmap_src=job.input_path,   # the rip; still on disk
+                            bitmap_index=sub.index,      # its absolute stream index
+                            bitmap_codec=sub.codec_name,
+                            notes=mux_notes,
                         )
                         result.warnings.extend(f"{job.output_name}: {n}" for n in ocr.notes)
+                        result.warnings.extend(f"{job.output_name}: {n}" for n in mux_notes)
                     except SubtitleOcrError as exc:
                         # job.srt_path is set before the mux runs, so it is
                         # the exact discriminator of which stage failed
@@ -1393,13 +1407,13 @@ def run_pipeline(
                         if job.srt_path:
                             result.warnings.append(
                                 f"{job.output_name}: subtitle embed failed "
-                                f"({exc}); MP4 ships without embedded "
+                                f"({exc}); MKV ships without embedded "
                                 "subtitles; sidecar SRT kept."
                             )
                         else:
                             result.warnings.append(
                                 f"{job.output_name}: subtitle OCR failed ({exc}); "
-                                "MP4 was produced without subtitles."
+                                "MKV was produced without subtitles."
                             )
 
                 stage(f"Done: {job.output_name}")

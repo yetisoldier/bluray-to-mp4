@@ -49,6 +49,7 @@ from ..makemkv import MakeMkvError
 from ..models import Disc
 from ..monitor import lan_ip, start_server_with_fallback, stop_server
 from ..naming import movie_output_name
+from ..container import VIDEO_EXT
 from ..recommend import (
     classify_sub_label,
     is_commentary,
@@ -140,7 +141,7 @@ class MainWindow(QMainWindow):
         brand_row.addStretch()
         nav_layout.addLayout(brand_row)
 
-        brand_sub = QLabel("Disc to MP4")
+        brand_sub = QLabel("Disc to MKV")
         brand_sub.setObjectName("brandSub")
         nav_layout.addWidget(brand_sub)
 
@@ -892,8 +893,11 @@ class MainWindow(QMainWindow):
             return
         tid = tids[item.row()]
         import re
-        m = re.match(r"^.*? - S\d+E\d+ - (.*)\.mp4$", item.text().strip())
-        label = m.group(1) if m else re.sub(r"\.mp4$", "", item.text().strip())
+        # v0.2.38: the preview holds .mkv names; the extension is keyed
+        # on the container seam, not a literal.
+        ext = re.escape(VIDEO_EXT)
+        m = re.match(rf"^.*? - S\d+E\d+ - (.*){ext}$", item.text().strip())
+        label = m.group(1) if m else re.sub(rf"{ext}$", "", item.text().strip())
         if label:
             self._title_overrides[tid] = label
         else:

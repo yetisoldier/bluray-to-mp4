@@ -53,7 +53,7 @@ def test_movie_dry_run_builds_one_job(tmp_path):
     assert not result.is_series
     assert len(result.jobs) == 1
     job = result.jobs[0]
-    assert job.output_name == "Blade Runner 2049 (2017).mp4"
+    assert job.output_name == "Blade Runner 2049 (2017).mkv"
     assert job.input_path.endswith("Blade_Runner_2049_t00.mkv")
     assert job.selection is not None and job.selection.audio_sid == 1
     # Encode args reference the right input/output paths.
@@ -72,7 +72,7 @@ def test_movie_name_override_controls_final_output_name(tmp_path):
     )
 
     job = result.jobs[0]
-    assert job.output_name == "Mamma Mia! Here We Go Yet Again (2019).mp4"
+    assert job.output_name == "Mamma Mia! Here We Go Yet Again (2019).mkv"
     assert job.encode_args[-1].endswith(job.output_name)
 
 
@@ -118,7 +118,7 @@ def test_series_dry_run_names_all_episodes(tmp_path):
     assert result.is_series
     assert len(result.jobs) == 4  # 4-min deleted scene excluded
     names = [j.output_name for j in result.jobs]
-    assert names[0] == "Breaking Bad - S01E01 - Pilot.mp4"
+    assert names[0] == "Breaking Bad - S01E01 - Pilot.mkv"
     for i, name in enumerate(names, start=1):
         assert f"S01E{i:02d}" in name
     # Every episode gets its own recommendation pass.
@@ -268,9 +268,9 @@ def _stub_probe(monkeypatch, *, width=3840, height=2160,
                 sub_lang="", r_frame_rate="24000/1001", avg_frame_rate=""):
     """Stub probe_streams: a video stream of the given width (the movie
     fixture's scan says 3840x2160, so 3840 keeps reuse tests reusing),
-    one audio stream, and optional N subtitle streams. v0.2.16: the
+    one audio stream, and     optional N subtitle streams. v0.2.16: the
     stubbed subtitle streams carry a codec name and language so the
-    VobSub/PGS branch and the mov_text embed tag can be tested.
+    VobSub/PGS branch and the subrip embed tag can be tested.
     v0.2.27: the video stream carries r_frame_rate/avg_frame_rate so
     the real-fps probe (desync fix) can be tested; the default is a
     film rip (23.976)."""
@@ -1472,17 +1472,19 @@ def test_first_video_width_parse_and_helper():
 
 
 # ---------------------------------------------------------------------
-# v0.2.16: DVD VobSub OCR pass-through + embedded MP4 subtitles.
+# v0.2.16: DVD VobSub OCR pass-through + embedded subtitles.
 # The probed subtitle codec chooses the extraction container (.sup for
 # PGS, single-track .mkv for VobSub) and the OCR'd sidecar SRT is muxed
-# into the finished MP4 as a soft mov_text track (sidecar kept; the
-# mux temp-then-replaces so a failure never destroys the encode).
+# into the finished video as a soft subrip track - mov_text in the MP4
+# era (v0.2.16), subrip in the MKV one (v0.2.38, with the original
+# bitmap track stream-copied alongside it) - sidecar kept; the
+# mux temp-then-replaces so a failure never destroys the encode.
 
 
 def _stub_ocr(monkeypatch, events, *, srt_text=None, raise_exc=None):
     """Recording run_subtitle_ocr stub: logs ('ocr', video_out) and
     either returns a realistic OcrResult (sidecar written next to the
-    MP4, like the real one) or raises the given exception."""
+    finished video, like the real one) or raises the given exception."""
     def fake_ocr(mkv, index, video_out, *, workdir, codec_name="", **kw):
         events.append(("ocr", video_out, codec_name))
         if raise_exc is not None:
@@ -1495,13 +1497,15 @@ def _stub_ocr(monkeypatch, events, *, srt_text=None, raise_exc=None):
 
 
 def _stub_mux(monkeypatch, events, *, raise_exc=None):
-    """Recording mux_srt_into_mp4 stub: logs ('mux', video, srt, lang)."""
+    """Recording mux_srt_into_video stub: logs ('mux', video, srt, lang,
+    kwargs) where kwargs holds every mux keyword beyond language - the
+    v0.2.38 bitmap passthrough wiring is pinned off it."""
     def fake_mux(video_path, srt_path, *, language="und", **kw):
-        events.append(("mux", video_path, srt_path, language))
+        events.append(("mux", video_path, srt_path, language, dict(kw)))
         if raise_exc is not None:
             raise raise_exc
         return video_path
-    monkeypatch.setattr(pipeline_mod, "mux_srt_into_mp4", fake_mux)
+    monkeypatch.setattr(pipeline_mod, "mux_srt_into_video", fake_mux)
 
 
 def test_pipeline_passes_codec_name_to_ocr(tmp_path, monkeypatch):
@@ -1548,7 +1552,7 @@ def test_pipeline_ocr_failure_dvd_warns_and_ships(tmp_path, monkeypatch):
         mkv_runner=fake_runner(_movie_rip_script(outdir)),
     )
     job = result.jobs[0]
-    assert job.completed          # the MP4 ships
+    assert job.completed          # the MKV ships
     assert job.srt_path is None
     assert any("subtitle OCR failed" in w for w in result.warnings)
     assert any("without subtitles" in w for w in result.warnings)
@@ -1558,7 +1562,7 @@ def test_pipeline_ocr_failure_dvd_warns_and_ships(tmp_path, monkeypatch):
 
 def test_pipeline_embeds_srt_after_ocr(tmp_path, monkeypatch):
     """Happy path: OCR runs first, then the sidecar is muxed into the
-    finished MP4 with the probed stream's language ('eng' confirmed)."""
+    finished MKV with the probed stream's language ('eng' confirmed)."""
     _stub_probe(monkeypatch, width=3840, subtitle_count=2,
                 sub_codec="hdmv_pgs_subtitle", sub_lang="eng")
     _stub_encode(monkeypatch)
@@ -1581,7 +1585,7 @@ def test_pipeline_embeds_srt_after_ocr(tmp_path, monkeypatch):
     assert mux_lang == "eng"        # confirmed by the rip's own tags
 
 
-def test_pipeline_mux_failure_keeps_mp4_and_sidecar(tmp_path, monkeypatch):
+def test_pipeline_mux_failure_keeps_mkv_and_sidecar(tmp_path, monkeypatch):
     """Embed failure after a successful OCR: the warning names the embed
     stage and the kept sidecar (NOT the OCR-stage wording), the job
     still completes, and the sidecar SRT survives on disk."""
@@ -1600,13 +1604,13 @@ def test_pipeline_mux_failure_keeps_mp4_and_sidecar(tmp_path, monkeypatch):
         mkv_runner=fake_runner(_movie_rip_script(outdir)),
     )
     job = result.jobs[0]
-    assert job.completed                 # MP4 ships, just without subs
+    assert job.completed                 # MKV ships, just without subs
     assert job.srt_path is not None
     assert os.path.exists(job.srt_path)   # sidecar SRT kept
     assert any("subtitle embed failed" in w for w in result.warnings)
     assert any("sidecar SRT kept" in w for w in result.warnings)
     assert not any("subtitle OCR failed" in w for w in result.warnings)
-    assert not any("MP4 was produced without subtitles" in w for w in result.warnings)
+    assert not any("MKV was produced without subtitles" in w for w in result.warnings)
 
 
 def test_pipeline_untagged_sub_embeds_und(tmp_path, monkeypatch):
@@ -1625,6 +1629,38 @@ def test_pipeline_untagged_sub_embeds_und(tmp_path, monkeypatch):
         mkv_runner=fake_runner(_movie_rip_script(outdir)),
     )
     assert events[1][3] == "und"
+
+
+def test_pipeline_passes_bitmap_args_to_mux(tmp_path, monkeypatch):
+    """v0.2.38 bitmap passthrough: the pipeline passes the rip itself
+    (bitmap_src), the probed stream's ABSOLUTE index in that rip
+    (bitmap_index - first subtitle of the stubbed rip is stream 2), and
+    the probed codec_name through to the mux unconditionally; the
+    bitmap gate itself lives inside mux_srt_into_video (single policy
+    point), so no conditional at the call site."""
+    _stub_probe(monkeypatch, width=3840, subtitle_count=2,
+                sub_codec="hdmv_pgs_subtitle", sub_lang="eng")
+    _stub_encode(monkeypatch)
+    events = []
+    _stub_ocr(monkeypatch, events)
+    _stub_mux(monkeypatch, events)
+    outdir = tmp_path / "out"
+    result = run_pipeline(
+        0, str(outdir), encoder="x265", dry_run=False,
+        mkv_runner=fake_runner(_movie_rip_script(outdir)),
+    )
+    job = result.jobs[0]
+    assert job.completed
+    kw = events[1][4]  # the mux stub's captured kwargs
+    assert kw["bitmap_src"] == job.input_path
+    # The movie fixture's scan carries subtitles sids 3/4/5 and the
+    # recommendation selects sid 4 -> ordinal 1 -> the SECOND probed
+    # subtitle stream, i.e. absolute rip index 3. The contract is that
+    # the mux receives the selected stream's ABSOLUTE index, whatever
+    # the stub layout is; it is also what the pipeline recorded.
+    assert kw["bitmap_index"] == 3 == job.subtitle_stream_index
+    assert kw["bitmap_codec"] == "hdmv_pgs_subtitle"
+    assert isinstance(kw["notes"], list)  # degradation-notes list wired
 
 
 # ---------------------------------------------------------------------

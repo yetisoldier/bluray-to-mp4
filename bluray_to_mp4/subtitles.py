@@ -24,10 +24,20 @@ v0.2.30 wraps that flow in honest quality reporting and input retention
 accurate' - stylized musical fonts are exactly what Tesseract misreads):
 the run notes gain a deterministic OCR-quality line (clean/garbage/empty
 cue counts over the shipped text), and a <output-stem>.ocr/ kit next to
-the MP4 retains the seconv input track plus the raw pass-1 SRT so
-accuracy can be tuned offline without re-ripping the disc. Reporting and
-retention only - no behavior change to the OCR execution, and fail-open
-stands everywhere.
+the output video retains the seconv input track plus the raw pass-1 SRT
+so accuracy can be tuned offline without re-ripping the disc. Reporting
+and retention only - no behavior change to the OCR execution, and
+fail-open stands everywhere.
+
+v0.2.38 moves the final container to MKV (Eric 2026-11-11): the OCR'd
+SRT embeds as a soft subrip track (mov_text was MP4-only), and -
+because Matroska holds image subtitles natively - the original PGS /
+VobSub track is stream-copied INTO the output alongside it
+(`-c:s:1 copy`; ffmpeg has no bitmap-subtitle encoder, so passthrough
+is the only carriage mechanism and all that fidelity ever required).
+The bitmap leg maps the track straight from the ripped MKV at mux
+time; it is fail-open, degrading to text-only with a note. The
+sidecar SRT and the .ocr kit are unchanged.
 """
 
 from __future__ import annotations
@@ -40,6 +50,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .binaries import resolve_ffmpeg, resolve_subtitle_edit
+from .container import BITMAP_COPY_CODECS, TEXT_SUBTITLE_CODEC, VIDEO_EXT
 from .srt import Cue, SrtError, normalize_cues, parse_srt, write_srt_file
 
 __all__ = [
@@ -52,7 +63,7 @@ __all__ = [
     "run_subtitle_ocr",
     "write_ocr_settings",
     "mux_language",
-    "mux_srt_into_mp4",
+    "mux_srt_into_video",
 ]
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
@@ -312,8 +323,8 @@ def _write_ocr_diagnostic_kit(
     subtitle track that was fed to seconv (the single-track MKV for
     VobSub, the .sup for PGS) and the raw pass-1 SRT copied as
     <stem>.raw.srt. That is enough to re-run seconv offline with
-    different engines/settings and diff the output. A subfolder,
-    deliberately: a bare raw .srt next to the MP4 would make every
+    different engines/settings and     diff the output. A subfolder,
+    deliberately: a bare raw .srt next to the output video would make every
     player auto-load the uncorrected pass-1 text over the shipped
     sidecar. The track copy is size-capped (skip + honest note above
     the cap); the raw SRT always ships. Retention only and fail-open
@@ -715,7 +726,7 @@ def run_subtitle_ocr(
 
 
 def mux_language(lang: str) -> str:
-    """ffprobe subtitle language -> MP4 track tag.
+    """ffprobe subtitle language -> output track tag.
 
     'eng'/'en' -> 'eng'; anything else (incl. '', the v0.2.14
     unconfirmed case) -> 'und'. The OCR pipeline hard-codes
@@ -727,38 +738,28 @@ def mux_language(lang: str) -> str:
     return "eng" if lang in ("eng", "en") else "und"
 
 
-def mux_srt_into_mp4(
-    video_path: str,
-    srt_path: str,
+def _attempt_mux(
+    cmd: list[str],
+    tmp: str,
     *,
-    language: str = "und",
-    binary: str = "ffmpeg",
     runner: Runner | None = None,
-) -> str:
-    """Embed srt_path as a soft mov_text subtitle track in video_path.
+) -> tuple[bool, str]:
+    """One mux attempt: run cmd, then apply the v0.2.16 success
+    predicates (exit 0, temp exists, temp non-empty).
 
-    Muxes to a temp sibling then os.replace()s it over video_path, so a
-    failed or interrupted mux can never destroy the finished encode: on
-    any failure the temp is deleted and video_path stays bit-identical
-    (v0.2.16). mov_text is the only subtitle codec the MP4 container
-    supports and the one every player (VLC, Plex, Jellyfin, Apple TV)
-    reads from .mp4.
+    Returns (ok, stderr_digest). ok is the PREDICATE verdict, not
+    stderr content - a nonzero exit with empty stderr is a failure
+    (the ladder's retry trigger must not hinge on ffmpeg having said
+    something). On failure the temp is deleted (the v0.2.16 atomicity
+    guarantee - a failed attempt must never leave residue under the
+    success path) and the digest (possibly '') is returned for the
+    caller to attach to an error or note. A missing ffmpeg binary
+    raises the hint-rich SubtitleOcrError regardless of which ladder
+    leg is running: both legs need the binary, so an early honest
+    failure is identical in outcome to today's single-attempt
+    contract. This helper is the ONE place the failed-attempt/
+    temp-cleanup machinery lives for the v0.2.38 fail-open ladder.
     """
-    binary = resolve_ffmpeg(binary)
-    tmp = video_path + ".muxing.mp4"  # sibling: same fs -> atomic replace
-    if os.path.exists(tmp):
-        try:
-            os.remove(tmp)  # stale temp from a killed run
-        except OSError:
-            pass
-    cmd = [
-        binary, "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
-        "-i", video_path, "-i", srt_path,
-        "-map", "0", "-map", "1",
-        "-c", "copy", "-c:s", "mov_text",
-        "-metadata:s:s:0", f"language={mux_language(language)}",
-        tmp,
-    ]
     if runner is None:
         try:
             proc = subprocess.run(
@@ -779,7 +780,108 @@ def mux_srt_into_mp4(
             os.remove(tmp)
         except OSError:
             pass
-        stderr = (getattr(proc, "stderr", "") or "").strip()
+        return False, (getattr(proc, "stderr", "") or "").strip()
+    return True, ""
+
+
+def mux_srt_into_video(
+    video_path: str,
+    srt_path: str,
+    *,
+    language: str = "und",
+    bitmap_src: str | None = None,      # the ripped MKV (bitmap source)
+    bitmap_index: int | None = None,    # ABSOLUTE stream index in bitmap_src
+    bitmap_codec: str = "",             # probed codec of that stream
+    binary: str = "ffmpeg",
+    runner: Runner | None = None,
+    notes: list[str] | None = None,     # caller-owned; degradation notes
+) -> str:
+    """Embed srt_path as a soft subrip subtitle track in video_path.
+
+    Muxes to a temp sibling then os.replace()s it over video_path, so a
+    failed or interrupted mux can never destroy the finished encode: on
+    any failure the temp is deleted and video_path stays bit-identical
+    (v0.2.16). v0.2.38 moves the final container to MKV, so the OCR'd
+    SRT is rewritten to subrip (Matroska's text-subtitle codec; mov_text
+    was the MP4 container's only option) - same shape as the mov_text
+    line it replaces, language tagging via mux_language unchanged.
+
+    When bitmap_src/bitmap_index name a stream of bitmap_codec that is
+    in BITMAP_COPY_CODECS (hdmv_pgs_subtitle | dvd_subtitle - the only
+    bitmap codecs a MakeMKV rip carries), that ORIGINAL track is mapped
+    straight from the ripped MKV by its absolute stream index (the same
+    convention extract_subtitles uses) and stream-copied IN as output
+    subtitle track 1, alongside the OCR'd text on track 0. Passthrough
+    only: ffmpeg ships no PGS/VobSub encoder, so copy is not merely
+    sufficient - it is the only carriage mechanism.
+
+    The bitmap leg is fail-open (v0.2.38 ladder): any failure deletes
+    the temp, appends one honest note to the caller-owned `notes` list,
+    and retries the exact text-only mux; only a text-only failure
+    raises SubtitleOcrError with video_path still bit-identical. All
+    other arguments are inert when the gate does not pass.
+    """
+    binary = resolve_ffmpeg(binary)
+    tmp = video_path + ".muxing" + VIDEO_EXT  # sibling: same fs -> atomic replace
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)  # stale temp from a killed run
+        except OSError:
+            pass
+
+    lang = mux_language(language)
+
+    def _cmd(with_bitmap: bool) -> list[str]:
+        if with_bitmap:
+            # v0.2.38 two-track shape (spec §5.2, pinned): the bitmap track maps
+            # DIRECTLY from the ripped MKV (2:<absolute stream index>)
+            # and is stream-copied as output subtitle track 1, while
+            # the rewritten SRT stays track 0 - map order fixes output
+            # order, so players that auto-select "first subtitle"
+            # behave exactly as in v0.2.37. Per-stream codecs are
+            # MANDATORY here: a blanket -c:s subrip would apply to the
+            # bitmap track and demand a PGS->subrip encode that does
+            # not exist. No disposition flags: today's default-
+            # disposition behavior is bit-preserved, and neither track
+            # is forced.
+            return [
+                binary, "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+                "-i", video_path, "-i", srt_path, "-i", bitmap_src,
+                "-map", "0", "-map", "1", "-map", f"2:{bitmap_index}",
+                "-c", "copy",
+                "-c:s:0", TEXT_SUBTITLE_CODEC, "-c:s:1", "copy",
+                "-metadata:s:s:0", f"language={lang}",
+                "-metadata:s:s:1", f"language={lang}",
+                tmp,
+            ]
+        return [
+            binary, "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+            "-i", video_path, "-i", srt_path,
+            "-map", "0", "-map", "1",
+            "-c", "copy", "-c:s", TEXT_SUBTITLE_CODEC,
+            "-metadata:s:s:0", f"language={lang}",
+            tmp,
+        ]
+
+    bitmap_leg = bool(
+        bitmap_src
+        and bitmap_index is not None
+        and bitmap_codec in BITMAP_COPY_CODECS
+    )
+    # v0.2.38 fail-open ladder: attempt the two-track mux; if it fails
+    # (rc, missing temp, or empty temp - ANY of today's predicates),
+    # tell the caller via `notes` and retry the exact text-only mux.
+    # ok is the predicate verdict, deliberately not stderr-derived (a
+    # nonzero rc with empty stderr must still trigger the retry).
+    ok, stderr = _attempt_mux(_cmd(bitmap_leg), tmp, runner=runner)
+    if not ok and bitmap_leg:
+        if notes is not None:
+            notes.append(
+                f"Original bitmap subtitles ({bitmap_codec}) could not be "
+                f"carried ({stderr[:300]}); the MKV embeds the OCR'd SRT only."
+            )
+        ok, stderr = _attempt_mux(_cmd(False), tmp, runner=runner)
+    if not ok:
         raise SubtitleOcrError(f"subtitle muxing failed: {stderr[:300]}")
     try:
         os.replace(tmp, video_path)
@@ -789,6 +891,6 @@ def mux_srt_into_mp4(
         except OSError:
             pass
         raise SubtitleOcrError(
-            f"subtitle muxing could not replace the MP4: {exc}"
+            f"subtitle muxing could not replace the output video: {exc}"
         ) from exc
     return video_path

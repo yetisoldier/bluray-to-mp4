@@ -2,6 +2,74 @@
 
 All notable changes to bluray-to-mp4. Dates are America/Chicago.
 
+## [0.2.38] - 2026-11-11
+
+### Changed
+
+- **Finished video files are now Matroska (`.mkv`), not MP4 (Eric
+  2026-11-11: MKV-only, no toggle, no sidecar MP4).** The final
+  encode/mux boundary moved to the matroska muxer (`-f matroska`), and
+  the inert-on-matroska `-movflags +faststart` (a web-streaming
+  MP4-only moov placement) is dropped rather than cargo-culted. The rip
+  layer, mezzanine `.upscale/*.mkv` files, probing, OCR, and upscaling
+  are all untouched; bitrate budgets, mappings, filters, and encoders
+  are container-independent and unchanged. Destination players
+  (Plex/Jellyfin) direct-play MKV/HEVC; the mezzanine layer was already
+  Matroska, so the toolchain is now uniform end to end. All container
+  facts live in one new seam module, `bluray_to_mp4/container.py`
+  (`VIDEO_EXT`, `FFMPEG_FORMAT`, `TEXT_SUBTITLE_CODEC`,
+  `BITMAP_COPY_CODECS`) — a future MP4 compatibility profile returns,
+  if ever, as a second named profile there, never re-scattered as
+  literals. Movie and episode names derive the extension from the seam
+  (`movie_output_name`, `episode_output_names`, and the UI's
+  episode-label edit regexes), `subtitle_sidecar` rewrites `.mkv` →
+  `.srt` case-insensitively as before, and the brand label now reads
+  "Disc to MKV".
+- **The OCR'd SRT embeds as a soft `subrip` track (was `mov_text`).**
+  mov_text was the MP4 container's only subtitle codec; subrip is
+  Matroska's native text codec for the same SRT cue model. The embed
+  command keeps today's exact shape (`-map 0 -map 1 -c copy -c:s
+  subrip`, same `mux_language` eng/und tagging, same temp-sibling +
+  `os.replace` atomicity), under the honest rename
+  `mux_srt_into_mp4` → `mux_srt_into_video`. The sidecar SRT and the
+  `<stem>.ocr/` diagnosis kit are unchanged in name, location, and
+  content.
+- **The original bitmap subtitle track now ships inside the output
+  alongside the OCR'd text (new ADR-03).** The parent container change
+  is precisely what makes native PGS/VobSub carriage legal: Matroska
+  holds image subtitles, and ffmpeg ships no bitmap-subtitle encoder,
+  so stream-copy is not just sufficient - it is the only legal
+  carriage. When the selected subtitle stream of the rip is
+  `hdmv_pgs_subtitle` (Blu-ray PGS) or `dvd_subtitle` (DVD VobSub) -
+  the only two bitmap codecs a MakeMKV rip carries - the final mux maps
+  that track straight from the ripped MKV by its absolute stream index
+  (the same convention `extract_subtitles` uses) and stream-copies it
+  in as output subtitle track 1: three inputs, `-map 2:<index>`,
+  `-c:s:0 subrip -c:s:1 copy`, both tracks language-tagged, no
+  disposition flags, so track 0 and player auto-selection behave
+  exactly as in v0.2.37 while the pixel-perfect original rides
+  alongside. The OCR workflow stays (C2: additive, never a replacement)
+  - the editable sidecar SRT remains the editing/search/PGS-incapable-
+  client track, and run-12/13-style OCR misses stay off the
+  playback-critical path. Output size grows by the bitmap track
+  (~20-80 MB per BD title; ≤2% of a typical encode). The leg is
+  fail-open with a two-attempt ladder and a single policy point: any
+  bitmap failure (nonzero exit, missing/empty temp - the same
+  predicates as v0.2.16) deletes the temp, appends one honest note
+  ("Original bitmap subtitles (<codec>) could not be carried (...);
+  the MKV embeds the OCR'd SRT only."), and retries the exact text-only
+  mux; only a text-only failure raises, leaving the finished encode
+  bit-identical as before. Bitmap-when-OCR-failed, bitmap-only outputs,
+  and disposition policy are recorded as revisit criteria, not built.
+  The ripped MKV persists until the post-queue cleanup (v0.2.12
+  purge semantics), so the bitmap source is structurally available at
+  mux time - no race, no new files.
+- **User-facing warning strings now say MKV.** The three pipeline
+  warnings that reported "MP4" outcomes (selected-subtitle-missing,
+  embed-failed, OCR-failed) name the MKV today; the embed-failure
+  wording still names the kept sidecar SRT, and the OCR-failure path
+  still never calls the mux.
+
 ## [0.2.37] - 2026-11-03
 
 ### Fixed
