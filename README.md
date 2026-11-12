@@ -1,6 +1,6 @@
 # bluray-to-mp4
 
-<p align="center"><em>Turn your Blu-ray and DVD discs into high-quality MP4s—no technical expertise required.</em></p>
+<p align="center"><em>Turn your Blu-ray and DVD discs into high-quality MKVs—no technical expertise required.</em></p>
 
 <p align="center">[Windows x64] [NVENC Optimized] [Private Use]</p>
 
@@ -9,12 +9,12 @@
 > output private; circumvention law varies by jurisdiction.
 
 A novice-friendly Windows desktop app that turns Blu-ray and DVD discs you
-own into MP4 files, private and personal-use only. Insert a disc, press
+own into MKV files, private and personal-use only. Insert a disc, press
 Scan, review what it picked, press Start. You never need to learn what a
 "PGS stream" is: the app recommends which tracks to keep with plain-English
 reasons, and every recommendation has a dropdown you can override.
 
-**Current version: v0.2.37** (Windows x64, exe included)
+**Current version: v0.2.38** (Windows x64, exe included)
 
 ## Quick start
 
@@ -71,34 +71,37 @@ The app automatically optimizes settings based on the disc type:
 
 **Subtitles.** Image-based subtitles (PGS on Blu-ray, VobSub on DVD) are
 OCR'd to text by the bundled Subtitle Edit. The result is embedded **inside
-the MP4** as a soft `mov_text` track (v0.2.16), the only subtitle form every
-player (VLC, Plex, Jellyfin, Apple TV) reads from `.mp4`. The editable
+the MKV** as a soft `subrip` track (v0.2.38), alongside the original native
+bitmap track (PGS/VobSub) for pixel-perfect playback. This ensures the
+highest compatibility: the OCR'd text is read by every player (VLC, Plex,
+Jellyfin, Apple TV), while the original image track is preserved for
+high-end players. The editable
 sidecar `.srt` is kept next to the file either way. The embed mux writes to
-a temp sibling and atomically replaces the MP4, so a failed mux can never
-destroy the finished encode; the run records a warning and ships the MP4.
+a temp sibling and atomically replaces the MKV, so a failed mux can never
+destroy the finished encode; the run records a warning and ships the MKV.
 The run notes include an honest OCR-quality line (`OCR quality: X% of Y
-cues clean ...`; v0.2.30), and a `<movie>.ocr` folder next to the MP4 keeps
+cues clean ...`; v0.2.30), and a `<movie>.ocr` folder next to the MKV keeps
 the raw pass-1 SRT plus the extracted subtitle track (capped at 150 MB) so
 OCR accuracy can be re-tuned offline without re-ripping the disc — that
 folder is safe to delete.
 
-**Series discs.** Episodes are named `Show Name - S01E05 - Episode Title.mp4`
+**Series discs.** Episodes are named `Show Name - S01E05 - Episode Title.mkv`
 with season and starting-episode controls. With a free TMDB key pasted into
 the app, episode titles and movie years autofill
-(`Movie Title (2019).mp4`). Without a key, names are entered manually and
+(`Movie Title (2019).mkv`). Without a key, names are entered manually and
 everything still works offline.
 
 **Done.** The History page records each output with its size and achieved
 GB/hour, so every run self-grades against the size target.
 
 ## ⚙️ How it works
-Get from disc to MP4 in a few simple steps:
+Get from disc to MKV in a few simple steps:
 
 ```mermaid
 graph LR
   A[Scan] -- "MakeMKV rip" --> B[Review]
   B -- "Novice-friendly picks" --> C[Run]
-  C -- "FFmpeg encode + OCR" --> D[Finished MP4]
+  C -- "FFmpeg encode + OCR" --> D[Finished MKV]
 ```
 
 ### Honest validation status (2026-10-04)
@@ -299,7 +302,7 @@ upscale default.
 |---|---|---|
 | "Evaluation period has expired" | MakeMKV beta key expired | Get the current key from the [forum](https://www.makemkv.com/forum/viewtopic.php?f=5) and register it in MakeMKV. |
 | Drive list spins / Setup times out | Orphaned `makemkvcon` process | Open Task Manager and end all `makemkvcon` tasks. |
-| No subtitles in the MP4 | OCR failed or skipped | Check the run log. If OCR failed, the MP4 is still saved, but subs are missing. |
+| "No subtitles in the MKV" | OCR failed or skipped | Check the run log. If OCR failed, the MKV is still saved, but subs are missing. |
 | Encode is very slow | No NVIDIA GPU detected | The app is using x265 software mode. Update drivers or use a GPU-enabled PC. |
 
 Full guide → [docs/troubleshooting.md](docs/troubleshooting.md)

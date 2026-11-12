@@ -11,7 +11,7 @@ makemkvcon ──(robot mode)──> makemkv.py ──Disc/Title/StreamInfo─�
                                 │                                       │
                                 └──> series.py (movie vs episodes)      │
                                                                        ▼
-ui/ (PySide6) ──workers──> pipeline.py ──ffprobe.py──> encode.py ──ffmpeg──> MP4
+ui/ (PySide6) ──workers──> pipeline.py ──ffprobe.py──> encode.py ──ffmpeg──> MKV
        │                     │                                        │
        └───── monitor.py ◀───┴────────── subtitles.py ──Subtitle Edit──> .srt
 ```
@@ -62,18 +62,16 @@ headroom; x265 runs `slow` preset with 1.3x maxrate for tighter quality.
 only inflates the bitrate needed for identical perceived quality. DVDs
 stay at native 480p/576p and get a 1.5 GB/hour budget.
 
-**Subtitles as sidecar SRT.** MP4 cannot hold PGS (image) subtitles.
-OCR to SRT matches the video filename so every player and media server
-auto-loads it. Tesseract accuracy is ~95-99%, so cues are normalized
+**Subtitles as sidecar SRT.** MKV can hold PGS (image) subtitles, but OCR to SRT ensures the widest compatibility across all players and media servers. Tesseract accuracy is ~95-99%, so cues are normalized
 conservatively (timestamps repaired, text never rewritten) and sparse
 output raises a review note. OCR failure downgrades to a warning: the
-MP4 still lands. Since v0.2.27 the OCR stage is fully unattended:
+MKV still lands. Since v0.2.27 the OCR stage is fully unattended:
 seconv (SE's headless converter, bundled in place of the 5.x GUI -
 which has no /convert mode and could only open the OCR wizard) runs
 raw Tesseract OCR plus a headless OCR-fix pass that best-guesses
 unknown glyphs with dictionaries bundled inside seconv; the run
 always reports the auto-resolved cue count so a pass is never silent,
-and a hard OCR failure still just warns and ships the MP4.
+and a hard OCR failure still just warns and ships the MKV.
 
 **Series detection by duration clustering.** One title at 2.2x the
 next-longest = movie; otherwise all titles >= 10 minutes are episodes
